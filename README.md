@@ -17,7 +17,6 @@
   <a href="https://www.npmjs.com/package/create-webclaw"><img src="https://img.shields.io/npm/dt/create-webclaw?style=flat-square&label=npm%20installs&color=212529" alt="npm installs" /></a>
   <a href="https://github.com/0xMassi/webclaw/stargazers"><img src="https://img.shields.io/github/stars/0xMassi/webclaw?style=flat-square&color=212529" alt="Stars" /></a>
   <a href="https://discord.gg/KDfd48EpnW"><img src="https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
-  <a href="https://glama.ai/mcp/servers/0xMassi/webclaw"><img src="https://glama.ai/mcp/servers/0xMassi/webclaw/badge" alt="webclaw MCP server" /></a>
 </p>
 
 ---
@@ -159,6 +158,8 @@ Crawling... 50/50 pages extracted
 ---
 
 ## MCP Server — 10 tools for AI agents
+
+<a href="https://glama.ai/mcp/servers/0xMassi/webclaw"><img src="https://glama.ai/mcp/servers/0xMassi/webclaw/badge" alt="webclaw MCP server" /></a>
 
 webclaw ships as an MCP server that plugs into Claude Desktop, Claude Code, Cursor, Windsurf, OpenCode, Antigravity, Codex CLI, and any MCP-compatible client.
 
