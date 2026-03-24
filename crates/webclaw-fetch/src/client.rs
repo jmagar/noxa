@@ -274,13 +274,19 @@ impl FetchClient {
         url: &str,
         options: &webclaw_core::ExtractionOptions,
     ) -> Result<webclaw_core::ExtractionResult, FetchError> {
-        // Reddit fallback: use their JSON API to get post + full comment tree
+        // Reddit fallback: use their JSON API to get post + full comment tree.
+        // Uses a plain reqwest client — Reddit's JSON endpoint blocks TLS-fingerprinted clients
+        // but accepts standard requests with a browser User-Agent.
         if crate::reddit::is_reddit_url(url) {
             let json_url = crate::reddit::json_url(url);
             debug!("reddit detected, fetching {json_url}");
 
-            let client = self.pick_client(&json_url);
-            let response = client.get(&json_url).send().await?;
+            let plain = primp::Client::builder()
+                .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| FetchError::Build(format!("reddit client: {e}")))?;
+            let response = plain.get(&json_url).send().await?;
             if response.status().is_success() {
                 let bytes = response
                     .bytes()
