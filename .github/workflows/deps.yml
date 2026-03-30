@@ -22,7 +22,7 @@ jobs:
 
       - name: Update webclaw-tls crates
         run: |
-          cargo update -p webclaw-http -p rustls -p h2 -p hyper -p hyper-util -p reqwest 2>&1
+          cargo update -p webclaw-http -p rustls -p 'h2@0.4' -p 'hyper@1' -p 'hyper-util@0.1' -p 'reqwest@0.13' 2>&1
 
       - name: Check for changes
         id: diff
