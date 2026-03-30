@@ -1,31 +1,52 @@
-name: Dependency Check
+name: Dependency Sync
 
 on:
-  schedule:
-    - cron: "0 9 * * 1" # Every Monday 9am UTC
-  workflow_dispatch: # Manual trigger
+  repository_dispatch:
+    types: [tls-updated]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "--cfg reqwest_unstable"
 
 jobs:
-  check-primp:
-    name: Check primp compatibility
+  sync-tls:
+    name: Update webclaw-tls dependencies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SYNC_PAT }}
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Try building with latest primp — if patches are out of sync this fails
-      - name: Update primp to latest
-        run: cargo update -p primp
-
-      - name: Build with latest deps
-        run: cargo build -p webclaw-cli
-
-      - name: Notify on failure
-        if: failure()
+      - name: Update webclaw-tls crates
         run: |
-          echo "::error::primp updated and build broke. Patches in Cargo.toml may need syncing with https://github.com/deedy5/primp/blob/main/Cargo.toml"
+          cargo update -p webclaw-http -p rustls -p h2 -p hyper -p hyper-util -p reqwest 2>&1
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet Cargo.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: update webclaw-tls dependencies"
+          git push
+
+      - name: Trigger server update
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          gh api repos/0xMassi/webclaw-server/dispatches \
+            -f event_type=core-updated \
+            -f client_payload[sha]=${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
