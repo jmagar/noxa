@@ -164,14 +164,79 @@ jobs:
 
   homebrew:
     name: Update Homebrew
-    needs: release
+    needs: [release, docker]
     runs-on: ubuntu-latest
     steps:
-      - name: Update Homebrew formula
-        uses: mislav/bump-homebrew-formula-action@v3
-        with:
-          formula-name: webclaw
-          homebrew-tap: 0xMassi/homebrew-webclaw
-          download-url: https://github.com/0xMassi/webclaw/releases/download/${{ github.ref_name }}/webclaw-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
+      - name: Compute all checksums and update formula
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          base="https://github.com/0xMassi/webclaw/releases/download/${tag}"
+
+          # Download all 4 tarballs and compute SHAs
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            curl -sSL "${base}/webclaw-${tag}-${target}.tar.gz" -o "${target}.tar.gz"
+          done
+
+          SHA_MAC_ARM=$(sha256sum aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_MAC_X86=$(sha256sum x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM=$(sha256sum aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_X86=$(sha256sum x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+
+          echo "macOS arm64:  $SHA_MAC_ARM"
+          echo "macOS x86_64: $SHA_MAC_X86"
+          echo "Linux arm64:  $SHA_LINUX_ARM"
+          echo "Linux x86_64: $SHA_LINUX_X86"
+
+          # Generate formula
+          cat > webclaw.rb << FORMULA
+          class Webclaw < Formula
+            desc "The fastest web scraper for AI agents. 67% fewer tokens. Sub-ms extraction."
+            homepage "https://webclaw.io"
+            license "AGPL-3.0"
+            version "${tag#v}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/webclaw-${tag}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_ARM}"
+              else
+                url "${base}/webclaw-${tag}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_X86}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${base}/webclaw-${tag}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_ARM}"
+              else
+                url "${base}/webclaw-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_X86}"
+              end
+            end
+
+            def install
+              bin.install "webclaw"
+              bin.install "webclaw-mcp"
+            end
+
+            test do
+              assert_match "webclaw", shell_output("#{bin}/webclaw --version")
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' webclaw.rb
+
+          # Push to homebrew tap
+          git clone "https://x-access-token:${COMMITTER_TOKEN}@github.com/0xMassi/homebrew-webclaw.git" tap
+          cp webclaw.rb tap/Formula/webclaw.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/webclaw.rb
+          git diff --cached --quiet || git commit -m "Update webclaw to ${tag}"
+          git push
