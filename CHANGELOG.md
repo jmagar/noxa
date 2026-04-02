@@ -3,6 +3,16 @@
 All notable changes to webclaw are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.6] — 2026-04-02
+
+### Added
+- **Structured data in markdown/LLM output**: `__NEXT_DATA__`, SvelteKit, and JSON-LD data now appears as a `## Structured Data` section with a JSON code block at the end of `-f markdown` and `-f llm` output. Works with `--only-main-content` and all other flags.
+
+### Fixed
+- **Homebrew CI**: formula now updates all 4 platform checksums after Docker build completes, preventing SHA mismatch on Linux installs (#12).
+
+---
+
 ## [0.3.5] — 2026-04-02
 
 ### Added

@@ -535,6 +535,13 @@ fn format_output(result: &ExtractionResult, format: &OutputFormat, show_metadata
                 out.push_str(&format_frontmatter(&result.metadata));
             }
             out.push_str(&result.content.markdown);
+            if !result.structured_data.is_empty() {
+                out.push_str("\n\n## Structured Data\n\n```json\n");
+                out.push_str(
+                    &serde_json::to_string_pretty(&result.structured_data).unwrap_or_default(),
+                );
+                out.push_str("\n```");
+            }
             out
         }
         OutputFormat::Json => serde_json::to_string_pretty(result).expect("serialization failed"),
@@ -838,6 +845,12 @@ fn print_output(result: &ExtractionResult, format: &OutputFormat, show_metadata:
                 print!("{}", format_frontmatter(&result.metadata));
             }
             println!("{}", result.content.markdown);
+            if !result.structured_data.is_empty() {
+                println!(
+                    "\n## Structured Data\n\n```json\n{}\n```",
+                    serde_json::to_string_pretty(&result.structured_data).unwrap_or_default()
+                );
+            }
         }
         OutputFormat::Json => {
             // serde_json::to_string_pretty won't fail on our types
