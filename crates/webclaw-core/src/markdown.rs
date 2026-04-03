@@ -163,11 +163,24 @@ fn node_to_md(
             }
         }
 
-        // Bold
-        "strong" | "b" => format!("**{}**", inline_text(element, base_url, assets, exclude)),
+        // Bold — if it contains block elements (e.g., Drudge wraps entire columns
+        // in <b>), treat as a container instead of inline bold.
+        "strong" | "b" => {
+            if cell_has_block_content(element) {
+                children_to_md(element, base_url, assets, list_depth, exclude)
+            } else {
+                format!("**{}**", inline_text(element, base_url, assets, exclude))
+            }
+        }
 
-        // Italic
-        "em" | "i" => format!("*{}*", inline_text(element, base_url, assets, exclude)),
+        // Italic — same block-content check as bold.
+        "em" | "i" => {
+            if cell_has_block_content(element) {
+                children_to_md(element, base_url, assets, list_depth, exclude)
+            } else {
+                format!("*{}*", inline_text(element, base_url, assets, exclude))
+            }
+        }
 
         // Inline code
         "code" => {
@@ -460,23 +473,41 @@ fn list_items(
     out.trim_end_matches('\n').to_string()
 }
 
+/// Check whether a table cell contains block-level elements, indicating a layout
+/// table rather than a data table.
+fn cell_has_block_content(cell: ElementRef<'_>) -> bool {
+    const BLOCK_TAGS: &[&str] = &[
+        "p", "div", "ul", "ol", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "pre",
+        "table", "section", "article", "header", "footer", "nav", "aside",
+    ];
+    for desc in cell.descendants() {
+        if let Some(el) = ElementRef::wrap(desc) {
+            if BLOCK_TAGS.contains(&el.value().name()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn table_to_md(
     table_el: ElementRef<'_>,
     base_url: Option<&Url>,
     assets: &mut ConvertedAssets,
     exclude: &HashSet<NodeId>,
 ) -> String {
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    // Collect all <td>/<th> cells grouped by row, and detect layout tables
+    let mut raw_rows: Vec<Vec<ElementRef<'_>>> = Vec::new();
     let mut has_header = false;
+    let mut is_layout = false;
 
-    // Collect rows from thead and tbody
     for child in table_el.descendants() {
         if let Some(el) = ElementRef::wrap(child) {
             if exclude.contains(&el.id()) {
                 continue;
             }
             if el.value().name() == "tr" {
-                let cells: Vec<String> = el
+                let cells: Vec<ElementRef<'_>> = el
                     .children()
                     .filter_map(ElementRef::wrap)
                     .filter(|c| {
@@ -487,20 +518,52 @@ fn table_to_md(
                         if c.value().name() == "th" {
                             has_header = true;
                         }
-                        inline_text(c, base_url, assets, exclude)
+                        if !is_layout && cell_has_block_content(c) {
+                            is_layout = true;
+                        }
+                        c
                     })
                     .collect();
 
                 if !cells.is_empty() {
-                    rows.push(cells);
+                    raw_rows.push(cells);
                 }
             }
         }
     }
 
-    if rows.is_empty() {
+    if raw_rows.is_empty() {
         return String::new();
     }
+
+    // Layout table: render each cell as a standalone block section
+    if is_layout {
+        let mut out = String::new();
+        for row in &raw_rows {
+            for cell in row {
+                let content =
+                    children_to_md(*cell, base_url, assets, 0, exclude);
+                let content = content.trim();
+                if !content.is_empty() {
+                    if !out.is_empty() {
+                        out.push_str("\n\n");
+                    }
+                    out.push_str(content);
+                }
+            }
+        }
+        return out;
+    }
+
+    // Data table: render as markdown table
+    let mut rows: Vec<Vec<String>> = raw_rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|c| inline_text(*c, base_url, assets, exclude))
+                .collect()
+        })
+        .collect();
 
     // Find max column count
     let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
@@ -993,6 +1056,54 @@ mod tests {
         assert!(md.contains("| Name | Age |"));
         assert!(md.contains("| --- | --- |"));
         assert!(md.contains("| Alice | 30 |"));
+    }
+
+    #[test]
+    fn layout_table() {
+        // Layout tables (cells with block elements) should render as sections, not markdown tables
+        let html = r##"
+        <table>
+            <tr>
+                <td>
+                    <p>Column one first paragraph</p>
+                    <p>Column one second paragraph</p>
+                </td>
+                <td>
+                    <p>Column two content</p>
+                    <hr>
+                    <p>Column two after rule</p>
+                </td>
+            </tr>
+        </table>"##;
+        let (md, _, _) = convert_html(html, None);
+        // Should NOT produce markdown table syntax
+        assert!(!md.contains("| "), "layout table should not use pipe syntax: {md}");
+        // Should contain the content as separate blocks
+        assert!(md.contains("Column one first paragraph"), "missing content: {md}");
+        assert!(md.contains("Column two content"), "missing content: {md}");
+        assert!(md.contains("Column two after rule"), "missing content: {md}");
+    }
+
+    #[test]
+    fn layout_table_with_links() {
+        // Drudge-style layout: cells full of links and divs
+        let html = r##"
+        <table>
+            <tr>
+                <td>
+                    <div><a href="https://example.com/1">Headline One</a></div>
+                    <div><a href="https://example.com/2">Headline Two</a></div>
+                </td>
+                <td>
+                    <div><a href="https://example.com/3">Headline Three</a></div>
+                </td>
+            </tr>
+        </table>"##;
+        let (md, _, _) = convert_html(html, None);
+        assert!(!md.contains("| "), "layout table should not use pipe syntax: {md}");
+        assert!(md.contains("[Headline One](https://example.com/1)"), "missing link: {md}");
+        assert!(md.contains("[Headline Two](https://example.com/2)"), "missing link: {md}");
+        assert!(md.contains("[Headline Three](https://example.com/3)"), "missing link: {md}");
     }
 
     #[test]
