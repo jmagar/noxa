@@ -14,6 +14,12 @@ use crate::types::{CodeBlock, Image, Link};
 
 static CODE_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("code").unwrap());
 
+/// Maximum recursion depth for DOM traversal.
+/// Express.co.uk live blogs and similar pages can nest 1000+ levels deep,
+/// overflowing the default ~1 MB stack on Windows.  When we hit this limit
+/// we fall back to plain-text collection (which uses an iterator, not recursion).
+const MAX_DOM_DEPTH: usize = 200;
+
 /// Collected assets found during conversion.
 pub struct ConvertedAssets {
     pub links: Vec<Link>,
@@ -34,7 +40,7 @@ pub fn convert(
         code_blocks: Vec::new(),
     };
 
-    let md = node_to_md(element, base_url, &mut assets, 0, exclude);
+    let md = node_to_md(element, base_url, &mut assets, 0, exclude, 0);
     let plain = strip_markdown(&md);
     let md = collapse_whitespace(&md);
     let plain = collapse_whitespace(&plain);
@@ -49,9 +55,15 @@ fn node_to_md(
     assets: &mut ConvertedAssets,
     list_depth: usize,
     exclude: &HashSet<NodeId>,
+    depth: usize,
 ) -> String {
     if exclude.contains(&element.id()) {
         return String::new();
+    }
+
+    // Guard against deeply nested DOM trees (e.g., Express.co.uk live blogs).
+    if depth > MAX_DOM_DEPTH {
+        return collect_text(element);
     }
 
     if noise::is_noise(element) || noise::is_noise_descendant(element) {
@@ -67,38 +79,38 @@ fn node_to_md(
         // Headings
         "h1" => format!(
             "\n\n# {}\n\n",
-            inline_text(element, base_url, assets, exclude)
+            inline_text(element, base_url, assets, exclude, depth)
         ),
         "h2" => format!(
             "\n\n## {}\n\n",
-            inline_text(element, base_url, assets, exclude)
+            inline_text(element, base_url, assets, exclude, depth)
         ),
         "h3" => format!(
             "\n\n### {}\n\n",
-            inline_text(element, base_url, assets, exclude)
+            inline_text(element, base_url, assets, exclude, depth)
         ),
         "h4" => format!(
             "\n\n#### {}\n\n",
-            inline_text(element, base_url, assets, exclude)
+            inline_text(element, base_url, assets, exclude, depth)
         ),
         "h5" => format!(
             "\n\n##### {}\n\n",
-            inline_text(element, base_url, assets, exclude)
+            inline_text(element, base_url, assets, exclude, depth)
         ),
         "h6" => format!(
             "\n\n###### {}\n\n",
-            inline_text(element, base_url, assets, exclude)
+            inline_text(element, base_url, assets, exclude, depth)
         ),
 
         // Paragraph
         "p" => format!(
             "\n\n{}\n\n",
-            inline_text(element, base_url, assets, exclude)
+            inline_text(element, base_url, assets, exclude, depth)
         ),
 
         // Links
         "a" => {
-            let text = inline_text(element, base_url, assets, exclude);
+            let text = inline_text(element, base_url, assets, exclude, depth);
             let href = element
                 .value()
                 .attr("href")
@@ -167,18 +179,18 @@ fn node_to_md(
         // in <b>), treat as a container instead of inline bold.
         "strong" | "b" => {
             if cell_has_block_content(element) {
-                children_to_md(element, base_url, assets, list_depth, exclude)
+                children_to_md(element, base_url, assets, list_depth, exclude, depth)
             } else {
-                format!("**{}**", inline_text(element, base_url, assets, exclude))
+                format!("**{}**", inline_text(element, base_url, assets, exclude, depth))
             }
         }
 
         // Italic — same block-content check as bold.
         "em" | "i" => {
             if cell_has_block_content(element) {
-                children_to_md(element, base_url, assets, list_depth, exclude)
+                children_to_md(element, base_url, assets, list_depth, exclude, depth)
             } else {
-                format!("*{}*", inline_text(element, base_url, assets, exclude))
+                format!("*{}*", inline_text(element, base_url, assets, exclude, depth))
             }
         }
 
@@ -213,13 +225,13 @@ fn node_to_md(
                             .attr("class")
                             .and_then(extract_language_from_class)
                     });
-                (collect_preformatted_text(code_el), lang)
+                (collect_preformatted_text(code_el, depth), lang)
             } else {
                 let lang = element
                     .value()
                     .attr("class")
                     .and_then(extract_language_from_class);
-                (collect_preformatted_text(element), lang)
+                (collect_preformatted_text(element, depth), lang)
             };
 
             let code = code.trim_matches('\n').to_string();
@@ -234,7 +246,7 @@ fn node_to_md(
 
         // Blockquote
         "blockquote" => {
-            let inner = children_to_md(element, base_url, assets, list_depth, exclude);
+            let inner = children_to_md(element, base_url, assets, list_depth, exclude, depth);
             let quoted = inner
                 .trim()
                 .lines()
@@ -246,19 +258,19 @@ fn node_to_md(
 
         // Unordered list
         "ul" => {
-            let items = list_items(element, base_url, assets, list_depth, false, exclude);
+            let items = list_items(element, base_url, assets, list_depth, false, exclude, depth);
             format!("\n\n{items}\n\n")
         }
 
         // Ordered list
         "ol" => {
-            let items = list_items(element, base_url, assets, list_depth, true, exclude);
+            let items = list_items(element, base_url, assets, list_depth, true, exclude, depth);
             format!("\n\n{items}\n\n")
         }
 
         // List item — handled by ul/ol parent, but if encountered standalone:
         "li" => {
-            let text = inline_text(element, base_url, assets, exclude);
+            let text = inline_text(element, base_url, assets, exclude, depth);
             format!("- {text}\n")
         }
 
@@ -271,11 +283,11 @@ fn node_to_md(
         // Table
         "table" => format!(
             "\n\n{}\n\n",
-            table_to_md(element, base_url, assets, exclude)
+            table_to_md(element, base_url, assets, exclude, depth)
         ),
 
         // Divs and other containers — just recurse
-        _ => children_to_md(element, base_url, assets, list_depth, exclude),
+        _ => children_to_md(element, base_url, assets, list_depth, exclude, depth),
     }
 }
 
@@ -286,13 +298,14 @@ fn children_to_md(
     assets: &mut ConvertedAssets,
     list_depth: usize,
     exclude: &HashSet<NodeId>,
+    depth: usize,
 ) -> String {
     let mut out = String::new();
     for child in element.children() {
         match child.value() {
             Node::Element(_) => {
                 if let Some(child_el) = ElementRef::wrap(child) {
-                    let chunk = node_to_md(child_el, base_url, assets, list_depth, exclude);
+                    let chunk = node_to_md(child_el, base_url, assets, list_depth, exclude, depth + 1);
                     if !chunk.is_empty() && !out.is_empty() && needs_separator(&out, &chunk) {
                         out.push(' ');
                     }
@@ -315,13 +328,14 @@ fn inline_text(
     base_url: Option<&Url>,
     assets: &mut ConvertedAssets,
     exclude: &HashSet<NodeId>,
+    depth: usize,
 ) -> String {
     let mut out = String::new();
     for child in element.children() {
         match child.value() {
             Node::Element(_) => {
                 if let Some(child_el) = ElementRef::wrap(child) {
-                    let chunk = node_to_md(child_el, base_url, assets, 0, exclude);
+                    let chunk = node_to_md(child_el, base_url, assets, 0, exclude, depth + 1);
                     if !chunk.is_empty() && !out.is_empty() && needs_separator(&out, &chunk) {
                         out.push(' ');
                     }
@@ -356,7 +370,10 @@ fn collect_text(element: ElementRef<'_>) -> String {
 /// Every text node is pushed verbatim -- no trimming, no collapsing.
 /// Handles `<br>` as newlines and inserts newlines between block-level children
 /// (e.g., `<div>` lines produced by some syntax highlighters).
-fn collect_preformatted_text(element: ElementRef<'_>) -> String {
+fn collect_preformatted_text(element: ElementRef<'_>, depth: usize) -> String {
+    if depth > MAX_DOM_DEPTH {
+        return element.text().collect::<String>();
+    }
     let mut out = String::new();
     for child in element.children() {
         match child.value() {
@@ -370,12 +387,12 @@ fn collect_preformatted_text(element: ElementRef<'_>) -> String {
                         if !out.is_empty() && !out.ends_with('\n') {
                             out.push('\n');
                         }
-                        out.push_str(&collect_preformatted_text(child_el));
+                        out.push_str(&collect_preformatted_text(child_el, depth + 1));
                         if !out.ends_with('\n') {
                             out.push('\n');
                         }
                     } else {
-                        out.push_str(&collect_preformatted_text(child_el));
+                        out.push_str(&collect_preformatted_text(child_el, depth + 1));
                     }
                 }
             }
@@ -405,6 +422,7 @@ fn list_items(
     depth: usize,
     ordered: bool,
     exclude: &HashSet<NodeId>,
+    dom_depth: usize,
 ) -> String {
     let indent = "  ".repeat(depth);
     let mut out = String::new();
@@ -443,6 +461,7 @@ fn list_items(
                                 depth + 1,
                                 child_tag == "ol",
                                 exclude,
+                                dom_depth + 1,
                             ));
                         } else {
                             inline_parts.push_str(&node_to_md(
@@ -451,6 +470,7 @@ fn list_items(
                                 assets,
                                 depth,
                                 exclude,
+                                dom_depth + 1,
                             ));
                         }
                     } else if let Some(text) = li_child.value().as_text() {
@@ -495,6 +515,7 @@ fn table_to_md(
     base_url: Option<&Url>,
     assets: &mut ConvertedAssets,
     exclude: &HashSet<NodeId>,
+    depth: usize,
 ) -> String {
     // Collect all <td>/<th> cells grouped by row, and detect layout tables
     let mut raw_rows: Vec<Vec<ElementRef<'_>>> = Vec::new();
@@ -542,7 +563,7 @@ fn table_to_md(
         for row in &raw_rows {
             for cell in row {
                 let content =
-                    children_to_md(*cell, base_url, assets, 0, exclude);
+                    children_to_md(*cell, base_url, assets, 0, exclude, depth);
                 let content = content.trim();
                 if !content.is_empty() {
                     if !out.is_empty() {
@@ -560,7 +581,7 @@ fn table_to_md(
         .iter()
         .map(|row| {
             row.iter()
-                .map(|c| inline_text(*c, base_url, assets, exclude))
+                .map(|c| inline_text(*c, base_url, assets, exclude, depth))
                 .collect()
         })
         .collect();
