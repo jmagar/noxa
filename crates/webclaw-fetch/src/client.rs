@@ -44,7 +44,7 @@ impl Default for FetchConfig {
             browser: BrowserProfile::Chrome,
             proxy: None,
             proxy_pool: Vec::new(),
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(12),
             follow_redirects: true,
             max_redirects: 10,
             headers: HashMap::from([("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())]),
@@ -207,13 +207,12 @@ impl FetchClient {
     /// Fetch a URL and return the raw HTML + response metadata.
     ///
     /// Automatically retries on transient failures (network errors, 5xx, 429)
-    /// with exponential backoff: 0s, 1s, 3s (3 attempts total).
+    /// with exponential backoff: 0s, 1s (2 attempts total).
     #[instrument(skip(self), fields(url = %url))]
     pub async fn fetch(&self, url: &str) -> Result<FetchResult, FetchError> {
         let delays = [
             Duration::ZERO,
             Duration::from_secs(1),
-            Duration::from_secs(3),
         ];
         let mut last_err = None;
 

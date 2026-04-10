@@ -3,6 +3,14 @@
 All notable changes to webclaw are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.10] — 2026-04-10
+
+### Changed
+- **Fetch timeout reduced from 30s to 12s**: prevents cascading slowdowns when proxies are unresponsive. Worst-case per-URL drops from ~94s to ~25s.
+- **Retry attempts reduced from 3 to 2**: combined with shorter timeout, total worst-case is 12s + 1s delay + 12s = 25s instead of 30s + 1s + 30s + 3s + 30s = 94s.
+
+---
+
 ## [0.3.9] — 2026-04-04
 
 ### Fixed
