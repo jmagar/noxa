@@ -134,6 +134,115 @@ pub struct ResolvedConfig {
     pub llm_model: Option<String>,
 }
 
+use clap::parser::ValueSource;
+
+/// Merge CLI flags (detected via ValueSource), config file, and hard defaults
+/// into a single ResolvedConfig. CLI explicit values always win.
+pub fn resolve(
+    cli: &crate::Cli,
+    matches: &clap::ArgMatches,
+    cfg: &NoxaConfig,
+) -> ResolvedConfig {
+    let explicit = |name: &str| {
+        matches.value_source(name) == Some(ValueSource::CommandLine)
+    };
+
+    ResolvedConfig {
+        format: if explicit("format") {
+            cli.format.clone()
+        } else {
+            cfg.format.clone().unwrap_or(crate::OutputFormat::Markdown)
+        },
+        browser: if explicit("browser") {
+            cli.browser.clone()
+        } else {
+            cfg.browser.clone().unwrap_or(crate::Browser::Chrome)
+        },
+        pdf_mode: if explicit("pdf_mode") {
+            cli.pdf_mode.clone()
+        } else {
+            cfg.pdf_mode.clone().unwrap_or(crate::PdfModeArg::Auto)
+        },
+        timeout: if explicit("timeout") {
+            cli.timeout
+        } else {
+            cfg.timeout.unwrap_or(30)
+        },
+        depth: if explicit("depth") {
+            cli.depth
+        } else {
+            cfg.depth.unwrap_or(1)
+        },
+        max_pages: if explicit("max_pages") {
+            cli.max_pages
+        } else {
+            cfg.max_pages.unwrap_or(20)
+        },
+        concurrency: if explicit("concurrency") {
+            cli.concurrency
+        } else {
+            cfg.concurrency.unwrap_or(5)
+        },
+        delay: if explicit("delay") {
+            cli.delay
+        } else {
+            cfg.delay.unwrap_or(100)
+        },
+        path_prefix: if explicit("path_prefix") {
+            cli.path_prefix.clone()
+        } else {
+            cfg.path_prefix.clone().or(cli.path_prefix.clone())
+        },
+        include_paths: if explicit("include_paths") {
+            cli.include_paths
+                .as_deref()
+                .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
+                .unwrap_or_default()
+        } else {
+            cfg.include_paths.clone().unwrap_or_default()
+        },
+        exclude_paths: if explicit("exclude_paths") {
+            cli.exclude_paths
+                .as_deref()
+                .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
+                .unwrap_or_default()
+        } else {
+            cfg.exclude_paths.clone().unwrap_or_default()
+        },
+        include_selectors: if explicit("include") {
+            cli.include
+                .as_deref()
+                .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
+                .unwrap_or_default()
+        } else {
+            cfg.include_selectors.clone().unwrap_or_default()
+        },
+        exclude_selectors: if explicit("exclude") {
+            cli.exclude
+                .as_deref()
+                .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
+                .unwrap_or_default()
+        } else {
+            cfg.exclude_selectors.clone().unwrap_or_default()
+        },
+        only_main_content: cli.only_main_content || cfg.only_main_content.unwrap_or(false),
+        metadata: cli.metadata || cfg.metadata.unwrap_or(false),
+        verbose: cli.verbose || cfg.verbose.unwrap_or(false),
+        use_sitemap: cli.sitemap || cfg.use_sitemap.unwrap_or(false),
+        raw_html: cli.raw_html,
+        llm_provider: if cli.llm_provider.is_some() {
+            cli.llm_provider.clone()
+        } else {
+            cfg.llm_provider.clone()
+        },
+        llm_model: if cli.llm_model.is_some() {
+            cli.llm_model.clone()
+        } else {
+            cfg.llm_model.clone()
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

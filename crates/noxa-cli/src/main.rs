@@ -10,7 +10,7 @@ use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 use noxa_core::{
@@ -89,6 +89,10 @@ fn warn_empty(url: &str, reason: &EmptyReason) {
 #[derive(Parser)]
 #[command(name = "noxa", about = "Extract web content for LLMs", version)]
 struct Cli {
+    /// Path to config.json (default: ./config.json, override with NOXA_CONFIG env var)
+    #[arg(long, global = true)]
+    config: Option<String>,
+
     /// URLs to fetch (multiple allowed)
     #[arg()]
     urls: Vec<String>,
@@ -348,7 +352,7 @@ fn init_logging(verbose: bool) {
 /// `--proxy` sets a single static proxy (no rotation).
 /// `--proxy-file` loads a pool of proxies and rotates per-request.
 /// `--proxy` takes priority: if both are set, only the single proxy is used.
-fn build_fetch_config(cli: &Cli) -> FetchConfig {
+fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConfig {
     let (proxy, proxy_pool) = if cli.proxy.is_some() {
         (cli.proxy.clone(), Vec::new())
     } else if let Some(ref path) = cli.proxy_file {
@@ -408,11 +412,11 @@ fn build_fetch_config(cli: &Cli) -> FetchConfig {
     }
 
     FetchConfig {
-        browser: cli.browser.clone().into(),
+        browser: resolved.browser.clone().into(),
         proxy,
         proxy_pool,
-        timeout: std::time::Duration::from_secs(cli.timeout),
-        pdf_mode: cli.pdf_mode.clone().into(),
+        timeout: std::time::Duration::from_secs(resolved.timeout),
+        pdf_mode: resolved.pdf_mode.clone().into(),
         headers,
         ..Default::default()
     }
@@ -441,20 +445,12 @@ fn parse_cookie_file(path: &str) -> Result<String, String> {
     Ok(pairs.join("; "))
 }
 
-fn build_extraction_options(cli: &Cli) -> ExtractionOptions {
+fn build_extraction_options(resolved: &config::ResolvedConfig) -> ExtractionOptions {
     ExtractionOptions {
-        include_selectors: cli
-            .include
-            .as_deref()
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default(),
-        exclude_selectors: cli
-            .exclude
-            .as_deref()
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default(),
-        only_main_content: cli.only_main_content,
-        include_raw_html: cli.raw_html || matches!(cli.format, OutputFormat::Html),
+        include_selectors: resolved.include_selectors.clone(),
+        exclude_selectors: resolved.exclude_selectors.clone(),
+        only_main_content: resolved.only_main_content,
+        include_raw_html: resolved.raw_html || matches!(resolved.format, OutputFormat::Html),
     }
 }
 
@@ -623,14 +619,17 @@ impl FetchOutput {
 
 /// Fetch a URL and extract content, handling PDF detection automatically.
 /// Falls back to cloud API when bot protection or JS rendering is detected.
-async fn fetch_and_extract(cli: &Cli) -> Result<FetchOutput, String> {
+async fn fetch_and_extract(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+) -> Result<FetchOutput, String> {
     // Local sources: read and extract as HTML
     if cli.stdin {
         let mut buf = String::new();
         io::stdin()
             .read_to_string(&mut buf)
             .map_err(|e| format!("failed to read stdin: {e}"))?;
-        let options = build_extraction_options(cli);
+        let options = build_extraction_options(resolved);
         return extract_with_options(&buf, None, &options)
             .map(|r| FetchOutput::Local(Box::new(r)))
             .map_err(|e| format!("extraction error: {e}"));
@@ -639,7 +638,7 @@ async fn fetch_and_extract(cli: &Cli) -> Result<FetchOutput, String> {
     if let Some(ref path) = cli.file {
         let html =
             std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
-        let options = build_extraction_options(cli);
+        let options = build_extraction_options(resolved);
         return extract_with_options(&html, None, &options)
             .map(|r| FetchOutput::Local(Box::new(r)))
             .map_err(|e| format!("extraction error: {e}"));
@@ -658,8 +657,8 @@ async fn fetch_and_extract(cli: &Cli) -> Result<FetchOutput, String> {
     if cli.cloud {
         let c =
             cloud_client.ok_or("--cloud requires NOXA_API_KEY (set via env or --api-key)")?;
-        let options = build_extraction_options(cli);
-        let format_str = match cli.format {
+        let options = build_extraction_options(resolved);
+        let format_str = match resolved.format {
             OutputFormat::Markdown => "markdown",
             OutputFormat::Json => "json",
             OutputFormat::Text => "text",
@@ -679,9 +678,9 @@ async fn fetch_and_extract(cli: &Cli) -> Result<FetchOutput, String> {
     }
 
     // Normal path: try local first
-    let client =
-        FetchClient::new(build_fetch_config(cli)).map_err(|e| format!("client error: {e}"))?;
-    let options = build_extraction_options(cli);
+    let client = FetchClient::new(build_fetch_config(cli, resolved))
+        .map_err(|e| format!("client error: {e}"))?;
+    let options = build_extraction_options(resolved);
     let result = client
         .fetch_and_extract_with_options(url, &options)
         .await
@@ -692,7 +691,7 @@ async fn fetch_and_extract(cli: &Cli) -> Result<FetchOutput, String> {
     if !matches!(reason, EmptyReason::None) {
         if let Some(ref c) = cloud_client {
             eprintln!("\x1b[36minfo:\x1b[0m falling back to cloud API...");
-            let format_str = match cli.format {
+            let format_str = match resolved.format {
                 OutputFormat::Markdown => "markdown",
                 OutputFormat::Json => "json",
                 OutputFormat::Text => "text",
@@ -723,7 +722,7 @@ async fn fetch_and_extract(cli: &Cli) -> Result<FetchOutput, String> {
 }
 
 /// Fetch raw HTML from a URL (no extraction). Used for --raw-html and brand extraction.
-async fn fetch_html(cli: &Cli) -> Result<FetchResult, String> {
+async fn fetch_html(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<FetchResult, String> {
     if cli.stdin {
         let mut buf = String::new();
         io::stdin()
@@ -756,8 +755,8 @@ async fn fetch_html(cli: &Cli) -> Result<FetchResult, String> {
         .ok_or("no input provided -- pass a URL, --file, or --stdin")?;
     let url = normalize_url(raw_url);
 
-    let client =
-        FetchClient::new(build_fetch_config(cli)).map_err(|e| format!("client error: {e}"))?;
+    let client = FetchClient::new(build_fetch_config(cli, resolved))
+        .map_err(|e| format!("client error: {e}"))?;
     client
         .fetch(&url)
         .await
@@ -1171,7 +1170,7 @@ fn format_progress(page: &PageResult, index: usize, max_pages: usize) -> String 
     )
 }
 
-async fn run_crawl(cli: &Cli) -> Result<(), String> {
+async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), String> {
     let url = cli
         .urls
         .first()
@@ -1183,16 +1182,8 @@ async fn run_crawl(cli: &Cli) -> Result<(), String> {
         return Err("--crawl cannot be used with --file or --stdin".into());
     }
 
-    let include_patterns: Vec<String> = cli
-        .include_paths
-        .as_deref()
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
-        .unwrap_or_default();
-    let exclude_patterns: Vec<String> = cli
-        .exclude_paths
-        .as_deref()
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
-        .unwrap_or_default();
+    let include_patterns = resolved.include_paths.clone();
+    let exclude_patterns = resolved.exclude_paths.clone();
 
     // Set up streaming progress channel
     let (progress_tx, mut progress_rx) = tokio::sync::broadcast::channel::<PageResult>(100);
@@ -1212,13 +1203,13 @@ async fn run_crawl(cli: &Cli) -> Result<(), String> {
     }
 
     let config = CrawlConfig {
-        fetch: build_fetch_config(cli),
-        max_depth: cli.depth,
-        max_pages: cli.max_pages,
-        concurrency: cli.concurrency,
-        delay: std::time::Duration::from_millis(cli.delay),
-        path_prefix: cli.path_prefix.clone(),
-        use_sitemap: cli.sitemap,
+        fetch: build_fetch_config(cli, resolved),
+        max_depth: resolved.depth,
+        max_pages: resolved.max_pages,
+        concurrency: resolved.concurrency,
+        delay: std::time::Duration::from_millis(resolved.delay),
+        path_prefix: resolved.path_prefix.clone(),
+        use_sitemap: resolved.use_sitemap,
         include_patterns,
         exclude_patterns,
         progress_tx: Some(progress_tx),
@@ -1237,7 +1228,7 @@ async fn run_crawl(cli: &Cli) -> Result<(), String> {
             );
         });
 
-    let max_pages = cli.max_pages;
+    let max_pages = resolved.max_pages;
     let completed_offset = resume_state.as_ref().map_or(0, |s| s.completed_pages);
 
     // Spawn background task to print streaming progress to stderr
@@ -1266,8 +1257,8 @@ async fn run_crawl(cli: &Cli) -> Result<(), String> {
                 &result.visited,
                 &result.remaining_frontier,
                 completed_offset + result.pages.len(),
-                cli.max_pages,
-                cli.depth,
+                resolved.max_pages,
+                resolved.depth,
             )?;
             eprintln!(
                 "Crawl state saved to {} ({} pages completed). Resume with --crawl-state {}",
@@ -1299,15 +1290,15 @@ async fn run_crawl(cli: &Cli) -> Result<(), String> {
         let mut saved = 0usize;
         for page in &result.pages {
             if let Some(ref extraction) = page.extraction {
-                let filename = url_to_filename(&page.url, &cli.format);
-                let content = format_output(extraction, &cli.format, cli.metadata);
+                let filename = url_to_filename(&page.url, &resolved.format);
+                let content = format_output(extraction, &resolved.format, resolved.metadata);
                 write_to_file(dir, &filename, &content)?;
                 saved += 1;
             }
         }
         eprintln!("Saved {saved} files to {}", dir.display());
     } else {
-        print_crawl_output(&result, &cli.format, cli.metadata);
+        print_crawl_output(&result, &resolved.format, resolved.metadata);
     }
 
     eprintln!(
@@ -1343,7 +1334,7 @@ async fn run_crawl(cli: &Cli) -> Result<(), String> {
     }
 }
 
-async fn run_map(cli: &Cli) -> Result<(), String> {
+async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), String> {
     let url = cli
         .urls
         .first()
@@ -1351,8 +1342,8 @@ async fn run_map(cli: &Cli) -> Result<(), String> {
         .map(|u| normalize_url(u))?;
     let url = url.as_str();
 
-    let client =
-        FetchClient::new(build_fetch_config(cli)).map_err(|e| format!("client error: {e}"))?;
+    let client = FetchClient::new(build_fetch_config(cli, resolved))
+        .map_err(|e| format!("client error: {e}"))?;
 
     let entries = noxa_fetch::sitemap::discover(&client, url)
         .await
@@ -1364,19 +1355,24 @@ async fn run_map(cli: &Cli) -> Result<(), String> {
         eprintln!("discovered {} URLs", entries.len());
     }
 
-    print_map_output(&entries, &cli.format);
+    print_map_output(&entries, &resolved.format);
     Ok(())
 }
 
-async fn run_batch(cli: &Cli, entries: &[(String, Option<String>)]) -> Result<(), String> {
+async fn run_batch(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+    entries: &[(String, Option<String>)],
+) -> Result<(), String> {
     let client = Arc::new(
-        FetchClient::new(build_fetch_config(cli)).map_err(|e| format!("client error: {e}"))?,
+        FetchClient::new(build_fetch_config(cli, resolved))
+            .map_err(|e| format!("client error: {e}"))?,
     );
 
     let urls: Vec<&str> = entries.iter().map(|(u, _)| u.as_str()).collect();
-    let options = build_extraction_options(cli);
+    let options = build_extraction_options(resolved);
     let results = client
-        .fetch_and_extract_batch_with_options(&urls, cli.concurrency, &options)
+        .fetch_and_extract_batch_with_options(&urls, resolved.concurrency, &options)
         .await;
 
     let ok = results.iter().filter(|r| r.result.is_ok()).count();
@@ -1407,15 +1403,15 @@ async fn run_batch(cli: &Cli, entries: &[(String, Option<String>)]) -> Result<()
                 let filename = custom_names
                     .get(r.url.as_str())
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| url_to_filename(&r.url, &cli.format));
-                let content = format_output(extraction, &cli.format, cli.metadata);
+                    .unwrap_or_else(|| url_to_filename(&r.url, &resolved.format));
+                let content = format_output(extraction, &resolved.format, resolved.metadata);
                 write_to_file(dir, &filename, &content)?;
                 saved += 1;
             }
         }
         eprintln!("Saved {saved} files to {}", dir.display());
     } else {
-        print_batch_output(&results, &cli.format, cli.metadata);
+        print_batch_output(&results, &resolved.format, resolved.metadata);
     }
 
     eprintln!(
@@ -1519,15 +1515,20 @@ fn fire_webhook(url: &str, payload: &serde_json::Value) {
     });
 }
 
-async fn run_watch(cli: &Cli, urls: &[String]) -> Result<(), String> {
+async fn run_watch(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+    urls: &[String],
+) -> Result<(), String> {
     if urls.is_empty() {
         return Err("--watch requires at least one URL".into());
     }
 
     let client = Arc::new(
-        FetchClient::new(build_fetch_config(cli)).map_err(|e| format!("client error: {e}"))?,
+        FetchClient::new(build_fetch_config(cli, resolved))
+            .map_err(|e| format!("client error: {e}"))?,
     );
-    let options = build_extraction_options(cli);
+    let options = build_extraction_options(resolved);
 
     // Ctrl+C handler
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1539,16 +1540,17 @@ async fn run_watch(cli: &Cli, urls: &[String]) -> Result<(), String> {
 
     // Single-URL mode: preserve original behavior exactly
     if urls.len() == 1 {
-        return run_watch_single(cli, &client, &options, &urls[0], &cancelled).await;
+        return run_watch_single(cli, resolved, &client, &options, &urls[0], &cancelled).await;
     }
 
     // Multi-URL mode: batch fetch, diff each, report aggregate
-    run_watch_multi(cli, &client, &options, urls, &cancelled).await
+    run_watch_multi(cli, resolved, &client, &options, urls, &cancelled).await
 }
 
 /// Original single-URL watch loop -- backward compatible.
 async fn run_watch_single(
     cli: &Cli,
+    resolved: &config::ResolvedConfig,
     client: &Arc<FetchClient>,
     options: &ExtractionOptions,
     url: &str,
@@ -1585,7 +1587,7 @@ async fn run_watch_single(
         if diff.status == ChangeStatus::Same {
             eprintln!("[watch] No changes ({})", timestamp());
         } else {
-            print_diff_output(&diff, &cli.format);
+            print_diff_output(&diff, &resolved.format);
             eprintln!("[watch] Changes detected! ({})", timestamp());
 
             if let Some(ref cmd) = cli.on_change {
@@ -1632,6 +1634,7 @@ async fn run_watch_single(
 /// Multi-URL watch loop -- batch fetch all URLs, diff each, report aggregate.
 async fn run_watch_multi(
     cli: &Cli,
+    resolved: &config::ResolvedConfig,
     client: &Arc<FetchClient>,
     options: &ExtractionOptions,
     urls: &[String],
@@ -1641,7 +1644,7 @@ async fn run_watch_multi(
 
     // Initial pass: fetch all URLs in parallel
     let initial_results = client
-        .fetch_and_extract_batch_with_options(&url_refs, cli.concurrency, options)
+        .fetch_and_extract_batch_with_options(&url_refs, resolved.concurrency, options)
         .await;
 
     let mut snapshots = std::collections::HashMap::new();
@@ -1681,7 +1684,7 @@ async fn run_watch_multi(
         check_number += 1;
 
         let current_results = client
-            .fetch_and_extract_batch_with_options(&url_refs, cli.concurrency, options)
+            .fetch_and_extract_batch_with_options(&url_refs, resolved.concurrency, options)
             .await;
 
         let mut changed: Vec<serde_json::Value> = Vec::new();
@@ -1785,7 +1788,11 @@ async fn run_watch_multi(
     Ok(())
 }
 
-async fn run_diff(cli: &Cli, snapshot_path: &str) -> Result<(), String> {
+async fn run_diff(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+    snapshot_path: &str,
+) -> Result<(), String> {
     // Load previous snapshot
     let snapshot_json = std::fs::read_to_string(snapshot_path)
         .map_err(|e| format!("failed to read snapshot {snapshot_path}: {e}"))?;
@@ -1793,16 +1800,16 @@ async fn run_diff(cli: &Cli, snapshot_path: &str) -> Result<(), String> {
         .map_err(|e| format!("failed to parse snapshot JSON: {e}"))?;
 
     // Extract current version (handles PDF detection for URLs)
-    let new_result = fetch_and_extract(cli).await?.into_extraction()?;
+    let new_result = fetch_and_extract(cli, resolved).await?.into_extraction()?;
 
     let diff = noxa_core::diff::diff(&old, &new_result);
-    print_diff_output(&diff, &cli.format);
+    print_diff_output(&diff, &resolved.format);
 
     Ok(())
 }
 
-async fn run_brand(cli: &Cli) -> Result<(), String> {
-    let result = fetch_html(cli).await?;
+async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), String> {
+    let result = fetch_html(cli, resolved).await?;
     let enriched = enrich_html_with_stylesheets(&result.html, &result.url).await;
     let brand = noxa_core::brand::extract_brand(
         &enriched,
@@ -1816,12 +1823,15 @@ async fn run_brand(cli: &Cli) -> Result<(), String> {
 }
 
 /// Build an LLM provider based on CLI flags, or fall back to the default chain.
-async fn build_llm_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
-    if let Some(ref name) = cli.llm_provider {
+async fn build_llm_provider(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+) -> Result<Box<dyn LlmProvider>, String> {
+    if let Some(ref name) = resolved.llm_provider {
         match name.as_str() {
             "gemini" => {
                 let provider = noxa_llm::providers::gemini_cli::GeminiCliProvider::new(
-                    cli.llm_model.clone(),
+                    resolved.llm_model.clone(),
                 );
                 if !provider.is_available().await {
                     return Err(
@@ -1833,7 +1843,7 @@ async fn build_llm_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
             "ollama" => {
                 let provider = noxa_llm::providers::ollama::OllamaProvider::new(
                     cli.llm_base_url.clone(),
-                    cli.llm_model.clone(),
+                    resolved.llm_model.clone(),
                 );
                 if !provider.is_available().await {
                     return Err("ollama is not running or unreachable".into());
@@ -1844,7 +1854,7 @@ async fn build_llm_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
                 let provider = noxa_llm::providers::openai::OpenAiProvider::new(
                     None,
                     cli.llm_base_url.clone(),
-                    cli.llm_model.clone(),
+                    resolved.llm_model.clone(),
                 )
                 .ok_or("OPENAI_API_KEY not set")?;
                 Ok(Box::new(provider))
@@ -1852,7 +1862,7 @@ async fn build_llm_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
             "anthropic" => {
                 let provider = noxa_llm::providers::anthropic::AnthropicProvider::new(
                     None,
-                    cli.llm_model.clone(),
+                    resolved.llm_model.clone(),
                 )
                 .ok_or("ANTHROPIC_API_KEY not set")?;
                 Ok(Box::new(provider))
@@ -1873,12 +1883,12 @@ async fn build_llm_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
     }
 }
 
-async fn run_llm(cli: &Cli) -> Result<(), String> {
+async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), String> {
     // Extract content from source first (handles PDF detection for URLs)
-    let result = fetch_and_extract(cli).await?.into_extraction()?;
+    let result = fetch_and_extract(cli, resolved).await?.into_extraction()?;
 
-    let provider = build_llm_provider(cli).await?;
-    let model = cli.llm_model.as_deref();
+    let provider = build_llm_provider(cli, resolved).await?;
+    let model = resolved.llm_model.as_deref();
 
     if let Some(ref schema_input) = cli.extract_json {
         // Support @file syntax for loading schema from file
@@ -1937,12 +1947,16 @@ async fn run_llm(cli: &Cli) -> Result<(), String> {
 
 /// Batch LLM extraction: fetch each URL, run LLM on extracted content, save/print results.
 /// URLs are processed sequentially to respect LLM provider rate limits.
-async fn run_batch_llm(cli: &Cli, entries: &[(String, Option<String>)]) -> Result<(), String> {
-    let client =
-        FetchClient::new(build_fetch_config(cli)).map_err(|e| format!("client error: {e}"))?;
-    let options = build_extraction_options(cli);
-    let provider = build_llm_provider(cli).await?;
-    let model = cli.llm_model.as_deref();
+async fn run_batch_llm(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+    entries: &[(String, Option<String>)],
+) -> Result<(), String> {
+    let client = FetchClient::new(build_fetch_config(cli, resolved))
+        .map_err(|e| format!("client error: {e}"))?;
+    let options = build_extraction_options(resolved);
+    let provider = build_llm_provider(cli, resolved).await?;
+    let model = resolved.llm_model.as_deref();
 
     // Pre-parse schema once if --extract-json is used
     let schema = if let Some(ref schema_input) = cli.extract_json {
@@ -2231,12 +2245,19 @@ async fn run_research(cli: &Cli, query: &str) -> Result<(), String> {
 async fn main() {
     dotenvy::dotenv().ok();
 
-    let cli = Cli::parse();
-    init_logging(cli.verbose);
+    // Use low-level API to get both typed Cli and ArgMatches for ValueSource detection.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // Load config BEFORE init_logging so verbose from config takes effect.
+    let cfg = config::NoxaConfig::load(cli.config.as_deref());
+    let resolved = config::resolve(&cli, &matches, &cfg);
+
+    init_logging(resolved.verbose);
 
     // --map: sitemap discovery mode
     if cli.map {
-        if let Err(e) = run_map(&cli).await {
+        if let Err(e) = run_map(&cli, &resolved).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2245,7 +2266,7 @@ async fn main() {
 
     // --crawl: recursive crawl mode
     if cli.crawl {
-        if let Err(e) = run_crawl(&cli).await {
+        if let Err(e) = run_crawl(&cli, &resolved).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2261,7 +2282,7 @@ async fn main() {
                 process::exit(1);
             }
         };
-        if let Err(e) = run_watch(&cli, &watch_urls).await {
+        if let Err(e) = run_watch(&cli, &resolved, &watch_urls).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2270,7 +2291,7 @@ async fn main() {
 
     // --diff-with: change tracking mode
     if let Some(ref snapshot_path) = cli.diff_with {
-        if let Err(e) = run_diff(&cli, snapshot_path).await {
+        if let Err(e) = run_diff(&cli, &resolved, snapshot_path).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2279,7 +2300,7 @@ async fn main() {
 
     // --brand: brand identity extraction mode
     if cli.brand {
-        if let Err(e) = run_brand(&cli).await {
+        if let Err(e) = run_brand(&cli, &resolved).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2308,11 +2329,11 @@ async fn main() {
     // When multiple URLs are provided, run batch LLM extraction over all of them.
     if has_llm_flags(&cli) {
         if entries.len() > 1 {
-            if let Err(e) = run_batch_llm(&cli, &entries).await {
+            if let Err(e) = run_batch_llm(&cli, &resolved, &entries).await {
                 eprintln!("error: {e}");
                 process::exit(1);
             }
-        } else if let Err(e) = run_llm(&cli).await {
+        } else if let Err(e) = run_llm(&cli, &resolved).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2321,7 +2342,7 @@ async fn main() {
 
     // Multi-URL batch mode
     if entries.len() > 1 {
-        if let Err(e) = run_batch(&cli, &entries).await {
+        if let Err(e) = run_batch(&cli, &resolved, &entries).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2330,7 +2351,7 @@ async fn main() {
 
     // --raw-html: skip extraction, dump the fetched HTML
     if cli.raw_html && cli.include.is_none() && cli.exclude.is_none() {
-        match fetch_html(&cli).await {
+        match fetch_html(&cli, &resolved).await {
             Ok(r) => println!("{}", r.html),
             Err(e) => {
                 eprintln!("error: {e}");
@@ -2341,7 +2362,7 @@ async fn main() {
     }
 
     // Single-page extraction (handles both HTML and PDF via content-type detection)
-    match fetch_and_extract(&cli).await {
+    match fetch_and_extract(&cli, &resolved).await {
         Ok(FetchOutput::Local(result)) => {
             if let Some(ref dir) = cli.output_dir {
                 let url = cli
@@ -2350,18 +2371,19 @@ async fn main() {
                     .map(|u| normalize_url(u))
                     .unwrap_or_default();
                 let custom_name = entries.first().and_then(|(_, name)| name.clone());
-                let filename = custom_name.unwrap_or_else(|| url_to_filename(&url, &cli.format));
-                let content = format_output(&result, &cli.format, cli.metadata);
+                let filename =
+                    custom_name.unwrap_or_else(|| url_to_filename(&url, &resolved.format));
+                let content = format_output(&result, &resolved.format, resolved.metadata);
                 if let Err(e) = write_to_file(dir, &filename, &content) {
                     eprintln!("error: {e}");
                     process::exit(1);
                 }
             } else {
-                print_output(&result, &cli.format, cli.metadata);
+                print_output(&result, &resolved.format, resolved.metadata);
             }
         }
         Ok(FetchOutput::Cloud(resp)) => {
-            print_cloud_output(&resp, &cli.format);
+            print_cloud_output(&resp, &resolved.format);
         }
         Err(e) => {
             eprintln!("{e}");
