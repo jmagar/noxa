@@ -2,6 +2,7 @@
 /// CLI entry point -- wires noxa-core and noxa-fetch into a single command.
 /// All extraction and fetching logic lives in sibling crates; this is pure plumbing.
 mod cloud;
+mod config;
 
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -285,7 +286,7 @@ struct Cli {
     output_dir: Option<PathBuf>,
 }
 
-#[derive(Clone, ValueEnum, Deserialize)]
+#[derive(Clone, Debug, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum OutputFormat {
     Markdown,
@@ -295,7 +296,7 @@ enum OutputFormat {
     Html,
 }
 
-#[derive(Clone, ValueEnum, Deserialize)]
+#[derive(Clone, Debug, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Browser {
     Chrome,
@@ -303,7 +304,7 @@ enum Browser {
     Random,
 }
 
-#[derive(Clone, ValueEnum, Default, Deserialize)]
+#[derive(Clone, Debug, ValueEnum, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PdfModeArg {
     /// Error if PDF has no extractable text (catches scanned PDFs)
