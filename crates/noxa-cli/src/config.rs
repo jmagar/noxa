@@ -108,10 +108,13 @@ pub struct ResolvedConfig {
     pub timeout: u64,
     pub pdf_mode: PdfModeArg,
     pub only_main_content: bool,
+    /// CLI-only output flag — not configurable via config.json (it is a per-run mode, not a persistent default).
     pub raw_html: bool,
 
     // CSS selectors
+    /// Vec<String> — CSS selectors passed directly to extraction filter.
     pub include_selectors: Vec<String>,
+    /// Vec<String> — CSS selectors passed directly to extraction filter.
     pub exclude_selectors: Vec<String>,
 
     // Crawl
