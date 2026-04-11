@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to webclaw are documented here.
+All notable changes to noxa are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.3.11] — 2026-04-10
@@ -33,19 +33,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.3.8] — 2026-04-03
 
 ### Fixed
-- **MCP research token overflow**: research results are now saved to `~/.webclaw/research/` and the MCP tool returns file paths + findings instead of the full report. Prevents "exceeds maximum allowed tokens" errors in Claude/Cursor.
+- **MCP research token overflow**: research results are now saved to `~/.noxa/research/` and the MCP tool returns file paths + findings instead of the full report. Prevents "exceeds maximum allowed tokens" errors in Claude/Cursor.
 - **Research caching**: same query returns cached result instantly without spending credits.
 - **Anthropic rate limit throttling**: 60s delay between LLM calls in research to stay under Tier 1 limits (50K input tokens/min).
 
 ### Added
-- **`dirs` dependency** for `~/.webclaw/research/` path resolution.
+- **`dirs` dependency** for `~/.noxa/research/` path resolution.
 
 ---
 ## [0.3.7] — 2026-04-03
 
 ### Added
 - **`--research` CLI flag**: run deep research via the cloud API. Prints report to stdout and saves full result (report + sources + findings) to a JSON file. Supports `--deep` for longer reports.
-- **MCP extract/summarize cloud fallback**: when no local LLM is available, these tools now fall back to the cloud API instead of erroring. Set `WEBCLAW_API_KEY` for automatic fallback.
+- **MCP extract/summarize cloud fallback**: when no local LLM is available, these tools now fall back to the cloud API instead of erroring. Set `NOXA_API_KEY` for automatic fallback.
 - **MCP research structured output**: the research tool now returns structured JSON (report + sources + findings + metadata) instead of raw text, so agents can reference individual findings and source URLs.
 
 ---
@@ -80,13 +80,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.3.3] — 2026-04-01
 
 ### Changed
-- **Replaced custom TLS stack with wreq**: migrated from webclaw-tls (patched rustls/h2/hyper/reqwest) to [wreq](https://github.com/0x676e67/wreq) by [@0x676e67](https://github.com/0x676e67). wreq uses BoringSSL for TLS and the [http2](https://github.com/0x676e67/http2) crate for HTTP/2 fingerprinting — both battle-tested with 60+ browser profiles.
-- **Removed all `[patch.crates-io]` entries**: consumers no longer need to patch rustls, h2, hyper, hyper-util, or reqwest. Just depend on webclaw normally.
+- **Replaced custom TLS stack with wreq**: migrated from noxa-tls (patched rustls/h2/hyper/reqwest) to [wreq](https://github.com/0x676e67/wreq) by [@0x676e67](https://github.com/0x676e67). wreq uses BoringSSL for TLS and the [http2](https://github.com/0x676e67/http2) crate for HTTP/2 fingerprinting — both battle-tested with 60+ browser profiles.
+- **Removed all `[patch.crates-io]` entries**: consumers no longer need to patch rustls, h2, hyper, hyper-util, or reqwest. Just depend on noxa normally.
 - **Browser profiles rebuilt on wreq's Emulation API**: Chrome 145, Firefox 135, Safari 18, Edge 145 with correct TLS options (cipher suites, curves, GREASE, ECH, PSK session resumption), HTTP/2 SETTINGS ordering, pseudo-header order, and header wire order.
 - **Better TLS compatibility**: BoringSSL handles more server configurations than patched rustls (e.g. servers that previously returned IllegalParameter alerts).
 
 ### Removed
-- webclaw-tls dependency and all 5 forked crates (webclaw-rustls, webclaw-h2, webclaw-hyper, webclaw-hyper-util, webclaw-reqwest).
+- noxa-tls dependency and all 5 forked crates (noxa-rustls, noxa-h2, noxa-hyper, noxa-hyper-util, noxa-reqwest).
 
 ### Acknowledgments
 - TLS and HTTP/2 fingerprinting powered by [wreq](https://github.com/0x676e67/wreq) and [http2](https://github.com/0x676e67/http2) by [@0x676e67](https://github.com/0x676e67), who pioneered browser-grade HTTP/2 fingerprinting in Rust.
@@ -114,7 +114,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.3.0] — 2026-03-29
 
 ### Changed
-- **Replaced primp with webclaw-tls**: switched to custom TLS fingerprinting stack.
+- **Replaced primp with noxa-tls**: switched to custom TLS fingerprinting stack.
 - **Browser profiles**: Chrome 146 (Win/Mac), Firefox 135+, Safari 18, Edge 146 — captured from real browsers.
 - **HTTP/2 fingerprinting**: SETTINGS frame ordering and pseudo-header ordering based on concepts pioneered by [@0x676e67](https://github.com/0x676e67).
 
@@ -141,7 +141,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.2.1] — 2026-03-27
 
 ### Added
-- **Docker image on GHCR**: `docker run ghcr.io/0xmassi/webclaw` — auto-built on every release
+- **Docker image on GHCR**: `docker run ghcr.io/0xmassi/noxa` — auto-built on every release
 - **QuickJS data island extraction**: inline `<script>` execution catches `window.__PRELOADED_STATE__`, Next.js hydration data, and other JS-embedded content
 
 ### Fixed
@@ -205,7 +205,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - Crawl streaming: real-time progress on stderr as pages complete (`[2/50] OK https://... (234ms, 1523 words)`)
 - Crawl resume/cancel: `--crawl-state <path>` saves progress on Ctrl+C and resumes from where it left off
-- MCP server proxy support via `WEBCLAW_PROXY` and `WEBCLAW_PROXY_FILE` env vars
+- MCP server proxy support via `NOXA_PROXY` and `NOXA_PROXY_FILE` env vars
 
 ### Changed
 - Crawl results now expose visited set and remaining frontier for accurate state persistence
@@ -222,14 +222,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Reddit scraping: use plain HTTP client for `.json` endpoint (TLS fingerprinting was getting blocked)
 
 ### Added
-- YouTube transcript extraction infrastructure in webclaw-core (caption track parsing, timed text XML parser) — wired up when cloud API launches
+- YouTube transcript extraction infrastructure in noxa-core (caption track parsing, timed text XML parser) — wired up when cloud API launches
 
 ---
 
 ## [0.1.1] — 2026-03-24
 
 ### Fixed
-- MCP server now identifies as `webclaw-mcp` instead of `rmcp` in the MCP handshake
+- MCP server now identifies as `noxa-mcp` instead of `rmcp` in the MCP handshake
 - Research tool polling caps at 200 iterations (~10 min) instead of looping forever
 - CLI returns non-zero exit codes on errors (invalid format, fetch failures, missing LLM)
 - Text format output strips markdown table syntax (`| --- |` pipes)

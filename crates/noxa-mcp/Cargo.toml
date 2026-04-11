@@ -1,0 +1,27 @@
+[package]
+name = "noxa-mcp"
+description = "MCP server for noxa web extraction toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "noxa-mcp"
+path = "src/main.rs"
+
+[dependencies]
+noxa-core = { workspace = true }
+noxa-fetch = { workspace = true }
+noxa-llm = { workspace = true }
+noxa-pdf = { workspace = true }
+rmcp = { version = "1.2", features = ["server", "macros", "transport-io", "schemars"] }
+schemars = "1.0"
+dotenvy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+dirs = "6.0.0"

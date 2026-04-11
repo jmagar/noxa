@@ -1,8 +1,8 @@
 services:
-  webclaw:
+  noxa:
     build: .
     ports:
-      - "${WEBCLAW_PORT:-3000}:3000"
+      - "${NOXA_PORT:-3000}:3000"
     env_file:
       - .env
     environment:
@@ -11,7 +11,7 @@ services:
       - ollama
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "webclaw", "--help"]
+      test: ["CMD", "noxa", "--help"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -64,10 +64,10 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          staging="webclaw-${tag}-${{ matrix.target }}"
+          staging="noxa-${tag}-${{ matrix.target }}"
           mkdir "$staging"
-          cp target/${{ matrix.target }}/release/webclaw "$staging/" 2>/dev/null || true
-          cp target/${{ matrix.target }}/release/webclaw-mcp "$staging/" 2>/dev/null || true
+          cp target/${{ matrix.target }}/release/noxa "$staging/" 2>/dev/null || true
+          cp target/${{ matrix.target }}/release/noxa-mcp "$staging/" 2>/dev/null || true
           cp README.md LICENSE "$staging/"
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> $GITHUB_ENV
@@ -128,12 +128,12 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            dir="webclaw-${tag}-${target}"
-            curl -sSL "https://github.com/0xMassi/webclaw/releases/download/${tag}/${dir}.tar.gz" -o "${target}.tar.gz"
+            dir="noxa-${tag}-${target}"
+            curl -sSL "https://github.com/0xMassi/noxa/releases/download/${tag}/${dir}.tar.gz" -o "${target}.tar.gz"
             tar xzf "${target}.tar.gz"
             mkdir -p "binaries-${target}"
-            cp "${dir}/webclaw" "binaries-${target}/webclaw"
-            cp "${dir}/webclaw-mcp" "binaries-${target}/webclaw-mcp"
+            cp "${dir}/noxa" "binaries-${target}/noxa"
+            cp "${dir}/noxa-mcp" "binaries-${target}/noxa-mcp"
             chmod +x "binaries-${target}"/*
           done
           ls -laR binaries-*/
@@ -145,22 +145,22 @@ jobs:
 
           # amd64
           docker build -f Dockerfile.ci --build-arg BINARY_DIR=binaries-x86_64-unknown-linux-gnu \
-            --platform linux/amd64 -t ghcr.io/0xmassi/webclaw:${tag}-amd64 --push .
+            --platform linux/amd64 -t ghcr.io/0xmassi/noxa:${tag}-amd64 --push .
 
           # arm64
           docker build -f Dockerfile.ci --build-arg BINARY_DIR=binaries-aarch64-unknown-linux-gnu \
-            --platform linux/arm64 -t ghcr.io/0xmassi/webclaw:${tag}-arm64 --push .
+            --platform linux/arm64 -t ghcr.io/0xmassi/noxa:${tag}-arm64 --push .
 
           # Multi-arch manifest
-          docker manifest create ghcr.io/0xmassi/webclaw:${tag} \
-            ghcr.io/0xmassi/webclaw:${tag}-amd64 \
-            ghcr.io/0xmassi/webclaw:${tag}-arm64
-          docker manifest push ghcr.io/0xmassi/webclaw:${tag}
+          docker manifest create ghcr.io/0xmassi/noxa:${tag} \
+            ghcr.io/0xmassi/noxa:${tag}-amd64 \
+            ghcr.io/0xmassi/noxa:${tag}-arm64
+          docker manifest push ghcr.io/0xmassi/noxa:${tag}
 
-          docker manifest create ghcr.io/0xmassi/webclaw:latest \
-            ghcr.io/0xmassi/webclaw:${tag}-amd64 \
-            ghcr.io/0xmassi/webclaw:${tag}-arm64
-          docker manifest push ghcr.io/0xmassi/webclaw:latest
+          docker manifest create ghcr.io/0xmassi/noxa:latest \
+            ghcr.io/0xmassi/noxa:${tag}-amd64 \
+            ghcr.io/0xmassi/noxa:${tag}-arm64
+          docker manifest push ghcr.io/0xmassi/noxa:latest
 
   homebrew:
     name: Update Homebrew
@@ -172,11 +172,11 @@ jobs:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          base="https://github.com/0xMassi/webclaw/releases/download/${tag}"
+          base="https://github.com/0xMassi/noxa/releases/download/${tag}"
 
           # Download all 4 tarballs and compute SHAs
           for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
-            curl -sSL "${base}/webclaw-${tag}-${target}.tar.gz" -o "${target}.tar.gz"
+            curl -sSL "${base}/noxa-${tag}-${target}.tar.gz" -o "${target}.tar.gz"
           done
 
           SHA_MAC_ARM=$(sha256sum aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
@@ -190,53 +190,53 @@ jobs:
           echo "Linux x86_64: $SHA_LINUX_X86"
 
           # Generate formula
-          cat > webclaw.rb << FORMULA
-          class Webclaw < Formula
+          cat > noxa.rb << FORMULA
+          class Noxa < Formula
             desc "The fastest web scraper for AI agents. 67% fewer tokens. Sub-ms extraction."
-            homepage "https://webclaw.io"
+            homepage "https://noxa.io"
             license "AGPL-3.0"
             version "${tag#v}"
 
             on_macos do
               if Hardware::CPU.arm?
-                url "${base}/webclaw-${tag}-aarch64-apple-darwin.tar.gz"
+                url "${base}/noxa-${tag}-aarch64-apple-darwin.tar.gz"
                 sha256 "${SHA_MAC_ARM}"
               else
-                url "${base}/webclaw-${tag}-x86_64-apple-darwin.tar.gz"
+                url "${base}/noxa-${tag}-x86_64-apple-darwin.tar.gz"
                 sha256 "${SHA_MAC_X86}"
               end
             end
 
             on_linux do
               if Hardware::CPU.arm?
-                url "${base}/webclaw-${tag}-aarch64-unknown-linux-gnu.tar.gz"
+                url "${base}/noxa-${tag}-aarch64-unknown-linux-gnu.tar.gz"
                 sha256 "${SHA_LINUX_ARM}"
               else
-                url "${base}/webclaw-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+                url "${base}/noxa-${tag}-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "${SHA_LINUX_X86}"
               end
             end
 
             def install
-              bin.install "webclaw"
-              bin.install "webclaw-mcp"
+              bin.install "noxa"
+              bin.install "noxa-mcp"
             end
 
             test do
-              assert_match "webclaw", shell_output("#{bin}/webclaw --version")
+              assert_match "noxa", shell_output("#{bin}/noxa --version")
             end
           end
           FORMULA
 
           # Remove leading whitespace from heredoc
-          sed -i 's/^          //' webclaw.rb
+          sed -i 's/^          //' noxa.rb
 
           # Push to homebrew tap
-          git clone "https://x-access-token:${COMMITTER_TOKEN}@github.com/0xMassi/homebrew-webclaw.git" tap
-          cp webclaw.rb tap/Formula/webclaw.rb
+          git clone "https://x-access-token:${COMMITTER_TOKEN}@github.com/0xMassi/homebrew-noxa.git" tap
+          cp noxa.rb tap/Formula/noxa.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/webclaw.rb
-          git diff --cached --quiet || git commit -m "Update webclaw to ${tag}"
+          git add Formula/noxa.rb
+          git diff --cached --quiet || git commit -m "Update noxa to ${tag}"
           git push

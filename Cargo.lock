@@ -1619,6 +1619,109 @@ dependencies = [
 ]
 
 [[package]]
+name = "noxa-cli"
+version = "0.3.11"
+dependencies = [
+ "clap",
+ "dotenvy",
+ "noxa-core",
+ "noxa-fetch",
+ "noxa-llm",
+ "noxa-pdf",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "noxa-core"
+version = "0.3.11"
+dependencies = [
+ "ego-tree",
+ "once_cell",
+ "regex",
+ "rquickjs",
+ "scraper",
+ "serde",
+ "serde_json",
+ "similar",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "noxa-fetch"
+version = "0.3.11"
+dependencies = [
+ "bytes",
+ "calamine",
+ "http",
+ "noxa-core",
+ "noxa-pdf",
+ "quick-xml 0.37.5",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "wreq",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "noxa-llm"
+version = "0.3.11"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "noxa-mcp"
+version = "0.3.11"
+dependencies = [
+ "dirs",
+ "dotenvy",
+ "noxa-core",
+ "noxa-fetch",
+ "noxa-llm",
+ "noxa-pdf",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "noxa-pdf"
+version = "0.3.11"
+dependencies = [
+ "pdf-extract",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3098,109 +3201,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webclaw-cli"
-version = "0.3.11"
-dependencies = [
- "clap",
- "dotenvy",
- "rand 0.8.5",
- "regex",
- "reqwest",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "webclaw-core",
- "webclaw-fetch",
- "webclaw-llm",
- "webclaw-pdf",
-]
-
-[[package]]
-name = "webclaw-core"
-version = "0.3.11"
-dependencies = [
- "ego-tree",
- "once_cell",
- "regex",
- "rquickjs",
- "scraper",
- "serde",
- "serde_json",
- "similar",
- "thiserror",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "webclaw-fetch"
-version = "0.3.11"
-dependencies = [
- "bytes",
- "calamine",
- "http",
- "quick-xml 0.37.5",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "url",
- "webclaw-core",
- "webclaw-pdf",
- "wreq",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "webclaw-llm"
-version = "0.3.11"
-dependencies = [
- "async-trait",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "webclaw-mcp"
-version = "0.3.11"
-dependencies = [
- "dirs",
- "dotenvy",
- "reqwest",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "webclaw-core",
- "webclaw-fetch",
- "webclaw-llm",
- "webclaw-pdf",
-]
-
-[[package]]
-name = "webclaw-pdf"
-version = "0.3.11"
-dependencies = [
- "pdf-extract",
- "thiserror",
- "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,42 @@
+{
+  "name": "create-noxa",
+  "version": "0.1.3",
+  "mcpName": "io.github.jmagar/noxa",
+  "description": "Set up noxa MCP server for AI agents (Claude, Cursor, Windsurf, OpenCode, Codex, Antigravity)",
+  "bin": {
+    "create-noxa": "./index.mjs"
+  },
+  "type": "module",
+  "keywords": [
+    "noxa",
+    "mcp",
+    "mcp-server",
+    "ai",
+    "ai-agent",
+    "scraping",
+    "web-scraping",
+    "scraper",
+    "crawler",
+    "extract",
+    "markdown",
+    "llm",
+    "claude",
+    "cursor",
+    "windsurf",
+    "opencode",
+    "codex",
+    "antigravity",
+    "tls-fingerprint",
+    "cloudflare-bypass"
+  ],
+  "author": "noxa",
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jmagar/noxa"
+  },
+  "homepage": "https://noxa.io",
+  "engines": {
+    "node": ">=18"
+  }
+}

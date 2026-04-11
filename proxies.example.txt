@@ -1,6 +1,6 @@
-# Webclaw Proxy List
+# Noxa Proxy List
 # Copy this file to proxies.txt and add your proxies.
-# webclaw auto-loads proxies.txt when it exists — no config needed.
+# noxa auto-loads proxies.txt when it exists — no config needed.
 #
 # Format: host:port:user:pass (one per line)
 # Lines starting with # are ignored.

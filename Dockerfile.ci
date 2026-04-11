@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ARG BINARY_DIR
-COPY ${BINARY_DIR}/webclaw /usr/local/bin/webclaw
-COPY ${BINARY_DIR}/webclaw-mcp /usr/local/bin/webclaw-mcp
+COPY ${BINARY_DIR}/noxa /usr/local/bin/noxa
+COPY ${BINARY_DIR}/noxa-mcp /usr/local/bin/noxa-mcp
 
-CMD ["webclaw"]
+CMD ["noxa"]

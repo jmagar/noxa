@@ -1,12 +1,12 @@
 ---
-name: webclaw
+name: noxa
 description: Web extraction engine with antibot bypass. Scrape, crawl, extract, summarize, search, map, diff, monitor, research, and analyze any URL — including Cloudflare-protected sites. Use when you need reliable web content, the built-in web_fetch fails, or you need structured data extraction from web pages.
-homepage: https://webclaw.io
+homepage: https://noxa.io
 user-invocable: true
-metadata: {"openclaw":{"emoji":"🦀","requires":{"env":["WEBCLAW_API_KEY"]},"primaryEnv":"WEBCLAW_API_KEY","homepage":"https://webclaw.io","install":[{"id":"npx","kind":"node","bins":["webclaw-mcp"],"label":"npx create-webclaw"}]}}
+metadata: {"openclaw":{"emoji":"🦀","requires":{"env":["NOXA_API_KEY"]},"primaryEnv":"NOXA_API_KEY","homepage":"https://noxa.io","install":[{"id":"npx","kind":"node","bins":["noxa-mcp"],"label":"npx create-noxa"}]}}
 ---
 
-# webclaw
+# noxa
 
 High-quality web extraction with automatic antibot bypass. Beats Firecrawl on extraction quality and handles Cloudflare, DataDome, and JS-rendered pages automatically.
 
@@ -27,17 +27,17 @@ High-quality web extraction with automatic antibot bypass. Beats Firecrawl on ex
 
 ## API base
 
-All requests go to `https://api.webclaw.io/v1/`.
+All requests go to `https://api.noxa.io/v1/`.
 
-Authentication: `Authorization: Bearer $WEBCLAW_API_KEY`
+Authentication: `Authorization: Bearer $NOXA_API_KEY`
 
 ## Endpoints
 
 ### 1. Scrape — extract content from a single URL
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/scrape \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/scrape \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com",
@@ -96,8 +96,8 @@ Starts an async job. Poll for results.
 
 **Start crawl:**
 ```bash
-curl -X POST https://api.webclaw.io/v1/crawl \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/crawl \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://docs.example.com",
@@ -111,8 +111,8 @@ Response: `{ "job_id": "abc-123", "status": "running" }`
 
 **Poll status:**
 ```bash
-curl https://api.webclaw.io/v1/crawl/abc-123 \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY"
+curl https://api.noxa.io/v1/crawl/abc-123 \
+  -H "Authorization: Bearer $NOXA_API_KEY"
 ```
 
 Response when complete:
@@ -151,8 +151,8 @@ Response when complete:
 Fast URL discovery without full content extraction.
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/map \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/map \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com"}'
 ```
@@ -173,8 +173,8 @@ Response:
 ### 4. Batch — scrape multiple URLs in parallel
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/batch \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/batch \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "urls": [
@@ -207,8 +207,8 @@ Pull structured data from any page using a JSON schema or plain-text prompt.
 
 **With JSON schema:**
 ```bash
-curl -X POST https://api.webclaw.io/v1/extract \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/extract \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/pricing",
@@ -233,8 +233,8 @@ curl -X POST https://api.webclaw.io/v1/extract \
 
 **With prompt:**
 ```bash
-curl -X POST https://api.webclaw.io/v1/extract \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/extract \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/pricing",
@@ -258,8 +258,8 @@ Response:
 ### 6. Summarize — get a quick summary of any page
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/summarize \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/summarize \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/long-article",
@@ -280,8 +280,8 @@ Response:
 Compare current page content against a previous snapshot.
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/diff \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/diff \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com",
@@ -309,8 +309,8 @@ Response:
 Analyze a website's visual identity: colors, fonts, logo.
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/brand \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/brand \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com"}'
 ```
@@ -336,8 +336,8 @@ Response:
 Search the web and optionally scrape each result page.
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/search \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/search \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "best rust web frameworks 2026",
@@ -390,8 +390,8 @@ Starts an async research job that searches, scrapes, and synthesizes information
 
 **Start research:**
 ```bash
-curl -X POST https://api.webclaw.io/v1/research \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/research \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "How does Cloudflare Turnstile work and what are its known bypass methods?",
@@ -416,8 +416,8 @@ Response: `{ "id": "res-abc-123", "status": "running" }`
 
 **Poll results:**
 ```bash
-curl https://api.webclaw.io/v1/research/res-abc-123 \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY"
+curl https://api.noxa.io/v1/research/res-abc-123 \
+  -H "Authorization: Bearer $NOXA_API_KEY"
 ```
 
 Response when complete:
@@ -448,8 +448,8 @@ Response when complete:
 Use an AI agent to navigate and interact with a page to accomplish a specific goal. The agent can click, scroll, fill forms, and extract data across multiple steps.
 
 ```bash
-curl -X POST https://api.webclaw.io/v1/agent-scrape \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/agent-scrape \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/products",
@@ -488,8 +488,8 @@ Create persistent monitors that check a URL on a schedule and notify via webhook
 
 **Create a monitor:**
 ```bash
-curl -X POST https://api.webclaw.io/v1/watch \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY" \
+curl -X POST https://api.noxa.io/v1/watch \
+  -H "Authorization: Bearer $NOXA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/pricing",
@@ -524,8 +524,8 @@ Response:
 
 **List all monitors:**
 ```bash
-curl https://api.webclaw.io/v1/watch \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY"
+curl https://api.noxa.io/v1/watch \
+  -H "Authorization: Bearer $NOXA_API_KEY"
 ```
 
 Response:
@@ -546,8 +546,8 @@ Response:
 
 **Get a monitor with snapshots:**
 ```bash
-curl https://api.webclaw.io/v1/watch/watch-abc-123 \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY"
+curl https://api.noxa.io/v1/watch/watch-abc-123 \
+  -H "Authorization: Bearer $NOXA_API_KEY"
 ```
 
 Response:
@@ -573,14 +573,14 @@ Response:
 
 **Trigger an immediate check:**
 ```bash
-curl -X POST https://api.webclaw.io/v1/watch/watch-abc-123/check \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY"
+curl -X POST https://api.noxa.io/v1/watch/watch-abc-123/check \
+  -H "Authorization: Bearer $NOXA_API_KEY"
 ```
 
 **Delete a monitor:**
 ```bash
-curl -X DELETE https://api.webclaw.io/v1/watch/watch-abc-123 \
-  -H "Authorization: Bearer $WEBCLAW_API_KEY"
+curl -X DELETE https://api.noxa.io/v1/watch/watch-abc-123 \
+  -H "Authorization: Bearer $NOXA_API_KEY"
 ```
 
 ## Choosing the right format
@@ -608,7 +608,7 @@ curl -X DELETE https://api.webclaw.io/v1/watch/watch-abc-123 \
 
 ## Smart Fetch Architecture
 
-The webclaw MCP server uses a **local-first** approach:
+The noxa MCP server uses a **local-first** approach:
 
 1. **Local fetch** — fast, free, no API credits used (~80% of sites)
 2. **Cloud API fallback** — automatic when bot protection or JS rendering is detected
@@ -617,11 +617,11 @@ This means:
 - Most scrapes cost zero credits (local extraction)
 - Cloudflare, DataDome, AWS WAF sites automatically fall back to the cloud API
 - JS-rendered SPAs (React, Next.js, Vue) also fall back automatically
-- Set `WEBCLAW_API_KEY` to enable cloud fallback
+- Set `NOXA_API_KEY` to enable cloud fallback
 
 ## vs web_fetch
 
-| | webclaw | web_fetch |
+| | noxa | web_fetch |
 |---|---------|-----------|
 | Cloudflare bypass | Automatic (cloud fallback) | Fails (403) |
 | JS-rendered pages | Automatic fallback | Readability only |
@@ -631,4 +631,4 @@ This means:
 | Caching | Built-in, configurable TTL | Per-session |
 | Rate limiting | Managed server-side | Client responsibility |
 
-Use `web_fetch` for simple, fast lookups. Use webclaw when you need reliability, quality, or advanced features.
+Use `web_fetch` for simple, fast lookups. Use noxa when you need reliability, quality, or advanced features.

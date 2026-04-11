@@ -1,30 +1,30 @@
-# Webclaw
+# Noxa
 
 Rust workspace: CLI + MCP server for web content extraction into LLM-optimized formats.
 
 ## Architecture
 
 ```
-webclaw/
+noxa/
   crates/
-    webclaw-core/     # Pure extraction engine. WASM-safe. Zero network deps.
+    noxa-core/     # Pure extraction engine. WASM-safe. Zero network deps.
                       # + ExtractionOptions (include/exclude CSS selectors)
                       # + diff engine (change tracking)
                       # + brand extraction (DOM/CSS analysis)
-    webclaw-fetch/    # HTTP client via primp. Crawler. Sitemap discovery. Batch ops.
+    noxa-fetch/    # HTTP client via primp. Crawler. Sitemap discovery. Batch ops.
                       # + proxy pool rotation (per-request)
                       # + PDF content-type detection
                       # + document parsing (DOCX, XLSX, CSV)
-    webclaw-llm/      # LLM provider chain (Ollama -> OpenAI -> Anthropic)
+    noxa-llm/      # LLM provider chain (Ollama -> OpenAI -> Anthropic)
                       # + JSON schema extraction, prompt extraction, summarization
-    webclaw-pdf/      # PDF text extraction via pdf-extract
-    webclaw-mcp/      # MCP server (Model Context Protocol) for AI agents
-    webclaw-cli/      # CLI binary
+    noxa-pdf/      # PDF text extraction via pdf-extract
+    noxa-mcp/      # MCP server (Model Context Protocol) for AI agents
+    noxa/      # CLI binary
 ```
 
-Two binaries: `webclaw` (CLI), `webclaw-mcp` (MCP server).
+Two binaries: `noxa` (CLI), `noxa-mcp` (MCP server).
 
-### Core Modules (`webclaw-core`)
+### Core Modules (`noxa-core`)
 - `extractor.rs` — Readability-style scoring: text density, semantic tags, link density penalty
 - `noise.rs` — Shared noise filter: tags, ARIA roles, class/ID patterns. Tailwind-safe.
 - `data_island.rs` — JSON data island extraction for React SPAs, Next.js, Contentful CMS
@@ -37,7 +37,7 @@ Two binaries: `webclaw` (CLI), `webclaw-mcp` (MCP server).
 - `diff.rs` — Content change tracking engine (snapshot diffing)
 - `brand.rs` — Brand identity extraction from DOM structure and CSS
 
-### Fetch Modules (`webclaw-fetch`)
+### Fetch Modules (`noxa-fetch`)
 - `client.rs` — FetchClient with primp TLS impersonation
 - `browser.rs` — Browser profiles: Chrome (142/136/133/131), Firefox (144/135/133/128)
 - `crawler.rs` — BFS same-origin crawler with configurable depth/concurrency/delay
@@ -47,14 +47,14 @@ Two binaries: `webclaw` (CLI), `webclaw-mcp` (MCP server).
 - `document.rs` — Document parsing: DOCX, XLSX, CSV auto-detection and extraction
 - `search.rs` — Web search via Serper.dev with parallel result scraping
 
-### LLM Modules (`webclaw-llm`)
+### LLM Modules (`noxa-llm`)
 - Provider chain: Ollama (local-first) -> OpenAI -> Anthropic
 - JSON schema extraction, prompt-based extraction, summarization
 
-### PDF Modules (`webclaw-pdf`)
+### PDF Modules (`noxa-pdf`)
 - PDF text extraction via pdf-extract crate
 
-### MCP Server (`webclaw-mcp`)
+### MCP Server (`noxa-mcp`)
 - Model Context Protocol server over stdio transport
 - 8 tools: scrape, crawl, map, batch, extract, summarize, diff, brand
 - Works with Claude Desktop, Claude Code, and any MCP client
@@ -65,7 +65,7 @@ Two binaries: `webclaw` (CLI), `webclaw-mcp` (MCP server).
 - **Core has ZERO network dependencies** — takes `&str` HTML, returns structured output. Keep it WASM-compatible.
 - **primp requires `[patch.crates-io]`** for patched rustls/h2 forks at workspace level.
 - **RUSTFLAGS are set in `.cargo/config.toml`** — no need to pass manually.
-- **webclaw-llm uses plain reqwest** (NOT primp-patched). LLM APIs don't need TLS fingerprinting.
+- **noxa-llm uses plain reqwest** (NOT primp-patched). LLM APIs don't need TLS fingerprinting.
 - **qwen3 thinking tags** (`<think>`) are stripped at both provider and consumer levels.
 
 ## Build & Test
@@ -73,52 +73,52 @@ Two binaries: `webclaw` (CLI), `webclaw-mcp` (MCP server).
 ```bash
 cargo build --release           # Both binaries
 cargo test --workspace          # All tests
-cargo test -p webclaw-core      # Core only
-cargo test -p webclaw-llm       # LLM only
+cargo test -p noxa-core      # Core only
+cargo test -p noxa-llm       # LLM only
 ```
 
 ## CLI
 
 ```bash
 # Basic extraction
-webclaw https://example.com
-webclaw https://example.com --format llm
+noxa https://example.com
+noxa https://example.com --format llm
 
 # Content filtering
-webclaw https://example.com --include "article" --exclude "nav,footer"
-webclaw https://example.com --only-main-content
+noxa https://example.com --include "article" --exclude "nav,footer"
+noxa https://example.com --only-main-content
 
 # Batch + proxy rotation
-webclaw url1 url2 url3 --proxy-file proxies.txt
-webclaw --urls-file urls.txt --concurrency 10
+noxa url1 url2 url3 --proxy-file proxies.txt
+noxa --urls-file urls.txt --concurrency 10
 
 # Sitemap discovery
-webclaw https://docs.example.com --map
+noxa https://docs.example.com --map
 
 # Crawling (with sitemap seeding)
-webclaw https://docs.example.com --crawl --depth 2 --max-pages 50 --sitemap
+noxa https://docs.example.com --crawl --depth 2 --max-pages 50 --sitemap
 
 # Change tracking
-webclaw https://example.com -f json > snap.json
-webclaw https://example.com --diff-with snap.json
+noxa https://example.com -f json > snap.json
+noxa https://example.com --diff-with snap.json
 
 # Brand extraction
-webclaw https://example.com --brand
+noxa https://example.com --brand
 
 # LLM features (Ollama local-first)
-webclaw https://example.com --summarize
-webclaw https://example.com --extract-prompt "Get all pricing tiers"
-webclaw https://example.com --extract-json '{"type":"object","properties":{"title":{"type":"string"}}}'
+noxa https://example.com --summarize
+noxa https://example.com --extract-prompt "Get all pricing tiers"
+noxa https://example.com --extract-json '{"type":"object","properties":{"title":{"type":"string"}}}'
 
 # PDF (auto-detected via Content-Type)
-webclaw https://example.com/report.pdf
+noxa https://example.com/report.pdf
 
 # Browser impersonation: chrome (default), firefox, random
-webclaw https://example.com --browser firefox
+noxa https://example.com --browser firefox
 
 # Local file / stdin
-webclaw --file page.html
-cat page.html | webclaw --stdin
+noxa --file page.html
+cat page.html | noxa --stdin
 ```
 
 ## Key Thresholds
@@ -135,8 +135,8 @@ Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_deskt
 ```json
 {
   "mcpServers": {
-    "webclaw": {
-      "command": "/path/to/webclaw-mcp"
+    "noxa": {
+      "command": "/path/to/noxa-mcp"
     }
   }
 }
@@ -152,5 +152,5 @@ Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_deskt
 
 ## Git
 
-- Remote: `git@github.com:0xMassi/webclaw.git`
+- Remote: `git@github.com:jmagar/noxa.git`
 - Use `/commit` skill for commits

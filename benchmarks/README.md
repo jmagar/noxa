@@ -1,16 +1,16 @@
 # Benchmarks
 
-Extraction quality and performance benchmarks comparing webclaw against popular alternatives.
+Extraction quality and performance benchmarks comparing noxa against popular alternatives.
 
 ## Quick Run
 
 ```bash
 # Run all benchmarks
-cargo run --release -p webclaw-bench
+cargo run --release -p noxa-bench
 
 # Run specific benchmark
-cargo run --release -p webclaw-bench -- --filter quality
-cargo run --release -p webclaw-bench -- --filter speed
+cargo run --release -p noxa-bench -- --filter quality
+cargo run --release -p noxa-bench -- --filter speed
 ```
 
 ## Extraction Quality
@@ -20,7 +20,7 @@ Each page scored on: content completeness, noise removal, link preservation, met
 
 | Extractor | Accuracy | Noise Removal | Links | Metadata | Avg Score |
 |-----------|----------|---------------|-------|----------|-----------|
-| **webclaw** | **94.2%** | **96.1%** | **98.3%** | **91.7%** | **95.1%** |
+| **noxa** | **94.2%** | **96.1%** | **98.3%** | **91.7%** | **95.1%** |
 | mozilla/readability | 87.3% | 89.4% | 85.1% | 72.3% | 83.5% |
 | trafilatura | 82.1% | 91.2% | 68.4% | 80.5% | 80.6% |
 | newspaper3k | 71.4% | 76.8% | 52.3% | 65.2% | 66.4% |
@@ -32,7 +32,7 @@ Each page scored on: content completeness, noise removal, link preservation, met
 - **Links**: Percentage of meaningful content links preserved with correct text and href
 - **Metadata**: Correct extraction of title, author, date, description, and language
 
-### Why webclaw scores higher
+### Why noxa scores higher
 
 1. **Multi-signal scoring**: Combines text density, semantic HTML tags, link density penalty, and DOM depth analysis
 2. **Data island extraction**: Catches React/Next.js JSON payloads that DOM-only extractors miss
@@ -43,14 +43,14 @@ Each page scored on: content completeness, noise removal, link preservation, met
 
 Single-page extraction time (parsing + extraction, no network). Measured on M4 Pro, averaged over 1000 runs.
 
-| Page Size | webclaw | readability | trafilatura |
+| Page Size | noxa | readability | trafilatura |
 |-----------|---------|-------------|-------------|
 | Small (10KB) | **0.8ms** | 2.1ms | 4.3ms |
 | Medium (100KB) | **3.2ms** | 8.7ms | 18.4ms |
 | Large (500KB) | **12.1ms** | 34.2ms | 72.8ms |
 | Huge (2MB) | **41.3ms** | 112ms | 284ms |
 
-### Why webclaw is faster
+### Why noxa is faster
 
 1. **Rust**: No garbage collection, zero-cost abstractions, SIMD-optimized string operations
 2. **Single-pass scoring**: Content scoring happens during DOM traversal, not as a separate pass
@@ -63,9 +63,9 @@ Tokens used when feeding extraction output to Claude/GPT. Lower is better (same 
 | Format | Tokens (avg) | vs Raw HTML |
 |--------|-------------|-------------|
 | Raw HTML | 4,820 | baseline |
-| webclaw markdown | 1,840 | **-62%** |
-| webclaw text | 1,620 | **-66%** |
-| **webclaw llm** | **1,590** | **-67%** |
+| noxa markdown | 1,840 | **-62%** |
+| noxa text | 1,620 | **-66%** |
+| **noxa llm** | **1,590** | **-67%** |
 | readability markdown | 2,340 | -51% |
 | trafilatura text | 2,180 | -55% |
 
@@ -75,7 +75,7 @@ The `llm` format applies a 9-step optimization pipeline: image strip, emphasis s
 
 Crawling speed with concurrent extraction. Target: example documentation site (~200 pages).
 
-| Concurrency | webclaw | Crawl4AI | Scrapy |
+| Concurrency | noxa | Crawl4AI | Scrapy |
 |-------------|---------|----------|--------|
 | 1 | 2.1 pages/s | 1.4 pages/s | 1.8 pages/s |
 | 5 | **9.8 pages/s** | 5.2 pages/s | 7.1 pages/s |
@@ -86,7 +86,7 @@ Crawling speed with concurrent extraction. Target: example documentation site (~
 
 Success rate against common anti-bot systems (100 attempts each, via Cloud API with antibot sidecar).
 
-| Protection | webclaw | Firecrawl | Bright Data |
+| Protection | noxa | Firecrawl | Bright Data |
 |------------|---------|-----------|-------------|
 | Cloudflare Turnstile | **97%** | 62% | 94% |
 | DataDome | **91%** | 41% | 88% |
@@ -100,20 +100,20 @@ Note: Bot protection bypass requires the Cloud API with antibot sidecar. The ope
 
 ```bash
 # Clone the repo
-git clone https://github.com/0xMassi/webclaw.git
-cd webclaw
+git clone https://github.com/jmagar/noxa.git
+cd noxa
 
 # Run quality benchmarks (downloads test pages on first run)
-cargo run --release -p webclaw-bench -- --filter quality
+cargo run --release -p noxa-bench -- --filter quality
 
 # Run speed benchmarks
-cargo run --release -p webclaw-bench -- --filter speed
+cargo run --release -p noxa-bench -- --filter speed
 
 # Run token efficiency benchmarks (requires tiktoken)
-cargo run --release -p webclaw-bench -- --filter tokens
+cargo run --release -p noxa-bench -- --filter tokens
 
 # Full benchmark suite with HTML report
-cargo run --release -p webclaw-bench -- --report html
+cargo run --release -p noxa-bench -- --report html
 ```
 
 ## Reproducing Results

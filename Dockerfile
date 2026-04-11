@@ -1,5 +1,5 @@
-# webclaw — Multi-stage Docker build
-# Produces 2 binaries: webclaw (CLI) and webclaw-mcp (MCP server)
+# noxa — Multi-stage Docker build
+# Produces 2 binaries: noxa (CLI) and noxa-mcp (MCP server)
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build all binaries in release mode
@@ -19,23 +19,23 @@ WORKDIR /build
 # Copy manifests + lock first for better layer caching.
 # If only source changes, cargo doesn't re-download deps.
 COPY Cargo.toml Cargo.lock ./
-COPY crates/webclaw-core/Cargo.toml crates/webclaw-core/Cargo.toml
-COPY crates/webclaw-fetch/Cargo.toml crates/webclaw-fetch/Cargo.toml
-COPY crates/webclaw-llm/Cargo.toml crates/webclaw-llm/Cargo.toml
-COPY crates/webclaw-pdf/Cargo.toml crates/webclaw-pdf/Cargo.toml
-COPY crates/webclaw-mcp/Cargo.toml crates/webclaw-mcp/Cargo.toml
-COPY crates/webclaw-cli/Cargo.toml crates/webclaw-cli/Cargo.toml
+COPY crates/noxa-core/Cargo.toml crates/noxa-core/Cargo.toml
+COPY crates/noxa-fetch/Cargo.toml crates/noxa-fetch/Cargo.toml
+COPY crates/noxa-llm/Cargo.toml crates/noxa-llm/Cargo.toml
+COPY crates/noxa-pdf/Cargo.toml crates/noxa-pdf/Cargo.toml
+COPY crates/noxa-mcp/Cargo.toml crates/noxa-mcp/Cargo.toml
+COPY crates/noxa-cli/Cargo.toml crates/noxa-cli/Cargo.toml
 
 # Copy .cargo config if present (optional build flags)
 COPY .cargo .cargo
 
 # Create dummy source files so cargo can resolve deps and cache them.
-RUN mkdir -p crates/webclaw-core/src && echo "" > crates/webclaw-core/src/lib.rs \
-    && mkdir -p crates/webclaw-fetch/src && echo "" > crates/webclaw-fetch/src/lib.rs \
-    && mkdir -p crates/webclaw-llm/src && echo "" > crates/webclaw-llm/src/lib.rs \
-    && mkdir -p crates/webclaw-pdf/src && echo "" > crates/webclaw-pdf/src/lib.rs \
-    && mkdir -p crates/webclaw-mcp/src && echo "fn main() {}" > crates/webclaw-mcp/src/main.rs \
-    && mkdir -p crates/webclaw-cli/src && echo "fn main() {}" > crates/webclaw-cli/src/main.rs
+RUN mkdir -p crates/noxa-core/src && echo "" > crates/noxa-core/src/lib.rs \
+    && mkdir -p crates/noxa-fetch/src && echo "" > crates/noxa-fetch/src/lib.rs \
+    && mkdir -p crates/noxa-llm/src && echo "" > crates/noxa-llm/src/lib.rs \
+    && mkdir -p crates/noxa-pdf/src && echo "" > crates/noxa-pdf/src/lib.rs \
+    && mkdir -p crates/noxa-mcp/src && echo "fn main() {}" > crates/noxa-mcp/src/main.rs \
+    && mkdir -p crates/noxa-cli/src && echo "fn main() {}" > crates/noxa-cli/src/main.rs
 
 # Pre-build dependencies (this layer is cached until Cargo.toml/lock changes)
 RUN cargo build --release 2>/dev/null || true
@@ -55,8 +55,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy both binaries
-COPY --from=builder /build/target/release/webclaw /usr/local/bin/webclaw
-COPY --from=builder /build/target/release/webclaw-mcp /usr/local/bin/webclaw-mcp
+COPY --from=builder /build/target/release/noxa /usr/local/bin/noxa
+COPY --from=builder /build/target/release/noxa-mcp /usr/local/bin/noxa-mcp
 
 # Default: run the CLI
-CMD ["webclaw"]
+CMD ["noxa"]

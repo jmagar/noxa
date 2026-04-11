@@ -1,6 +1,6 @@
 <p align="center">
-  <a href="https://webclaw.io">
-    <img src=".github/banner.png" alt="webclaw" width="700" />
+  <a href="https://noxa.io">
+    <img src=".github/banner.png" alt="noxa" width="700" />
   </a>
 </p>
 
@@ -10,34 +10,33 @@
 </h3>
 
 <p align="center">
-  <a href="https://github.com/0xMassi/webclaw/stargazers"><img src="https://img.shields.io/github/stars/0xMassi/webclaw?style=for-the-badge&logo=github&logoColor=white&label=Stars&color=181717" alt="Stars" /></a>
-  <a href="https://github.com/0xMassi/webclaw/releases"><img src="https://img.shields.io/github/v/release/0xMassi/webclaw?style=for-the-badge&logo=rust&logoColor=white&label=Version&color=B7410E" alt="Version" /></a>
-  <a href="https://github.com/0xMassi/webclaw/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-10B981?style=for-the-badge" alt="License" /></a>
-  <a href="https://www.npmjs.com/package/create-webclaw"><img src="https://img.shields.io/npm/dt/create-webclaw?style=for-the-badge&logo=npm&logoColor=white&label=Installs&color=CB3837" alt="npm installs" /></a>
+  <a href="https://github.com/jmagar/noxa/stargazers"><img src="https://img.shields.io/github/stars/jmagar/noxa?style=for-the-badge&logo=github&logoColor=white&label=Stars&color=181717" alt="Stars" /></a>
+  <a href="https://github.com/jmagar/noxa/releases"><img src="https://img.shields.io/github/v/release/jmagar/noxa?style=for-the-badge&logo=rust&logoColor=white&label=Version&color=B7410E" alt="Version" /></a>
+  <a href="https://github.com/jmagar/noxa/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-10B981?style=for-the-badge" alt="License" /></a>
+  <a href="https://www.npmjs.com/package/create-noxa"><img src="https://img.shields.io/npm/dt/create-noxa?style=for-the-badge&logo=npm&logoColor=white&label=Installs&color=CB3837" alt="npm installs" /></a>
 </p>
 <p align="center">
-  <a href="https://discord.gg/KDfd48EpnW"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord" /></a>
-  <a href="https://x.com/webclaw_io"><img src="https://img.shields.io/badge/Follow-@webclaw__io-000000?style=for-the-badge&logo=x&logoColor=white" alt="X / Twitter" /></a>
-  <a href="https://webclaw.io"><img src="https://img.shields.io/badge/Website-webclaw.io-0A0A0A?style=for-the-badge&logo=safari&logoColor=white" alt="Website" /></a>
-  <a href="https://webclaw.io/docs"><img src="https://img.shields.io/badge/Docs-Read-3B82F6?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs" /></a>
+  <a href="https://x.com/noxa_io"><img src="https://img.shields.io/badge/Follow-@noxa__io-000000?style=for-the-badge&logo=x&logoColor=white" alt="X / Twitter" /></a>
+  <a href="https://noxa.io"><img src="https://img.shields.io/badge/Website-noxa.io-0A0A0A?style=for-the-badge&logo=safari&logoColor=white" alt="Website" /></a>
+  <a href="https://noxa.io/docs"><img src="https://img.shields.io/badge/Docs-Read-3B82F6?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs" /></a>
 </p>
 
 ---
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Claude Code: web_fetch gets 403, webclaw extracts successfully" width="700" />
+  <img src="assets/demo.gif" alt="Claude Code: web_fetch gets 403, noxa extracts successfully" width="700" />
   <br/>
-  <sub>Claude Code's built-in web_fetch → 403 Forbidden. webclaw → clean markdown.</sub>
+  <sub>Claude Code's built-in web_fetch → 403 Forbidden. noxa → clean markdown.</sub>
 </p>
 
 ---
 
-Your AI agent calls `fetch()` and gets a 403. Or 142KB of raw HTML that burns through your token budget. **webclaw fixes both.**
+Your AI agent calls `fetch()` and gets a 403. Or 142KB of raw HTML that burns through your token budget. **noxa fixes both.**
 
 It extracts clean, structured content from any URL using Chrome-level TLS fingerprinting — no headless browser, no Selenium, no Puppeteer. Output is optimized for LLMs: **67% fewer tokens** than raw HTML, with metadata, links, and images preserved.
 
 ```
-                     Raw HTML                          webclaw
+                     Raw HTML                          noxa
 ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
 │ <div class="ad-wrapper">         │    │ # Breaking: AI Breakthrough      │
 │ <nav class="global-nav">         │    │                                  │
@@ -59,7 +58,7 @@ It extracts clean, structured content from any URL using Chrome-level TLS finger
 ### For AI agents (Claude, Cursor, Windsurf, VS Code)
 
 ```bash
-npx create-webclaw
+npx create-noxa
 ```
 
 Auto-detects your AI tools, downloads the MCP server, and configures everything. One command.
@@ -67,25 +66,25 @@ Auto-detects your AI tools, downloads the MCP server, and configures everything.
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap 0xMassi/webclaw
-brew install webclaw
+brew tap jmagar/noxa
+brew install noxa
 ```
 
 ### Prebuilt binaries
 
-Download from [GitHub Releases](https://github.com/0xMassi/webclaw/releases) for macOS (arm64, x86_64) and Linux (x86_64, aarch64).
+Download from [GitHub Releases](https://github.com/jmagar/noxa/releases) for macOS (arm64, x86_64) and Linux (x86_64, aarch64).
 
 ### Cargo (from source)
 
 ```bash
-cargo install --git https://github.com/0xMassi/webclaw.git webclaw-cli
-cargo install --git https://github.com/0xMassi/webclaw.git webclaw-mcp
+cargo install --git https://github.com/jmagar/noxa.git noxa
+cargo install --git https://github.com/jmagar/noxa.git noxa-mcp
 ```
 
 ### Docker
 
 ```bash
-docker run --rm ghcr.io/0xmassi/webclaw https://example.com
+docker run --rm ghcr.io/0xmassi/noxa https://example.com
 ```
 
 ### Docker Compose (with Ollama for LLM features)
@@ -97,9 +96,9 @@ docker compose up -d
 
 ---
 
-## Why webclaw?
+## Why noxa?
 
-| | webclaw | Firecrawl | Trafilatura | Readability |
+| | noxa | Firecrawl | Trafilatura | Readability |
 |---|:---:|:---:|:---:|:---:|
 | **Extraction accuracy** | **95.1%** | — | 80.6% | 83.5% |
 | **Token efficiency** | **-67%** | — | -55% | -51% |
@@ -110,14 +109,14 @@ docker compose up -d
 | **No browser required** | Yes | No | Yes | Yes |
 | **Cost** | Free | $$$$ | Free | Free |
 
-**Choose webclaw if** you want fast local extraction, LLM-optimized output, and native AI agent integration.
+**Choose noxa if** you want fast local extraction, LLM-optimized output, and native AI agent integration.
 
 ---
 
 ## What it looks like
 
 ```bash
-$ webclaw https://stripe.com -f llm
+$ noxa https://stripe.com -f llm
 
 > URL: https://stripe.com
 > Title: Stripe | Financial Infrastructure for the Internet
@@ -137,7 +136,7 @@ and commerce solutions for internet businesses of all sizes.
 ```
 
 ```bash
-$ webclaw https://github.com --brand
+$ noxa https://github.com --brand
 
 {
   "name": "GitHub",
@@ -148,7 +147,7 @@ $ webclaw https://github.com --brand
 ```
 
 ```bash
-$ webclaw https://docs.rust-lang.org --crawl --depth 2 --max-pages 50
+$ noxa https://docs.rust-lang.org --crawl --depth 2 --max-pages 50
 
 Crawling... 50/50 pages extracted
 ---
@@ -162,12 +161,12 @@ Crawling... 50/50 pages extracted
 
 ## MCP Server — 10 tools for AI agents
 
-<a href="https://glama.ai/mcp/servers/0xMassi/webclaw"><img src="https://glama.ai/mcp/servers/0xMassi/webclaw/badge" alt="webclaw MCP server" /></a>
+<a href="https://glama.ai/mcp/servers/jmagar/noxa"><img src="https://glama.ai/mcp/servers/jmagar/noxa/badge" alt="noxa MCP server" /></a>
 
-webclaw ships as an MCP server that plugs into Claude Desktop, Claude Code, Cursor, Windsurf, OpenCode, Antigravity, Codex CLI, and any MCP-compatible client.
+noxa ships as an MCP server that plugs into Claude Desktop, Claude Code, Cursor, Windsurf, OpenCode, Antigravity, Codex CLI, and any MCP-compatible client.
 
 ```bash
-npx create-webclaw    # auto-detects and configures everything
+npx create-noxa    # auto-detects and configures everything
 ```
 
 Or manual setup — add to your Claude Desktop config:
@@ -175,8 +174,8 @@ Or manual setup — add to your Claude Desktop config:
 ```json
 {
   "mcpServers": {
-    "webclaw": {
-      "command": "~/.webclaw/webclaw-mcp"
+    "noxa": {
+      "command": "~/.noxa/noxa-mcp"
     }
   }
 }
@@ -217,45 +216,45 @@ Then in Claude: *"Scrape the top 5 results for 'web scraping tools' and compare 
 ### Content control
 
 ```bash
-webclaw URL --include "article, .content"       # CSS selector include
-webclaw URL --exclude "nav, footer, .sidebar"    # CSS selector exclude
-webclaw URL --only-main-content                  # Auto-detect main content
+noxa URL --include "article, .content"       # CSS selector include
+noxa URL --exclude "nav, footer, .sidebar"    # CSS selector exclude
+noxa URL --only-main-content                  # Auto-detect main content
 ```
 
 ### Crawling
 
 ```bash
-webclaw URL --crawl --depth 3 --max-pages 100   # BFS same-origin crawl
-webclaw URL --crawl --sitemap                    # Seed from sitemap
-webclaw URL --map                                # Discover URLs only
+noxa URL --crawl --depth 3 --max-pages 100   # BFS same-origin crawl
+noxa URL --crawl --sitemap                    # Seed from sitemap
+noxa URL --map                                # Discover URLs only
 ```
 
 ### LLM features (Ollama / OpenAI / Anthropic)
 
 ```bash
-webclaw URL --summarize                          # Page summary
-webclaw URL --extract-prompt "Get all prices"    # Natural language extraction
-webclaw URL --extract-json '{"type":"object"}'   # Schema-enforced extraction
+noxa URL --summarize                          # Page summary
+noxa URL --extract-prompt "Get all prices"    # Natural language extraction
+noxa URL --extract-json '{"type":"object"}'   # Schema-enforced extraction
 ```
 
 ### Change tracking
 
 ```bash
-webclaw URL -f json > snap.json                  # Take snapshot
-webclaw URL --diff-with snap.json                # Compare later
+noxa URL -f json > snap.json                  # Take snapshot
+noxa URL --diff-with snap.json                # Compare later
 ```
 
 ### Brand extraction
 
 ```bash
-webclaw URL --brand                              # Colors, fonts, logos, OG image
+noxa URL --brand                              # Colors, fonts, logos, OG image
 ```
 
 ### Proxy rotation
 
 ```bash
-webclaw URL --proxy http://user:pass@host:port   # Single proxy
-webclaw URLs --proxy-file proxies.txt            # Pool rotation
+noxa URL --proxy http://user:pass@host:port   # Single proxy
+noxa URLs --proxy-file proxies.txt            # Pool rotation
 ```
 
 ---
@@ -267,12 +266,12 @@ All numbers from real tests on 50 diverse pages. See [benchmarks/](benchmarks/) 
 ### Extraction quality
 
 ```
-Accuracy      webclaw     ███████████████████ 95.1%
+Accuracy      noxa     ███████████████████ 95.1%
               readability ████████████████▋   83.5%
               trafilatura ████████████████    80.6%
               newspaper3k █████████████▎      66.4%
 
-Noise removal webclaw     ███████████████████ 96.1%
+Noise removal noxa     ███████████████████ 96.1%
               readability █████████████████▊  89.4%
               trafilatura ██████████████████▏ 91.2%
               newspaper3k ███████████████▎    76.8%
@@ -281,11 +280,11 @@ Noise removal webclaw     ██████████████████
 ### Speed (pure extraction, no network)
 
 ```
-10KB page     webclaw     ██                   0.8ms
+10KB page     noxa     ██                   0.8ms
               readability █████                2.1ms
               trafilatura ██████████           4.3ms
 
-100KB page    webclaw     ██                   3.2ms
+100KB page    noxa     ██                   3.2ms
               readability █████                8.7ms
               trafilatura ██████████           18.4ms
 ```
@@ -297,11 +296,11 @@ Noise removal webclaw     ██████████████████
 | Raw HTML | 4,820 | baseline |
 | readability | 2,340 | -51% |
 | trafilatura | 2,180 | -55% |
-| **webclaw llm** | **1,590** | **-67%** |
+| **noxa llm** | **1,590** | **-67%** |
 
 ### Crawl speed
 
-| Concurrency | webclaw | Crawl4AI | Scrapy |
+| Concurrency | noxa | Crawl4AI | Scrapy |
 |:-----------:|:-------:|:--------:|:------:|
 | 5 | **9.8 pg/s** | 5.2 pg/s | 7.1 pg/s |
 | 10 | **18.4 pg/s** | 8.7 pg/s | 12.3 pg/s |
@@ -312,17 +311,17 @@ Noise removal webclaw     ██████████████████
 ## Architecture
 
 ```
-webclaw/
+noxa/
   crates/
-    webclaw-core     Pure extraction engine. Zero network deps. WASM-safe.
-    webclaw-fetch    HTTP client + TLS fingerprinting (wreq/BoringSSL). Crawler. Batch ops.
-    webclaw-llm      LLM provider chain (Ollama -> OpenAI -> Anthropic)
-    webclaw-pdf      PDF text extraction
-    webclaw-mcp      MCP server (10 tools for AI agents)
-    webclaw-cli      CLI binary
+    noxa-core     Pure extraction engine. Zero network deps. WASM-safe.
+    noxa-fetch    HTTP client + TLS fingerprinting (wreq/BoringSSL). Crawler. Batch ops.
+    noxa-llm      LLM provider chain (Ollama -> OpenAI -> Anthropic)
+    noxa-pdf      PDF text extraction
+    noxa-mcp      MCP server (10 tools for AI agents)
+    noxa      CLI binary
 ```
 
-`webclaw-core` takes raw HTML as a `&str` and returns structured output. No I/O, no network, no allocator tricks. Can compile to WASM.
+`noxa-core` takes raw HTML as a `&str` and returns structured output. No I/O, no network, no allocator tricks. Can compile to WASM.
 
 ---
 
@@ -330,18 +329,18 @@ webclaw/
 
 | Variable | Description |
 |----------|-------------|
-| `WEBCLAW_API_KEY` | Cloud API key (enables bot bypass, JS rendering, search, research) |
+| `NOXA_API_KEY` | Cloud API key (enables bot bypass, JS rendering, search, research) |
 | `OLLAMA_HOST` | Ollama URL for local LLM features (default: `http://localhost:11434`) |
 | `OPENAI_API_KEY` | OpenAI API key for LLM features |
 | `ANTHROPIC_API_KEY` | Anthropic API key for LLM features |
-| `WEBCLAW_PROXY` | Single proxy URL |
-| `WEBCLAW_PROXY_FILE` | Path to proxy pool file |
+| `NOXA_PROXY` | Single proxy URL |
+| `NOXA_PROXY_FILE` | Path to proxy pool file |
 
 ---
 
 ## Cloud API (optional)
 
-For bot-protected sites, JS rendering, and advanced features, webclaw offers a hosted API at [webclaw.io](https://webclaw.io).
+For bot-protected sites, JS rendering, and advanced features, noxa offers a hosted API at [noxa.io](https://noxa.io).
 
 The CLI and MCP server work locally first. Cloud is used as a fallback when:
 - A site has bot protection (Cloudflare, DataDome, WAF)
@@ -349,21 +348,21 @@ The CLI and MCP server work locally first. Cloud is used as a fallback when:
 - You use search or research tools
 
 ```bash
-export WEBCLAW_API_KEY=wc_your_key
+export NOXA_API_KEY=wc_your_key
 
 # Automatic: tries local first, cloud on bot detection
-webclaw https://protected-site.com
+noxa https://protected-site.com
 
 # Force cloud
-webclaw --cloud https://spa-site.com
+noxa --cloud https://spa-site.com
 ```
 
 ### SDKs
 
 ```bash
-npm install @webclaw/sdk                  # TypeScript/JavaScript
-pip install webclaw                        # Python
-go get github.com/0xMassi/webclaw-go      # Go
+npm install @noxa/sdk                  # TypeScript/JavaScript
+pip install noxa                        # Python
+go get github.com/jmagar/noxa-go      # Go
 ```
 
 ---
@@ -381,14 +380,13 @@ go get github.com/0xMassi/webclaw-go      # Go
 
 ## Community
 
-- [Discord](https://discord.gg/KDfd48EpnW) — questions, feedback, show what you built
-- [GitHub Issues](https://github.com/0xMassi/webclaw/issues) — bug reports and feature requests
+- [GitHub Issues](https://github.com/jmagar/noxa/issues) — bug reports and feature requests
 
 ## Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-- [Good first issues](https://github.com/0xMassi/webclaw/issues?q=label%3A%22good+first+issue%22)
+- [Good first issues](https://github.com/jmagar/noxa/issues?q=label%3A%22good+first+issue%22)
 - [Architecture docs](CONTRIBUTING.md#architecture)
 
 ## Acknowledgments
