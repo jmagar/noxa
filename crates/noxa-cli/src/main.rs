@@ -2350,7 +2350,7 @@ async fn main() {
     }
 
     // --raw-html: skip extraction, dump the fetched HTML
-    if cli.raw_html && cli.include.is_none() && cli.exclude.is_none() {
+    if resolved.raw_html && resolved.include_selectors.is_empty() && resolved.exclude_selectors.is_empty() {
         match fetch_html(&cli, &resolved).await {
             Ok(r) => println!("{}", r.html),
             Err(e) => {

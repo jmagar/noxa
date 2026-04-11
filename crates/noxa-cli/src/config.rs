@@ -191,7 +191,7 @@ pub fn resolve(
         path_prefix: if explicit("path_prefix") {
             cli.path_prefix.clone()
         } else {
-            cfg.path_prefix.clone().or(cli.path_prefix.clone())
+            cfg.path_prefix.clone()
         },
         include_paths: if explicit("include_paths") {
             cli.include_paths
