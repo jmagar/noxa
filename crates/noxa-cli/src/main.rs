@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, ValueEnum};
+use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 use noxa_core::{
     ChangeStatus, ContentDiff, ExtractionOptions, ExtractionResult, Metadata, extract_with_options,
@@ -284,7 +285,8 @@ struct Cli {
     output_dir: Option<PathBuf>,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum OutputFormat {
     Markdown,
     Json,
@@ -293,14 +295,16 @@ enum OutputFormat {
     Html,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum Browser {
     Chrome,
     Firefox,
     Random,
 }
 
-#[derive(Clone, ValueEnum, Default)]
+#[derive(Clone, ValueEnum, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum PdfModeArg {
     /// Error if PDF has no extractable text (catches scanned PDFs)
     #[default]
@@ -2465,5 +2469,30 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("nested/deep/file.md")).unwrap();
         assert_eq!(content, "hello");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod enum_deserialize_tests {
+    use super::*;
+
+    #[test]
+    fn test_output_format_deserialize() {
+        let f: OutputFormat = serde_json::from_str("\"llm\"").unwrap();
+        assert!(matches!(f, OutputFormat::Llm));
+        let f: OutputFormat = serde_json::from_str("\"markdown\"").unwrap();
+        assert!(matches!(f, OutputFormat::Markdown));
+    }
+
+    #[test]
+    fn test_browser_deserialize() {
+        let b: Browser = serde_json::from_str("\"firefox\"").unwrap();
+        assert!(matches!(b, Browser::Firefox));
+    }
+
+    #[test]
+    fn test_pdf_mode_deserialize() {
+        let p: PdfModeArg = serde_json::from_str("\"fast\"").unwrap();
+        assert!(matches!(p, PdfModeArg::Fast));
     }
 }
