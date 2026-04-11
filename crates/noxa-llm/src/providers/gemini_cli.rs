@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::clean::strip_thinking_tags;
 use crate::error::LlmError;
@@ -41,6 +41,7 @@ impl GeminiCliProvider {
         }
     }
 
+    #[cfg(test)]
     fn default_model(&self) -> &str {
         &self.default_model
     }
@@ -199,7 +200,11 @@ mod tests {
         assert_eq!(p.default_model(), "gemini-2.5-pro");
     }
 
+    // Env var tests mutate process-global state and race with parallel tests.
+    // Run in isolation if needed:
+    //   cargo test -p noxa-llm env_model_override -- --ignored --test-threads=1
     #[test]
+    #[ignore = "mutates process env; run with --test-threads=1"]
     fn env_model_override() {
         unsafe { std::env::set_var("GEMINI_MODEL", "gemini-1.5-pro") };
         let p = GeminiCliProvider::new(None);
