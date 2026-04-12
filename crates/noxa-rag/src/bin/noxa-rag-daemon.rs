@@ -5,8 +5,6 @@
 ///   noxa-rag-daemon [--config <PATH>] [--log-level <LEVEL>] [--version]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -182,14 +180,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("[noxa-rag] daemon started");
 
-    // Run pipeline with 10s force-exit timeout after cancellation.
-    match tokio::time::timeout(Duration::from_secs(10), pipeline.run()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("[noxa-rag] pipeline error: {e}"),
-        Err(_elapsed) => {
-            eprintln!("[noxa-rag] WARNING: pipeline did not shut down within 10s, forcing exit");
-            std::process::exit(0);
-        }
+    // Run until a shutdown signal is received; the pipeline drains workers
+    // internally with a 10s timeout before returning.
+    if let Err(e) = pipeline.run().await {
+        eprintln!("[noxa-rag] pipeline error: {e}");
     }
 
     eprintln!("[noxa-rag] daemon stopped");

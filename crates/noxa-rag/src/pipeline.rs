@@ -196,15 +196,12 @@ impl Pipeline {
                                 path = %path.display(),
                             );
                             let job = IndexJob { path, span };
-                            match tx_clone.try_send(job) {
-                                Ok(_) => {}
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                    tracing::warn!("index job queue full, dropping event");
-                                }
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                    // Workers are done; exit.
-                                    break;
-                                }
+                            // blocking_send is safe here — we are inside spawn_blocking.
+                            // It blocks until capacity is available (backpressure) rather
+                            // than dropping events the way try_send would.
+                            if tx_clone.blocking_send(job).is_err() {
+                                // Receiver dropped — workers are done; exit.
+                                break;
                             }
                         }
                     }
@@ -236,12 +233,21 @@ impl Pipeline {
         // Wait for bridge to finish.
         let _ = bridge_handle.await;
 
-        // Wait for all workers to finish.
-        for handle in worker_handles {
-            let _ = handle.await;
+        // Wait for all workers to drain — 10s hard limit to prevent a stuck
+        // job from blocking indefinite shutdown.
+        let drain = async {
+            for handle in worker_handles {
+                let _ = handle.await;
+            }
+        };
+        match tokio::time::timeout(Duration::from_secs(10), drain).await {
+            Ok(_) => tracing::info!("pipeline shut down cleanly"),
+            Err(_) => {
+                tracing::warn!("workers did not drain within 10s, forcing exit");
+                std::process::exit(0);
+            }
         }
 
-        tracing::info!("pipeline shut down cleanly");
         Ok(())
     }
 }
@@ -362,11 +368,13 @@ async fn process_job(
     };
 
     // ── 3. URL validation ─────────────────────────────────────────────────────
-    let url = result.metadata.url.as_deref().unwrap_or("").to_string();
-    if let Err(e) = validate_url_scheme(&url) {
+    let raw_url = result.metadata.url.as_deref().unwrap_or("").to_string();
+    if let Err(e) = validate_url_scheme(&raw_url) {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
         return Ok(());
     }
+    // Normalize so the mutex key and stored payload match what delete_by_url queries.
+    let url = crate::store::qdrant::normalize_url(&raw_url);
 
     // ── 4. Chunk ──────────────────────────────────────────────────────────────
     let chunks = chunker::chunk(&result, &config.chunker, tokenizer);

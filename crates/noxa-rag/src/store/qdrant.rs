@@ -255,7 +255,7 @@ impl VectorStore for QdrantStore {
 }
 
 /// Strip fragment, trailing path slash, lowercase scheme+host (url crate already does the latter).
-fn normalize_url(url: &str) -> String {
+pub(crate) fn normalize_url(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return url.to_string();
     };
