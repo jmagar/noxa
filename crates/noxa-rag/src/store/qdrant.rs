@@ -1,92 +1,139 @@
 use async_trait::async_trait;
-
-use qdrant_client::Qdrant;
-use qdrant_client::qdrant::{
-    Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder,
-    Distance, FieldType, Filter, HnswConfigDiffBuilder, PointStruct, SearchPointsBuilder,
-    UpsertPointsBuilder, VectorParamsBuilder,
-};
-use qdrant_client::Payload;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::RagError;
 use crate::store::VectorStore;
 use crate::types::{Point, SearchResult};
 
+// ── REST request/response shapes ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct QdrantStatus {
+    status: String, // "ok" on success
+}
+
+#[derive(Deserialize)]
+struct CollectionInfoResponse {
+    result: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct UpsertRequest {
+    points: Vec<QdrantPoint>,
+}
+
+#[derive(Serialize)]
+struct QdrantPoint {
+    id: String, // UUID string
+    vector: Vec<f32>,
+    payload: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct DeleteByFilterRequest {
+    filter: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct SearchRequest {
+    vector: Vec<f32>,
+    limit: usize,
+    with_payload: bool,
+    score_threshold: Option<f32>,
+}
+
+#[derive(Deserialize)]
+struct SearchResponse {
+    result: Vec<SearchHit>,
+}
+
+#[derive(Deserialize)]
+struct SearchHit {
+    score: f32,
+    payload: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+// ── QdrantStore ───────────────────────────────────────────────────────────────
+
 pub struct QdrantStore {
-    client: Qdrant,
+    client: reqwest::Client,
+    base_url: String, // e.g. "http://127.0.0.1:53333"
     collection: String,
-    #[allow(dead_code)]
     uuid_namespace: uuid::Uuid,
 }
 
 impl QdrantStore {
-    /// Create a new QdrantStore.
-    ///
-    /// `url` should be the gRPC endpoint, typically `http://localhost:6334`.
-    /// The crate uses gRPC transport via tonic — the `reqwest` feature only
-    /// enables snapshot downloads, not a REST transport.
     pub fn new(
         url: &str,
         collection: String,
         api_key: Option<String>,
         uuid_namespace: uuid::Uuid,
     ) -> Result<Self, RagError> {
-        let mut builder = Qdrant::from_url(url);
+        let mut headers = reqwest::header::HeaderMap::new();
         if let Some(key) = api_key {
-            builder = builder.api_key(key);
+            headers.insert(
+                "api-key",
+                key.parse().map_err(|_| RagError::Config("invalid Qdrant api-key".into()))?,
+            );
         }
-        let client = builder
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
             .build()
-            .map_err(|e| RagError::Store(format!("failed to build qdrant client: {e}")))?;
+            .map_err(|e| RagError::Config(format!("failed to build HTTP client: {e}")))?;
 
         Ok(Self {
             client,
+            base_url: url.trim_end_matches('/').to_string(),
             collection,
             uuid_namespace,
         })
     }
 
-    /// Check whether the collection already exists.
+    /// GET /collections/{name} → true if 200, false if 404.
     pub async fn collection_exists(&self) -> Result<bool, RagError> {
-        self.client
-            .collection_exists(&self.collection)
-            .await
-            .map_err(|e| RagError::Store(format!("collection_exists failed: {e}")))
+        let url = format!("{}/collections/{}", self.base_url, self.collection);
+        let resp = self.client.get(&url).send().await?;
+        match resp.status().as_u16() {
+            200 => Ok(true),
+            404 => Ok(false),
+            s => Err(RagError::Store(format!("collection_exists: unexpected HTTP {s}"))),
+        }
     }
 
-    /// Create the collection with cosine distance, HNSW m=16/ef_construct=200,
-    /// and payload indexes on `url` + `domain`.
+    /// PUT /collections/{name} — create with Cosine/HNSW + payload indexes.
     pub async fn create_collection(&self, dims: usize) -> Result<(), RagError> {
-        let hnsw = HnswConfigDiffBuilder::default()
-            .m(16)
-            .ef_construct(200)
-            .build();
+        let url = format!("{}/collections/{}", self.base_url, self.collection);
+        let body = json!({
+            "vectors": {
+                "size": dims,
+                "distance": "Cosine",
+                "on_disk": true,
+                "hnsw_config": { "m": 16, "ef_construct": 200 }
+            },
+            "on_disk_payload": true
+        });
 
-        let vectors = VectorParamsBuilder::new(dims as u64, Distance::Cosine)
-            .on_disk(true)
-            .hnsw_config(hnsw);
+        let resp = self.client.put(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RagError::Store(format!("create_collection failed: {text}")));
+        }
 
-        self.client
-            .create_collection(
-                CreateCollectionBuilder::new(&self.collection)
-                    .vectors_config(vectors)
-                    .on_disk_payload(true),
-            )
-            .await
-            .map_err(|e| RagError::Store(format!("create_collection failed: {e}")))?;
-
-        // Payload indexes for fast filtering by url and domain.
-        for field in ["url", "domain"] {
-            self.client
-                .create_field_index(CreateFieldIndexCollectionBuilder::new(
-                    &self.collection,
-                    field,
-                    FieldType::Keyword,
-                ))
-                .await
-                .map_err(|e| {
-                    RagError::Store(format!("create_field_index({field}) failed: {e}"))
-                })?;
+        // Payload indexes for fast URL/domain filtering.
+        for (field, schema_type) in [("url", "keyword"), ("domain", "keyword")] {
+            let idx_url = format!(
+                "{}/collections/{}/index",
+                self.base_url, self.collection
+            );
+            let idx_body = json!({ "field_name": field, "field_schema": schema_type });
+            let r = self.client.put(&idx_url).json(&idx_body).send().await?;
+            if !r.status().is_success() {
+                let text = r.text().await.unwrap_or_default();
+                return Err(RagError::Store(format!(
+                    "create_field_index({field}) failed: {text}"
+                )));
+            }
         }
 
         Ok(())
@@ -95,86 +142,107 @@ impl QdrantStore {
 
 #[async_trait]
 impl VectorStore for QdrantStore {
-    /// Upsert points into the collection in batches of 256.
+    /// PUT /collections/{name}/points?wait=true in batches of 256.
     async fn upsert(&self, points: Vec<Point>) -> Result<(), RagError> {
+        let url = format!(
+            "{}/collections/{}/points?wait=true",
+            self.base_url, self.collection
+        );
+
         for chunk in points.chunks(256) {
-            let qdrant_points: Vec<PointStruct> = chunk
+            let qdrant_points: Vec<QdrantPoint> = chunk
                 .iter()
                 .map(|p| {
-                    let mut payload = Payload::new();
-                    payload.insert("text", p.payload.text.as_str());
-                    payload.insert("url", p.payload.url.as_str());
-                    payload.insert("domain", p.payload.domain.as_str());
-                    payload.insert("chunk_index", p.payload.chunk_index as i64);
-                    payload.insert("total_chunks", p.payload.total_chunks as i64);
-                    payload.insert("token_estimate", p.payload.token_estimate as i64);
-
-                    PointStruct::new(
-                        p.id.to_string(), // UUID as string PointId
-                        p.vector.clone(),
+                    let mut payload = std::collections::HashMap::new();
+                    payload.insert("text".into(), json!(p.payload.text));
+                    payload.insert("url".into(), json!(p.payload.url));
+                    payload.insert("domain".into(), json!(p.payload.domain));
+                    payload.insert("chunk_index".into(), json!(p.payload.chunk_index));
+                    payload.insert("total_chunks".into(), json!(p.payload.total_chunks));
+                    payload.insert("token_estimate".into(), json!(p.payload.token_estimate));
+                    QdrantPoint {
+                        id: p.id.to_string(),
+                        vector: p.vector.clone(),
                         payload,
-                    )
+                    }
                 })
                 .collect();
 
-            self.client
-                .upsert_points(
-                    UpsertPointsBuilder::new(&self.collection, qdrant_points).wait(true),
-                )
-                .await
-                .map_err(|e| RagError::Store(format!("upsert_points failed: {e}")))?;
+            let resp = self
+                .client
+                .put(&url)
+                .json(&UpsertRequest { points: qdrant_points })
+                .send()
+                .await?;
+
+            if !resp.status().is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(RagError::Store(format!("upsert failed: {text}")));
+            }
         }
 
         Ok(())
     }
 
-    /// Delete all points whose `url` payload field matches the normalized URL.
+    /// POST /collections/{name}/points/delete?wait=true filtered by url payload.
     async fn delete_by_url(&self, url: &str) -> Result<(), RagError> {
         let normalized = normalize_url(url);
+        let endpoint = format!(
+            "{}/collections/{}/points/delete?wait=true",
+            self.base_url, self.collection
+        );
+        let body = DeleteByFilterRequest {
+            filter: json!({
+                "must": [{ "key": "url", "match": { "value": normalized } }]
+            }),
+        };
 
-        self.client
-            .delete_points(
-                DeletePointsBuilder::new(&self.collection)
-                    .points(Filter::must([Condition::matches(
-                        "url",
-                        normalized.clone(),
-                    )]))
-                    .wait(true),
-            )
-            .await
-            .map_err(|e| RagError::Store(format!("delete_points failed: {e}")))?;
+        let resp = self.client.post(&endpoint).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RagError::Store(format!("delete_by_url failed: {text}")));
+        }
 
         Ok(())
     }
 
-    /// Search for the nearest `limit` vectors and return their payloads.
+    /// POST /collections/{name}/points/search
     async fn search(&self, vector: &[f32], limit: usize) -> Result<Vec<SearchResult>, RagError> {
-        let response = self
-            .client
-            .search_points(
-                SearchPointsBuilder::new(&self.collection, vector.to_vec(), limit as u64)
-                    .with_payload(true),
-            )
-            .await
-            .map_err(|e| RagError::Store(format!("search_points failed: {e}")))?;
+        let url = format!(
+            "{}/collections/{}/points/search",
+            self.base_url, self.collection
+        );
+        let body = SearchRequest {
+            vector: vector.to_vec(),
+            limit,
+            with_payload: true,
+            score_threshold: None,
+        };
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RagError::Store(format!("search failed: {text}")));
+        }
+
+        let response: SearchResponse = resp.json().await?;
 
         let results = response
             .result
             .into_iter()
             .filter_map(|hit| {
-                let text = hit.get("text").as_str()?.to_string();
-                let url = hit.get("url").as_str()?.to_string();
-                let chunk_index = hit.get("chunk_index").as_integer().unwrap_or(0) as usize;
-                let token_estimate =
-                    hit.get("token_estimate").as_integer().unwrap_or(0) as usize;
-
-                Some(SearchResult {
-                    text,
-                    url,
-                    score: hit.score,
-                    chunk_index,
-                    token_estimate,
-                })
+                let payload = hit.payload?;
+                let text = payload.get("text")?.as_str()?.to_string();
+                let url = payload.get("url")?.as_str()?.to_string();
+                let chunk_index = payload
+                    .get("chunk_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let token_estimate = payload
+                    .get("token_estimate")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                Some(SearchResult { text, url, score: hit.score, chunk_index, token_estimate })
             })
             .collect();
 
@@ -186,13 +254,9 @@ impl VectorStore for QdrantStore {
     }
 }
 
-/// Normalize a URL for consistent storage and lookup:
-/// - Strip fragment
-/// - Strip trailing slash from path
-/// - Scheme and host are already lowercased by the `url` crate
+/// Strip fragment, trailing path slash, lowercase scheme+host (url crate already does the latter).
 fn normalize_url(url: &str) -> String {
-    use url::Url;
-    let Ok(mut parsed) = Url::parse(url) else {
+    let Ok(mut parsed) = url::Url::parse(url) else {
         return url.to_string();
     };
     parsed.set_fragment(None);
