@@ -1,0 +1,66 @@
+[package]
+name = "noxa-rag"
+description = "RAG pipeline for noxa — TEI embeddings + Qdrant vector store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "noxa-rag-daemon"
+path = "src/bin/noxa-rag-daemon.rs"
+
+[dependencies]
+noxa-core = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Async traits
+async-trait = "0.1"
+
+# HTTP client (plain reqwest — no primp patches needed for TEI/Qdrant)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Vector store — REST transport only (reqwest feature, no protoc required)
+qdrant-client = { version = "1", default-features = false, features = ["reqwest"] }
+
+# Chunking
+text-splitter = { version = "0.25", features = ["markdown", "tokenizers"] }
+tokenizers = "0.21"
+
+# UUID v5 for deterministic point IDs
+uuid = { version = "1", features = ["v5", "serde"] }
+
+# Filesystem watcher
+notify = "6"
+notify-debouncer-mini = "0.4"
+
+# Concurrent data structures
+dashmap = "6"
+
+# URL parsing
+url = "2"
+
+# CLI args
+clap = { workspace = true }
+
+# Date/time for failed-jobs log
+chrono = { version = "0.4", features = ["serde"] }
+
+# CancellationToken for coordinated shutdown
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
