@@ -547,9 +547,73 @@ fn url_to_filename(raw_url: &str, format: &OutputFormat) -> String {
     format!("{sanitized}.{ext}")
 }
 
+/// Returns true if the IP address is loopback, private, link-local, or otherwise reserved.
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()                               // 127.0.0.0/8
+                || v4.is_unspecified()                     // 0.0.0.0
+                || v4.is_link_local()                      // 169.254.0.0/16 (IMDS)
+                || octets[0] == 10                         // 10.0.0.0/8
+                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) // 172.16-31.x
+                || (octets[0] == 192 && octets[1] == 168) // 192.168.0.0/16
+                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127) // 100.64.0.0/10 (Tailscale/CGNAT)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()       // ::1
+                || v6.is_unspecified() // ::
+        }
+    }
+}
+
+/// Validate that a URL is non-empty, has an http/https scheme, and does not target
+/// private/loopback/reserved hosts (SSRF prevention).
+fn validate_url(url: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Err("Invalid URL: must not be empty".into());
+    }
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("Invalid URL: {e}. Must start with http:// or https://"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!(
+            "Invalid URL: scheme '{}' not allowed, must start with http:// or https://",
+            parsed.scheme()
+        ));
+    }
+    if let Some(host) = parsed.host_str() {
+        let lower = host.to_lowercase();
+        if lower == "localhost" || lower.ends_with(".localhost") {
+            return Err(format!(
+                "Invalid URL: host '{host}' resolves to a private or reserved address"
+            ));
+        }
+        if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
+            if is_private_ip(ip) {
+                return Err(format!(
+                    "Invalid URL: host '{host}' resolves to a private or reserved address"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write extraction output to a file inside `dir`, creating parent dirs as needed.
 fn write_to_file(dir: &Path, filename: &str, content: &str) -> Result<(), String> {
+    // Reject path traversal and absolute paths before joining.
+    if filename.split(['/', '\\']).any(|p| p == ".." || p == ".")
+        || filename.starts_with('/')
+        || filename.starts_with('\\')
+        || filename.contains('\0')
+    {
+        return Err(format!("unsafe filename rejected: {filename}"));
+    }
     let dest = dir.join(filename);
+    // Post-join containment check (handles any OS-specific edge cases).
+    if !dest.starts_with(dir) {
+        return Err(format!("filename escapes output directory: {filename}"));
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
@@ -2473,6 +2537,14 @@ async fn main() {
 
     init_logging(resolved.verbose);
 
+    // Validate webhook URL early so any SSRF attempt is rejected before operations run.
+    if let Some(ref webhook_url) = cli.webhook {
+        if let Err(e) = validate_url(webhook_url) {
+            eprintln!("error: invalid webhook URL: {e}");
+            process::exit(1);
+        }
+    }
+
     // --map: sitemap discovery mode
     if cli.map {
         if let Err(e) = run_map(&cli, &resolved).await {
@@ -2751,5 +2823,66 @@ mod enum_deserialize_tests {
     fn test_pdf_mode_deserialize() {
         let p: PdfModeArg = serde_json::from_str("\"fast\"").unwrap();
         assert!(matches!(p, PdfModeArg::Fast));
+    }
+
+    // --- validate_url tests ---
+
+    #[test]
+    fn validate_rejects_loopback() {
+        assert!(validate_url("http://127.0.0.1/secret").is_err());
+        assert!(validate_url("http://127.0.0.1:8080/secret").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_localhost() {
+        assert!(validate_url("http://localhost/secret").is_err());
+        assert!(validate_url("http://localhost:8080/secret").is_err());
+        assert!(validate_url("http://foo.localhost/secret").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_rfc1918() {
+        assert!(validate_url("http://10.0.0.1/").is_err());
+        assert!(validate_url("http://172.16.0.1/").is_err());
+        assert!(validate_url("http://172.31.255.255/").is_err());
+        assert!(validate_url("http://192.168.1.1/").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_link_local() {
+        assert!(validate_url("http://169.254.169.254/latest/meta-data/").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_tailscale() {
+        assert!(validate_url("http://100.100.1.1/").is_err());
+        assert!(validate_url("http://100.127.255.255/").is_err());
+    }
+
+    #[test]
+    fn validate_accepts_public() {
+        assert!(validate_url("https://example.com").is_ok());
+        assert!(validate_url("https://s.tootie.tv").is_ok());
+        assert!(validate_url("http://8.8.8.8/").is_ok());
+    }
+
+    // --- write_to_file traversal tests ---
+
+    #[test]
+    fn test_write_to_file_rejects_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        assert!(write_to_file(path, "../escape.md", "x").is_err());
+        assert!(write_to_file(path, "/etc/passwd", "x").is_err());
+        assert!(write_to_file(path, "..\\windows\\evil", "x").is_err());
+        assert!(write_to_file(path, "foo\0bar", "x").is_err());
+    }
+
+    #[test]
+    fn test_write_to_file_allows_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        assert!(write_to_file(path, "sub/file.md", "hello").is_ok());
+        assert!(path.join("sub/file.md").exists());
     }
 }
