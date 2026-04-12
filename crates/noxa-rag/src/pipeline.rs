@@ -147,15 +147,27 @@ impl Pipeline {
             worker_handles.push(handle);
         }
 
-        // Build notify debouncer with std::sync::mpsc sender as the event handler.
+        // Build notify debouncer with a *bounded* sync channel as the event handler.
         // notify-debouncer-mini 0.4.x implements DebounceEventHandler for
-        // std::sync::mpsc::Sender<DebounceEventResult> out of the box.
-        let (notify_tx, notify_rx) = std::sync::mpsc::channel::<DebounceEventResult>();
+        // std::sync::mpsc::Sender (unbounded) but not SyncSender, so we wrap
+        // SyncSender in a small newtype.  When the bridge is blocked on
+        // blocking_send (Tokio queue full) the sync_channel fills and the
+        // debouncer's send() call blocks too — closing the backpressure loop.
+        struct BoundedSender(std::sync::mpsc::SyncSender<DebounceEventResult>);
+        impl notify_debouncer_mini::DebounceEventHandler for BoundedSender {
+            fn handle_event(&mut self, event: DebounceEventResult) {
+                // Blocks when the channel is full, propagating backpressure.
+                let _ = self.0.send(event);
+            }
+        }
+
+        let (notify_tx, notify_rx) = std::sync::mpsc::sync_channel::<DebounceEventResult>(256);
 
         let mut debouncer =
-            new_debouncer(Duration::from_millis(debounce_ms), notify_tx).map_err(|e| {
-                RagError::Generic(format!("failed to create fs watcher: {e}"))
-            })?;
+            new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
+                .map_err(|e| {
+                    RagError::Generic(format!("failed to create fs watcher: {e}"))
+                })?;
 
         debouncer
             .watcher()
@@ -437,23 +449,31 @@ async fn process_job(
     // triggers a re-index. This is acceptable given the current store API lacks
     // a transactional delete-by-url-excluding-ids. UUIDs are deterministic (v5),
     // so re-indexing is always idempotent.
-    store.delete_by_url(&url).await?;
-    if let Err(e) = store.upsert(points).await {
-        tracing::error!(
-            url = %url,
-            error = %e,
-            "upsert failed after delete — document temporarily unindexed until next file event"
-        );
-        return Err(e);
+    //
+    // Capture the result instead of returning immediately so we can always run
+    // the eviction logic below, even on error paths.
+    let store_result = async {
+        store.delete_by_url(&url).await?;
+        if let Err(e) = store.upsert(points).await {
+            tracing::error!(
+                url = %url,
+                error = %e,
+                "upsert failed after delete — document temporarily unindexed until next file event"
+            );
+            return Err(e);
+        }
+        Ok(())
     }
+    .await;
 
+    // Always evict the lock entry — including on error paths — to prevent
+    // unbounded DashMap growth during store outages.
     drop(_guard);
-    // Drop the local Arc clone before eviction check so the only remaining
-    // reference is the DashMap entry itself (strong_count == 1).  Without this
-    // drop the count is always >= 2 and remove_if never fires, leaking the map.
+    // Drop the local Arc clone before eviction check so strong_count reaches 1.
     drop(url_lock);
-
     url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
+
+    store_result?;
 
     // ── 8. Done ───────────────────────────────────────────────────────────────
     tracing::info!(url = %url, chunks = texts.len(), "indexed");
