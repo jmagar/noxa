@@ -7,10 +7,13 @@ use crate::store::{DynVectorStore, QdrantStore, VectorStore};
 
 /// Build the embed provider from config, running a startup probe.
 ///
+/// Returns `(provider, dims)` so callers can use the probed dimensions directly
+/// without a redundant second probe.
+///
 /// Fails fast at startup if the provider is unavailable or returns wrong dimensions.
 /// `is_available()` and `dimensions()` are concrete methods on the provider struct,
 /// called here directly (not via dyn dispatch).
-pub async fn build_embed_provider(config: &RagConfig) -> Result<DynEmbedProvider, RagError> {
+pub async fn build_embed_provider(config: &RagConfig) -> Result<(DynEmbedProvider, usize), RagError> {
     match &config.embed_provider {
         EmbedProviderConfig::Tei { url, model, .. } => {
             let client = reqwest::Client::new();
@@ -40,7 +43,7 @@ pub async fn build_embed_provider(config: &RagConfig) -> Result<DynEmbedProvider
                 "embed provider ready"
             );
 
-            Ok(Arc::new(provider))
+            Ok((Arc::new(provider), dims))
         }
         EmbedProviderConfig::OpenAi { .. } => Err(RagError::Config(
             "OpenAI embed provider not implemented — use tei for phase 1".to_string(),
@@ -81,15 +84,20 @@ pub async fn build_vector_store(
             // Collection lifecycle: create if missing, validate dims if exists.
             if store.collection_exists().await? {
                 // Validate that the existing collection's vector size matches embed dims.
-                // We can't directly query the collection params via the current API surface,
-                // so we log a warning and proceed — mismatches surface as Qdrant errors at upsert.
-                // This is a known limitation; a full implementation would call
-                // client.collection_info() and check vectors_config.
-                tracing::warn!(
+                // Fail fast if there is a mismatch rather than letting upsert fail later
+                // with a confusing Qdrant error.
+                let existing_dims = store.collection_vector_size().await?;
+                if existing_dims != embed_dims {
+                    return Err(RagError::Config(format!(
+                        "existing Qdrant collection {collection:?} has {existing_dims}-dim vectors \
+                         but embed provider outputs {embed_dims} dims — delete the collection or \
+                         switch to a matching embed model"
+                    )));
+                }
+                tracing::info!(
                     collection = %collection,
-                    embed_dims,
-                    "collection already exists — ensure vector dimensions match embed provider ({} dims)",
-                    embed_dims
+                    dims = existing_dims,
+                    "collection already exists with matching dimensions"
                 );
             } else {
                 tracing::info!(collection = %collection, dims = embed_dims, "creating collection");

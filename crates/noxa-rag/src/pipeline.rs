@@ -244,7 +244,9 @@ impl Pipeline {
             Ok(_) => tracing::info!("pipeline shut down cleanly"),
             Err(_) => {
                 tracing::warn!("workers did not drain within 10s, forcing exit");
-                std::process::exit(0);
+                return Err(RagError::Generic(
+                    "workers did not drain within 10s".to_string(),
+                ));
             }
         }
 
@@ -266,7 +268,7 @@ fn is_private_ip(host: &str) -> bool {
     if let Ok(addr) = host.parse::<IpAddr>() {
         return match addr {
             IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
-            IpAddr::V6(ip) => ip.is_loopback(),
+            IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
         };
     }
     false
@@ -292,7 +294,7 @@ fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     if let Some(host) = parsed.host_str() {
         if is_private_ip(host) {
             return Err(RagError::Generic(format!(
-                "URL {url:?} resolves to a private/loopback IP — indexing blocked"
+                "URL {url:?} uses a private/loopback IP literal as its host — indexing blocked"
             )));
         }
         // Also block bare "localhost" hostname.
@@ -427,10 +429,27 @@ async fn process_job(
         .clone();
     let _guard = url_lock.lock().await;
 
+    // SAFETY NOTE: delete-before-upsert is destructive: if upsert fails after
+    // delete, the document is temporarily unindexed until the next file event
+    // triggers a re-index. This is acceptable given the current store API lacks
+    // a transactional delete-by-url-excluding-ids. UUIDs are deterministic (v5),
+    // so re-indexing is always idempotent.
     store.delete_by_url(&url).await?;
-    store.upsert(points).await?;
+    if let Err(e) = store.upsert(points).await {
+        tracing::error!(
+            url = %url,
+            error = %e,
+            "upsert failed after delete — document temporarily unindexed until next file event"
+        );
+        return Err(e);
+    }
 
     drop(_guard);
+
+    // Remove the lock entry if no other task holds a clone of the Arc.
+    // Arc::strong_count == 1 means only url_locks itself holds a reference,
+    // so it is safe to evict and avoid unbounded map growth.
+    url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
 
     // ── 8. Done ───────────────────────────────────────────────────────────────
     tracing::info!(url = %url, chunks = texts.len(), "indexed");

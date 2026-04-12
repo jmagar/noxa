@@ -4,7 +4,7 @@ RAG pipeline for [noxa](https://github.com/jmagar/noxa) — watches noxa's outpu
 
 ## System Requirements
 
-- **Qdrant** running locally (gRPC port 6334)
+- **Qdrant** running locally (REST port 6333)
 - **HF TEI** with GPU (tested on RTX 4070)
 - **CUDA** for TEI inference (CPU mode is possible but slow)
 - **Rust 1.82+**
@@ -68,8 +68,8 @@ local_path = "/home/user/.cache/noxa-rag/tokenizer"
 
 [vector_store]
 type = "qdrant"
-# gRPC port 6334 (NOT 6333 which is REST)
-url = "http://localhost:6334"
+# REST port 6333
+url = "http://localhost:6333"
 collection = "noxa_rag"
 # api_key = "..."          # or set NOXA_RAG_QDRANT_API_KEY env var
 
@@ -118,7 +118,7 @@ The daemon watches `watch_dir` for `.json` files. When noxa writes an `Extractio
 | `embed_provider.url` | — | TEI server URL |
 | `embed_provider.model` | — | Model name (used in logs) |
 | `embed_provider.local_path` | **required** | Directory containing `tokenizer.json` |
-| `vector_store.url` | — | Qdrant gRPC URL (port 6334) |
+| `vector_store.url` | — | Qdrant REST URL (port 6333) |
 | `vector_store.collection` | — | Qdrant collection name |
 | `vector_store.api_key` | `null` | Qdrant API key (or `NOXA_RAG_QDRANT_API_KEY` env var) |
 | `chunker.target_tokens` | `512` | Target chunk size in tokens |
@@ -130,7 +130,7 @@ The daemon watches `watch_dir` for `.json` files. When noxa writes an `Extractio
 
 ## Architecture
 
-```
+```text
 noxa-cli (writes .json) → watch_dir
                                 ↓
               notify-debouncer-mini (500ms debounce)
@@ -150,7 +150,7 @@ noxa-cli (writes .json) → watch_dir
               │  7. Per-URL mutex: delete + upsert   │
               └─────────────────────────────────────┘
                                 ↓
-                         Qdrant (gRPC)
+                         Qdrant (REST)
 ```
 
 ## Notes

@@ -126,7 +126,7 @@ pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     // Validate embed_concurrency > 0
     if config.pipeline.embed_concurrency == 0 {
         return Err(RagError::Config(
-            "pipeline.embed_concurrency must be > 0 (0 causes Semaphore deadlock)".to_string(),
+            "pipeline.embed_concurrency must be > 0 or no workers will run".to_string(),
         ));
     }
 

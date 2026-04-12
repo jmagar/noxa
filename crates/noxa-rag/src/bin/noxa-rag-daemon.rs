@@ -96,20 +96,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build embed provider — startup probe (exits 1 if TEI unavailable).
-    let embed = build_embed_provider(&config)
+    // Returns (provider, dims) so no redundant second probe is needed.
+    let (embed, embed_dims) = build_embed_provider(&config)
         .await
         .map_err(|e| format!("embed provider startup failed: {e}"))?;
-
-    // Probe embed dims dynamically by calling embed with a dummy text.
-    // This avoids hardcoding and reuses the already-built provider.
-    let probe_vecs = embed
-        .embed(&["probe".to_string()])
-        .await
-        .map_err(|e| format!("embed dims probe failed: {e}"))?;
-    let embed_dims = probe_vecs
-        .first()
-        .map(|v| v.len())
-        .ok_or("embed probe returned empty vector")?;
 
     // Build vector store — collection create/validate.
     let store = build_vector_store(&config, embed_dims)

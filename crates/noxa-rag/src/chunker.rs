@@ -28,8 +28,9 @@ fn token_estimate(text: &str, tokenizer: &Tokenizer) -> usize {
 
 /// Build an overlap prefix from the end of `prev_text`, capped at `overlap_tokens` tokens.
 ///
-/// Scans backwards through whitespace-separated words, accumulating until adding the
-/// next word would exceed the token budget.
+/// Scans backwards through whitespace-separated words, checking the budget before
+/// adding each word (so we never exceed `overlap_tokens`). O(n) via a reversed
+/// accumulator that is flipped at the end.
 fn overlap_prefix(prev_text: &str, overlap_tokens: usize, tokenizer: &Tokenizer) -> String {
     if overlap_tokens == 0 || prev_text.is_empty() {
         return String::new();
@@ -40,17 +41,20 @@ fn overlap_prefix(prev_text: &str, overlap_tokens: usize, tokenizer: &Tokenizer)
         return String::new();
     }
 
-    let mut selected: Vec<&str> = Vec::new();
+    let mut selected_rev: Vec<&str> = Vec::new();
+    let mut token_count = 0usize;
 
-    for word in words.iter().rev() {
-        selected.insert(0, word);
-        let candidate = selected.join(" ");
-        if token_estimate(&candidate, tokenizer) >= overlap_tokens {
+    for &word in words.iter().rev() {
+        let word_tokens = token_estimate(word, tokenizer);
+        if token_count + word_tokens > overlap_tokens {
             break;
         }
+        token_count += word_tokens;
+        selected_rev.push(word);
     }
 
-    selected.join(" ")
+    selected_rev.reverse();
+    selected_rev.join(" ")
 }
 
 /// Chunk an `ExtractionResult` into a `Vec<Chunk>`.

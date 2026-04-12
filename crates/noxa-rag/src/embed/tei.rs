@@ -71,7 +71,7 @@ impl TeiProvider {
             .into_iter()
             .next()
             .map(|v| v.len())
-            .unwrap_or(DEFAULT_DIMENSIONS);
+            .ok_or_else(|| RagError::Embed("TEI probe returned empty embedding response".to_string()))?;
 
         Ok(Self {
             client,
@@ -164,24 +164,11 @@ impl EmbedProvider for TeiProvider {
             match self.embed_batch(chunk).await {
                 Ok(vecs) => results.extend(vecs),
                 Err(RagError::Embed(ref msg)) if msg.contains("413") => {
-                    // Halve batch size and retry once.
+                    // Halve batch size and retry once. Propagate real errors directly.
                     let mut chunk_results: Vec<Vec<f32>> = Vec::with_capacity(chunk.len());
-                    let mut failed = false;
                     for sub_chunk in chunk.chunks(BATCH_SIZE_REDUCED) {
-                        match self.embed_batch(sub_chunk).await {
-                            Ok(vecs) => chunk_results.extend(vecs),
-                            Err(e) => {
-                                // 413 on reduced batch or other error — hard fail.
-                                let _ = e;
-                                failed = true;
-                                break;
-                            }
-                        }
-                    }
-                    if failed {
-                        return Err(RagError::Embed(
-                            "TEI returned 413 even on reduced batch size".to_string(),
-                        ));
+                        let vecs = self.embed_batch(sub_chunk).await?;
+                        chunk_results.extend(vecs);
                     }
                     results.extend(chunk_results);
                 }

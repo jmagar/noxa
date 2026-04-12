@@ -9,13 +9,28 @@ use crate::types::{Point, SearchResult};
 // ── REST request/response shapes ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct QdrantStatus {
-    status: String, // "ok" on success
+struct CollectionInfoResponse {
+    result: Option<CollectionResult>,
 }
 
 #[derive(Deserialize)]
-struct CollectionInfoResponse {
-    result: Option<serde_json::Value>,
+struct CollectionResult {
+    config: CollectionConfig,
+}
+
+#[derive(Deserialize)]
+struct CollectionConfig {
+    params: CollectionParams,
+}
+
+#[derive(Deserialize)]
+struct CollectionParams {
+    vectors: CollectionVectors,
+}
+
+#[derive(Deserialize)]
+struct CollectionVectors {
+    size: usize,
 }
 
 #[derive(Serialize)]
@@ -137,6 +152,26 @@ impl QdrantStore {
         }
 
         Ok(())
+    }
+
+    /// GET /collections/{name} and return the configured vector size.
+    ///
+    /// Used by `factory::build_vector_store` to validate that an existing
+    /// collection's dimensions match the embed provider's output dimensions.
+    pub(crate) async fn collection_vector_size(&self) -> Result<usize, RagError> {
+        let endpoint = format!("{}/collections/{}", self.base_url, self.collection);
+        let resp = self.client.get(&endpoint).send().await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RagError::Store(format!("collection_info failed: {text}")));
+        }
+        let info: CollectionInfoResponse = resp
+            .json()
+            .await
+            .map_err(|e| RagError::Store(format!("collection_info parse failed: {e}")))?;
+        info.result
+            .map(|r| r.config.params.vectors.size)
+            .ok_or_else(|| RagError::Store("collection_info missing result".to_string()))
     }
 }
 
