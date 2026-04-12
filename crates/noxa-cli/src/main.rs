@@ -581,6 +581,21 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 /// For literal IP addresses the check is synchronous. For hostnames all A/AAAA
 /// records are resolved and rejected if any resolves to a private range.
 async fn validate_url(url: &str) -> Result<(), String> {
+    validate_url_impl(url, |host| async move {
+        tokio::net::lookup_host(host)
+            .await
+            .map(|iter| iter.collect::<Vec<_>>())
+    })
+    .await
+}
+
+/// Inner validation logic with an injectable resolver for deterministic testing.
+/// `resolve` receives `"host:80"` and returns the resolved socket addresses.
+async fn validate_url_impl<F, Fut>(url: &str, resolve: F) -> Result<(), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
+{
     if url.is_empty() {
         return Err("Invalid URL: must not be empty".into());
     }
@@ -611,8 +626,7 @@ async fn validate_url(url: &str) -> Result<(), String> {
         }
     } else {
         // Resolve hostname; reject if any resolved address is private (fail-closed).
-        let lookup = format!("{host}:80");
-        match tokio::net::lookup_host(lookup).await {
+        match resolve(format!("{host}:80")).await {
             Ok(addrs) => {
                 for addr in addrs {
                     if is_private_ip(addr.ip()) {
@@ -2952,10 +2966,34 @@ mod enum_deserialize_tests {
         assert!(validate_url("http://1.1.1.1/").await.is_ok());
     }
 
+    // Use validate_url_impl with a mock resolver to test the DNS path without
+    // hitting the network. This keeps hostname validation covered in all CI environments.
+
     #[tokio::test]
-    #[ignore = "requires external DNS"]
-    async fn validate_accepts_public_hostname() {
-        assert!(validate_url("https://example.com").await.is_ok());
+    async fn validate_accepts_hostname_resolving_to_public() {
+        let result = validate_url_impl("http://example.com/", |_| async {
+            Ok(vec!["93.184.216.34:80".parse::<std::net::SocketAddr>().unwrap()])
+        })
+        .await;
+        assert!(result.is_ok(), "hostname resolving to a public IP should be accepted");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_hostname_resolving_to_private() {
+        let result = validate_url_impl("http://attacker.example/", |_| async {
+            Ok(vec!["192.168.1.1:80".parse::<std::net::SocketAddr>().unwrap()])
+        })
+        .await;
+        assert!(result.is_err(), "hostname resolving to a private IP should be rejected");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_hostname_dns_failure() {
+        let result = validate_url_impl("http://nxdomain.example/", |_| async {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no such host"))
+        })
+        .await;
+        assert!(result.is_err(), "DNS failure should be rejected (fail-closed)");
     }
 
     // --- write_to_file traversal tests ---
