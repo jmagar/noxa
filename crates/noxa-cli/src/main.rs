@@ -547,13 +547,155 @@ fn url_to_filename(raw_url: &str, format: &OutputFormat) -> String {
     format!("{sanitized}.{ext}")
 }
 
+/// Returns true if the IP address is loopback, private, link-local, or otherwise reserved.
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()                               // 127.0.0.0/8
+                || v4.is_unspecified()                     // 0.0.0.0
+                || v4.is_link_local()                      // 169.254.0.0/16 (IMDS)
+                || octets[0] == 10                         // 10.0.0.0/8
+                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) // 172.16-31.x
+                || (octets[0] == 192 && octets[1] == 168) // 192.168.0.0/16
+                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127) // 100.64.0.0/10 (Tailscale/CGNAT)
+        }
+        std::net::IpAddr::V6(v6) => {
+            // Unmap IPv4-mapped addresses (::ffff:x.x.x.x) and check as IPv4.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(std::net::IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()                         // ::1
+                || v6.is_unspecified()               // ::
+                || v6.is_multicast()                 // ff00::/8
+                || (seg0 & 0xffc0) == 0xfe80         // fe80::/10 link-local
+                || (seg0 & 0xfe00) == 0xfc00         // fc00::/7  unique-local (ULA)
+        }
+    }
+}
+
+/// Validate that a URL is non-empty, has an http/https scheme, and does not target
+/// private/loopback/reserved hosts (SSRF prevention).
+///
+/// For literal IP addresses the check is synchronous. For hostnames all A/AAAA
+/// records are resolved and rejected if any resolves to a private range.
+async fn validate_url(url: &str) -> Result<(), String> {
+    validate_url_impl(url, |host| async move {
+        tokio::net::lookup_host(host)
+            .await
+            .map(|iter| iter.collect::<Vec<_>>())
+    })
+    .await
+}
+
+/// Inner validation logic with an injectable resolver for deterministic testing.
+/// `resolve` receives `"host:80"` and returns the resolved socket addresses.
+async fn validate_url_impl<F, Fut>(url: &str, resolve: F) -> Result<(), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
+{
+    if url.is_empty() {
+        return Err("Invalid URL: must not be empty".into());
+    }
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("Invalid URL: {e}. Must start with http:// or https://"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!(
+            "Invalid URL: scheme '{}' not allowed, must start with http:// or https://",
+            parsed.scheme()
+        ));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Ok(());
+    };
+    let lower = host.to_lowercase();
+
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return Err(format!(
+            "Invalid URL: host '{host}' is a private or reserved address"
+        ));
+    }
+
+    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
+        if is_private_ip(ip) {
+            return Err(format!(
+                "Invalid URL: host '{host}' is a private or reserved address"
+            ));
+        }
+    } else {
+        // Resolve hostname; reject if any resolved address is private (fail-closed).
+        match resolve(format!("{host}:80")).await {
+            Ok(addrs) => {
+                for addr in addrs {
+                    if is_private_ip(addr.ip()) {
+                        return Err(format!(
+                            "Invalid URL: host '{host}' resolves to a private or reserved address"
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Invalid URL: could not resolve host '{host}': {e}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write extraction output to a file inside `dir`, creating parent dirs as needed.
 fn write_to_file(dir: &Path, filename: &str, content: &str) -> Result<(), String> {
+    // Reject path traversal and absolute paths before joining.
+    if filename.split(['/', '\\']).any(|p| p == ".." || p == ".")
+        || filename.starts_with('/')
+        || filename.starts_with('\\')
+        || filename.contains('\0')
+    {
+        return Err(format!("unsafe filename rejected: {filename}"));
+    }
     let dest = dir.join(filename);
+    // Lexical containment check (fast pre-filter).
+    if !dest.starts_with(dir) {
+        return Err(format!("filename escapes output directory: {filename}"));
+    }
+
+    // Ensure the output directory exists, then canonicalize it before any other I/O.
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("failed to create output directory: {e}"))?;
+    let canonical_dir = std::fs::canonicalize(dir)
+        .map_err(|e| format!("failed to resolve output directory: {e}"))?;
+
+    // If `dest` already exists, check for symlinks before any further side-effects.
+    // Use symlink_metadata (not exists/metadata) so dangling symlinks are also detected.
+    if let Ok(meta) = dest.symlink_metadata() {
+        if meta.file_type().is_symlink() {
+            // Any symlink at the destination — dangling or not — is rejected.
+            return Err(format!("filename escapes output directory via symlink: {filename}"));
+        }
+        // Regular file or directory: verify it's inside the canonical output dir.
+        let canonical_dest = std::fs::canonicalize(&dest)
+            .map_err(|e| format!("failed to resolve destination path: {e}"))?;
+        if !canonical_dest.starts_with(&canonical_dir) {
+            return Err(format!("filename escapes output directory: {filename}"));
+        }
+    }
+
+    // Create parent directories only after symlink checks pass.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
+        // Re-verify after dir creation: intermediate symlinks in the path may resolve
+        // to a location outside `dir`.
+        let canonical_parent = std::fs::canonicalize(parent)
+            .map_err(|e| format!("failed to resolve destination parent: {e}"))?;
+        if !canonical_parent.starts_with(&canonical_dir) {
+            return Err(format!("filename escapes output directory via symlink: {filename}"));
+        }
     }
+
     std::fs::write(&dest, content)
         .map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
     let word_count = content.split_whitespace().count();
@@ -2473,6 +2615,14 @@ async fn main() {
 
     init_logging(resolved.verbose);
 
+    // Validate webhook URL early so any SSRF attempt is rejected before operations run.
+    if let Some(ref webhook_url) = cli.webhook {
+        if let Err(e) = validate_url(webhook_url).await {
+            eprintln!("error: invalid webhook URL: {e}");
+            process::exit(1);
+        }
+    }
+
     // --map: sitemap discovery mode
     if cli.map {
         if let Err(e) = run_map(&cli, &resolved).await {
@@ -2751,5 +2901,145 @@ mod enum_deserialize_tests {
     fn test_pdf_mode_deserialize() {
         let p: PdfModeArg = serde_json::from_str("\"fast\"").unwrap();
         assert!(matches!(p, PdfModeArg::Fast));
+    }
+
+    // --- validate_url tests ---
+
+    #[tokio::test]
+    async fn validate_rejects_loopback() {
+        assert!(validate_url("http://127.0.0.1/secret").await.is_err());
+        assert!(validate_url("http://127.0.0.1:8080/secret").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_localhost() {
+        assert!(validate_url("http://localhost/secret").await.is_err());
+        assert!(validate_url("http://localhost:8080/secret").await.is_err());
+        assert!(validate_url("http://foo.localhost/secret").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_rfc1918() {
+        assert!(validate_url("http://10.0.0.1/").await.is_err());
+        assert!(validate_url("http://172.16.0.1/").await.is_err());
+        assert!(validate_url("http://172.31.255.255/").await.is_err());
+        assert!(validate_url("http://192.168.1.1/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_link_local() {
+        assert!(validate_url("http://169.254.169.254/latest/meta-data/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_tailscale() {
+        assert!(validate_url("http://100.100.1.1/").await.is_err());
+        assert!(validate_url("http://100.127.255.255/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv6_loopback() {
+        assert!(validate_url("http://[::1]/secret").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv6_link_local() {
+        assert!(validate_url("http://[fe80::1]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv6_ula() {
+        assert!(validate_url("http://[fd00::1]/").await.is_err());
+        assert!(validate_url("http://[fc00::1]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv4_mapped_ipv6() {
+        assert!(validate_url("http://[::ffff:127.0.0.1]/").await.is_err());
+        assert!(validate_url("http://[::ffff:169.254.169.254]/latest/meta-data/").await.is_err());
+        assert!(validate_url("http://[::ffff:10.0.0.1]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_public_ip() {
+        assert!(validate_url("http://8.8.8.8/").await.is_ok());
+        assert!(validate_url("http://1.1.1.1/").await.is_ok());
+    }
+
+    // Use validate_url_impl with a mock resolver to test the DNS path without
+    // hitting the network. This keeps hostname validation covered in all CI environments.
+
+    #[tokio::test]
+    async fn validate_accepts_hostname_resolving_to_public() {
+        let result = validate_url_impl("http://example.com/", |_| async {
+            Ok(vec!["93.184.216.34:80".parse::<std::net::SocketAddr>().unwrap()])
+        })
+        .await;
+        assert!(result.is_ok(), "hostname resolving to a public IP should be accepted");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_hostname_resolving_to_private() {
+        let result = validate_url_impl("http://attacker.example/", |_| async {
+            Ok(vec!["192.168.1.1:80".parse::<std::net::SocketAddr>().unwrap()])
+        })
+        .await;
+        assert!(result.is_err(), "hostname resolving to a private IP should be rejected");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_hostname_dns_failure() {
+        let result = validate_url_impl("http://nxdomain.example/", |_| async {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no such host"))
+        })
+        .await;
+        assert!(result.is_err(), "DNS failure should be rejected (fail-closed)");
+    }
+
+    // --- write_to_file traversal tests ---
+
+    #[test]
+    fn test_write_to_file_rejects_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        assert!(write_to_file(path, "../escape.md", "x").is_err());
+        assert!(write_to_file(path, "/etc/passwd", "x").is_err());
+        assert!(write_to_file(path, "..\\windows\\evil", "x").is_err());
+        assert!(write_to_file(path, "foo\0bar", "x").is_err());
+    }
+
+    #[test]
+    fn test_write_to_file_allows_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        assert!(write_to_file(path, "sub/file.md", "hello").is_ok());
+        assert!(path.join("sub/file.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_to_file_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        // Create a symlink inside `dir` pointing outside.
+        let link = path.join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        // Attempting to write through the symlink should be rejected.
+        assert!(write_to_file(path, "link/escape.md", "x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_to_file_rejects_leaf_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        // Create a leaf symlink inside `dir` pointing to a file outside.
+        let link = path.join("output.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // Writing to the leaf symlink should be rejected.
+        assert!(write_to_file(path, "output.md", "x").is_err());
     }
 }
