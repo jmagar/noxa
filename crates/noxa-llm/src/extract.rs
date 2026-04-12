@@ -8,44 +8,47 @@ use crate::provider::{CompletionRequest, LlmProvider, Message};
 
 /// Validate a JSON value against a schema. Returns Ok(()) on success or
 /// Err(LlmError::InvalidJson) with a concise error message on failure.
-fn validate_schema(
-    value: &serde_json::Value,
-    schema: &serde_json::Value,
-) -> Result<(), LlmError> {
-    let compiled = jsonschema::validator_for(schema).map_err(|e| {
-        LlmError::InvalidJson(format!("invalid schema: {e}"))
-    })?;
+fn validate_schema(value: &serde_json::Value, schema: &serde_json::Value) -> Result<(), LlmError> {
+    let compiled = jsonschema::validator_for(schema)
+        .map_err(|e| LlmError::InvalidJson(format!("invalid schema: {e}")))?;
 
-    let errors: Vec<String> = compiled
-        .iter_errors(value)
-        .map(|e| format!("{} at {}", e, e.instance_path()))
-        .collect();
+    let first_error = compiled.iter_errors(value).next();
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(LlmError::InvalidJson(format!(
-            "schema validation failed: {}",
-            errors.join("; ")
-        )))
+    match first_error {
+        None => Ok(()),
+        Some(e) => {
+            let msg = format!("{} at {}", e, e.instance_path());
+            Err(LlmError::InvalidJson(format!(
+                "schema validation failed: {msg}"
+            )))
+        }
     }
+}
+
+/// Compile a schema up front so invalid schemas fail before any provider call.
+fn validate_schema_definition(schema: &serde_json::Value) -> Result<(), LlmError> {
+    jsonschema::validator_for(schema)
+        .map(|_| ())
+        .map_err(|e| LlmError::InvalidJson(format!("invalid schema: {e}")))
 }
 
 /// Extract structured JSON from content using a JSON schema.
 /// The schema tells the LLM exactly what fields to extract and their types.
 ///
 /// Retry policy:
-/// - If the response cannot be parsed as JSON at all: retry once with the
-///   identical request (handles transient formatting issues).
-/// - If the response is valid JSON but fails schema validation: return
-///   `LlmError::InvalidJson` immediately — the schema is likely unsatisfiable
-///   for this content, so retrying would produce the same result.
+/// - If the response cannot be parsed as JSON: retry once with a correction prompt.
+/// - If the response is valid JSON but fails schema validation: retry once with
+///   a tighter correction prompt that includes the specific validation error.
+/// - Both retry attempts add the previous failed response as an 'assistant' message
+///   and the correction instructions as a 'user' message to improve success.
 pub async fn extract_json(
     content: &str,
     schema: &serde_json::Value,
     provider: &dyn LlmProvider,
     model: Option<&str>,
 ) -> Result<serde_json::Value, LlmError> {
+    validate_schema_definition(schema)?;
+
     let system = format!(
         "You are a JSON extraction engine. Extract data from the content according to this schema.\n\
          Return ONLY valid JSON matching the schema. No explanations, no markdown, no commentary.\n\n\
@@ -53,18 +56,20 @@ pub async fn extract_json(
         serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string())
     );
 
-    let request = CompletionRequest {
+    let mut messages = vec![
+        Message {
+            role: "system".into(),
+            content: system,
+        },
+        Message {
+            role: "user".into(),
+            content: content.to_string(),
+        },
+    ];
+
+    let mut request = CompletionRequest {
         model: model.unwrap_or_default().to_string(),
-        messages: vec![
-            Message {
-                role: "system".into(),
-                content: system,
-            },
-            Message {
-                role: "user".into(),
-                content: content.to_string(),
-            },
-        ],
+        messages: messages.clone(),
         temperature: Some(0.0),
         max_tokens: None,
         json_mode: true,
@@ -72,21 +77,52 @@ pub async fn extract_json(
 
     let response = provider.complete(&request).await?;
 
-    match parse_json_response(&response) {
-        Ok(value) => {
-            // Valid JSON — now validate against the schema.
-            // Schema mismatches do not retry (unsatisfiable → same result).
-            validate_schema(&value, schema)?;
-            Ok(value)
-        }
-        Err(_parse_err) => {
-            // Unparseable JSON — retry once with the identical request.
+    match parse_and_validate(&response, schema) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            // First attempt failed — retry once with a correction prompt.
+            // Construct a concise correction prompt based on the error type.
+            let correction_prompt = match &e {
+                LlmError::InvalidJson(msg) if msg.contains("schema validation failed") => {
+                    let error_msg = msg.replace("schema validation failed: ", "");
+                    format!("Correction required: {}. Return ONLY the corrected JSON.", error_msg)
+                }
+                _ => {
+                    "Your response was not valid JSON. Please return ONLY valid JSON matching the schema.".to_string()
+                }
+            };
+
+            // Limit correction context to prevent token blowup on large hallucinated outputs.
+            let capped_response = if response.len() > 2000 {
+                format!("{}... [truncated]", &response[..2000])
+            } else {
+                response.clone()
+            };
+
+            messages.push(Message {
+                role: "assistant".into(),
+                content: capped_response,
+            });
+            messages.push(Message {
+                role: "user".into(),
+                content: correction_prompt,
+            });
+
+            request.messages = messages;
             let retry_response = provider.complete(&request).await?;
-            let value = parse_json_response(&retry_response)?;
-            validate_schema(&value, schema)?;
-            Ok(value)
+            parse_and_validate(&retry_response, schema)
         }
     }
+}
+
+/// Helper: parse response string as JSON and validate it against the schema.
+fn parse_and_validate(
+    response: &str,
+    schema: &serde_json::Value,
+) -> Result<serde_json::Value, LlmError> {
+    let value = parse_json_response(response)?;
+    validate_schema(&value, schema)?;
+    Ok(value)
 }
 
 /// Extract information using a natural language prompt.
@@ -301,9 +337,7 @@ mod tests {
             ],
         );
 
-        let result = extract_json("content", &schema, &mock, None)
-            .await
-            .unwrap();
+        let result = extract_json("content", &schema, &mock, None).await.unwrap();
         assert_eq!(result["title"], "Retry succeeded");
     }
 
@@ -318,10 +352,7 @@ mod tests {
 
         let mock = SequenceMockProvider::new(
             "mock-seq",
-            vec![
-                Ok("not json".to_string()),
-                Ok("also not json".to_string()),
-            ],
+            vec![Ok("not json".to_string()), Ok("also not json".to_string())],
         );
 
         let result = extract_json("content", &schema, &mock, None).await;
@@ -332,7 +363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_mismatch_does_not_retry() {
+    async fn schema_mismatch_triggers_retry() {
         use crate::testing::mock::SequenceMockProvider;
 
         let schema = serde_json::json!({
@@ -343,20 +374,17 @@ mod tests {
             }
         });
 
-        // Both calls return valid JSON with wrong schema — but only one call should happen.
+        // First call: valid JSON but schema mismatch (price is string).
+        // Second call: valid JSON matching schema.
         let mock = SequenceMockProvider::new(
             "mock-seq",
             vec![
                 Ok(r#"{"price": "wrong-type"}"#.to_string()),
-                Ok(r#"{"price": 9.99}"#.to_string()), // would succeed — but shouldn't be called
+                Ok(r#"{"price": 9.99}"#.to_string()),
             ],
         );
 
-        // Should return InvalidJson without calling second response.
-        let result = extract_json("content", &schema, &mock, None).await;
-        assert!(
-            matches!(result, Err(LlmError::InvalidJson(_))),
-            "schema mismatch should not trigger retry"
-        );
+        let result = extract_json("content", &schema, &mock, None).await.unwrap();
+        assert_eq!(result["price"], 9.99);
     }
 }

@@ -13,7 +13,9 @@ docs/superpowers
 docs/reports
 docs/sessions
 benchmarks
-docs
+docs/*
+!docs/config.md
+.worktrees/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

@@ -255,11 +255,11 @@ struct Cli {
     summarize: Option<usize>,
 
     /// Force a specific LLM provider (gemini, ollama, openai, anthropic)
-    #[arg(long, env = "NOXA_LLM_PROVIDER")]
+    #[arg(long)]
     llm_provider: Option<String>,
 
     /// Override the LLM model name
-    #[arg(long, env = "NOXA_LLM_MODEL")]
+    #[arg(long)]
     llm_model: Option<String>,
 
     /// Override the LLM base URL (Ollama or OpenAI-compatible)
@@ -274,6 +274,30 @@ struct Cli {
     /// Force all requests through the cloud API (skip local extraction)
     #[arg(long)]
     cloud: bool,
+
+    /// Cloud provider to use (e.g. "gcp", "aws")
+    #[arg(long, env = "NOXA_CLOUD_PROVIDER")]
+    cloud_provider: Option<String>,
+
+    /// Cloud project ID
+    #[arg(long, env = "NOXA_CLOUD_PROJECT")]
+    cloud_project: Option<String>,
+
+    /// Cloud zone or region
+    #[arg(long, env = "NOXA_CLOUD_ZONE")]
+    cloud_zone: Option<String>,
+
+    /// Cloud cluster name
+    #[arg(long, env = "NOXA_CLOUD_CLUSTER")]
+    cloud_cluster: Option<String>,
+
+    /// Path to cloud service account key file
+    #[arg(long, env = "NOXA_CLOUD_SERVICE_ACCOUNT_KEY")]
+    cloud_service_account_key: Option<String>,
+
+    /// Disable cloud features
+    #[arg(long)]
+    cloud_disabled: bool,
 
     /// Run deep research on a topic via the cloud API. Requires --api-key.
     /// Saves full result (report + sources + findings) to a JSON file.
@@ -568,6 +592,103 @@ fn format_output(result: &ExtractionResult, format: &OutputFormat, show_metadata
         OutputFormat::Text => result.content.plain_text.clone(),
         OutputFormat::Llm => to_llm_text(result, result.metadata.url.as_deref()),
         OutputFormat::Html => raw_html_or_markdown(result).to_string(),
+    }
+}
+
+fn file_extension_for_format(format: &OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Markdown | OutputFormat::Llm => "md",
+        OutputFormat::Json => "json",
+        OutputFormat::Text => "txt",
+        OutputFormat::Html => "html",
+    }
+}
+
+fn format_cloud_output(resp: &serde_json::Value, format: &OutputFormat) -> String {
+    match format {
+        OutputFormat::Json => serde_json::to_string_pretty(resp).expect("serialization failed"),
+        OutputFormat::Markdown => resp
+            .get("content")
+            .and_then(|c| c.get("markdown"))
+            .and_then(|m| m.as_str())
+            .or_else(|| resp.get("markdown").and_then(|m| m.as_str()))
+            .map(str::to_string)
+            .unwrap_or_else(|| serde_json::to_string_pretty(resp).expect("serialization failed")),
+        OutputFormat::Text => resp
+            .get("content")
+            .and_then(|c| c.get("plain_text"))
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format_cloud_output(resp, &OutputFormat::Markdown)),
+        OutputFormat::Llm => resp
+            .get("content")
+            .and_then(|c| c.get("llm_text"))
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format_cloud_output(resp, &OutputFormat::Markdown)),
+        OutputFormat::Html => resp
+            .get("content")
+            .and_then(|c| c.get("raw_html"))
+            .and_then(|h| h.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format_cloud_output(resp, &OutputFormat::Markdown)),
+    }
+}
+
+fn format_diff_output(diff: &ContentDiff, format: &OutputFormat) -> String {
+    match format {
+        OutputFormat::Json => serde_json::to_string_pretty(diff).expect("serialization failed"),
+        _ => {
+            let mut out = String::new();
+            out.push_str(&format!("Status: {:?}\n", diff.status));
+            out.push_str(&format!("Word count delta: {:+}\n", diff.word_count_delta));
+
+            if !diff.metadata_changes.is_empty() {
+                out.push_str("\nMetadata changes:\n");
+                for change in &diff.metadata_changes {
+                    out.push_str(&format!(
+                        "  {}: {} -> {}\n",
+                        change.field,
+                        change.old.as_deref().unwrap_or("(none)"),
+                        change.new.as_deref().unwrap_or("(none)"),
+                    ));
+                }
+            }
+
+            if !diff.links_added.is_empty() {
+                out.push_str("\nLinks added:\n");
+                for link in &diff.links_added {
+                    out.push_str(&format!("  + {} ({})\n", link.href, link.text));
+                }
+            }
+
+            if !diff.links_removed.is_empty() {
+                out.push_str("\nLinks removed:\n");
+                for link in &diff.links_removed {
+                    out.push_str(&format!("  - {} ({})\n", link.href, link.text));
+                }
+            }
+
+            if let Some(ref text_diff) = diff.text_diff {
+                out.push_str(&format!("\n{text_diff}\n"));
+            }
+
+            out
+        }
+    }
+}
+
+fn format_map_output(entries: &[SitemapEntry], format: &OutputFormat) -> String {
+    match format {
+        OutputFormat::Json => serde_json::to_string_pretty(entries).expect("serialization failed"),
+        _ => {
+            let mut out = String::new();
+            for entry in entries {
+                out.push_str(&entry.url);
+                out.push('\n');
+            }
+            out
+        }
     }
 }
 
@@ -1295,7 +1416,7 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         }
     }
 
-    if let Some(ref dir) = cli.output_dir {
+    if let Some(ref dir) = resolved.output_dir {
         let mut saved = 0usize;
         for page in &result.pages {
             if let Some(ref extraction) = page.extraction {
@@ -1364,7 +1485,20 @@ async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         eprintln!("discovered {} URLs", entries.len());
     }
 
-    print_map_output(&entries, &resolved.format);
+    if let Some(ref dir) = resolved.output_dir {
+        let content = format_map_output(&entries, &resolved.format);
+        let filename = format!(
+            "sitemap.{}",
+            if matches!(resolved.format, OutputFormat::Json) {
+                "json"
+            } else {
+                "txt"
+            }
+        );
+        write_to_file(dir, &filename, &content)?;
+    } else {
+        print_map_output(&entries, &resolved.format);
+    }
     Ok(())
 }
 
@@ -1405,7 +1539,7 @@ async fn run_batch(
         .filter_map(|(url, name)| name.as_deref().map(|n| (url.as_str(), n)))
         .collect();
 
-    if let Some(ref dir) = cli.output_dir {
+    if let Some(ref dir) = resolved.output_dir {
         let mut saved = 0usize;
         for r in &results {
             if let Ok(ref extraction) = r.result {
@@ -1749,6 +1883,20 @@ async fn run_watch_multi(
                 eprintln!("  -> {url} (word delta: {delta:+})");
             }
 
+            if let Some(ref dir) = resolved.output_dir {
+                let payload = serde_json::json!({
+                    "event": "watch_changes",
+                    "check_number": check_number,
+                    "total_urls": urls.len(),
+                    "changed": changed.len(),
+                    "same": same_count,
+                    "changes": changed,
+                });
+                let filename = format!("watch-{}.json", ts.replace(':', "-"));
+                let content = serde_json::to_string_pretty(&payload).unwrap_or_default();
+                write_to_file(dir, &filename, &content)?;
+            }
+
             // Fire --on-change once with all changes
             if let Some(ref cmd) = cli.on_change {
                 let payload = serde_json::json!({
@@ -1812,7 +1960,20 @@ async fn run_diff(
     let new_result = fetch_and_extract(cli, resolved).await?.into_extraction()?;
 
     let diff = noxa_core::diff::diff(&old, &new_result);
-    print_diff_output(&diff, &resolved.format);
+    if let Some(ref dir) = resolved.output_dir {
+        let content = format_diff_output(&diff, &resolved.format);
+        let filename = format!(
+            "diff.{}",
+            if matches!(resolved.format, OutputFormat::Json) {
+                "json"
+            } else {
+                "txt"
+            }
+        );
+        write_to_file(dir, &filename, &content)?;
+    } else {
+        print_diff_output(&diff, &resolved.format);
+    }
 
     Ok(())
 }
@@ -1824,10 +1985,12 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         &enriched,
         Some(result.url.as_str()).filter(|s| !s.is_empty()),
     );
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&brand).expect("serialization failed")
-    );
+    let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
+    if let Some(ref dir) = resolved.output_dir {
+        write_to_file(dir, "brand.json", &output)?;
+    } else {
+        println!("{output}");
+    }
     Ok(())
 }
 
@@ -1884,7 +2047,7 @@ async fn build_llm_provider(
         let chain = noxa_llm::ProviderChain::default().await;
         if chain.is_empty() {
             return Err(
-                "no LLM providers available -- install the gemini CLI, start Ollama, or set OPENAI_API_KEY / ANTHROPIC_API_KEY"
+                "no LLM providers available (priority: Gemini CLI -> OpenAI -> Ollama -> Anthropic) -- install gemini on PATH, set OPENAI_API_KEY, OLLAMA_HOST / OLLAMA_MODEL, or ANTHROPIC_API_KEY"
                     .into(),
             );
         }
@@ -1898,6 +2061,7 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
 
     let provider = build_llm_provider(cli, resolved).await?;
     let model = resolved.llm_model.as_deref();
+    let mut file_output: Option<(String, OutputFormat)> = None;
 
     if let Some(ref schema_input) = cli.extract_json {
         // Support @file syntax for loading schema from file
@@ -1922,10 +2086,10 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM extraction failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&extracted).expect("serialization failed")
-        );
+        file_output = Some((
+            serde_json::to_string_pretty(&extracted).expect("serialization failed"),
+            OutputFormat::Json,
+        ));
     } else if let Some(ref prompt) = cli.extract_prompt {
         let t = std::time::Instant::now();
         let extracted = noxa_llm::extract::extract_with_prompt(
@@ -1938,10 +2102,10 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM extraction failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&extracted).expect("serialization failed")
-        );
+        file_output = Some((
+            serde_json::to_string_pretty(&extracted).expect("serialization failed"),
+            OutputFormat::Json,
+        ));
     } else if let Some(sentences) = cli.summarize {
         let t = std::time::Instant::now();
         let summary = noxa_llm::summarize::summarize(
@@ -1954,7 +2118,21 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM summarization failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        println!("{summary}");
+        file_output = Some((summary, OutputFormat::Text));
+    }
+
+    if let Some((output_str, file_format)) = file_output {
+        if let Some(ref dir) = resolved.output_dir {
+            let url = cli
+                .urls
+                .first()
+                .map(|u| normalize_url(u))
+                .unwrap_or_default();
+            let filename = url_to_filename(&url, &file_format);
+            write_to_file(dir, &filename, &output_str)?;
+        } else {
+            println!("{output_str}");
+        }
     }
 
     Ok(())
@@ -2067,11 +2245,16 @@ async fn run_batch_llm(
                 };
                 eprintln!("-> extracted {detail} ({:.1}s)", llm_elapsed.as_secs_f64());
 
-                if let Some(ref dir) = cli.output_dir {
+                if let Some(ref dir) = resolved.output_dir {
+                    let file_format = if cli.summarize.is_some() {
+                        OutputFormat::Text
+                    } else {
+                        OutputFormat::Json
+                    };
                     let filename = custom_names
                         .get(url.as_str())
                         .map(|s| s.to_string())
-                        .unwrap_or_else(|| url_to_filename(url, &OutputFormat::Json));
+                        .unwrap_or_else(|| url_to_filename(url, &file_format));
                     write_to_file(dir, &filename, &output_str)?;
                 } else {
                     println!("--- {url}");
@@ -2123,7 +2306,11 @@ fn has_llm_flags(cli: &Cli) -> bool {
     cli.extract_json.is_some() || cli.extract_prompt.is_some() || cli.summarize.is_some()
 }
 
-async fn run_research(cli: &Cli, query: &str) -> Result<(), String> {
+async fn run_research(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+    query: &str,
+) -> Result<(), String> {
     let api_key = cli
         .api_key
         .as_deref()
@@ -2209,8 +2396,12 @@ async fn run_research(cli: &Cli, query: &str) -> Result<(), String> {
                 let filename = format!("research-{slug}.json");
 
                 let json = serde_json::to_string_pretty(&status_resp).unwrap_or_default();
-                std::fs::write(&filename, &json)
-                    .map_err(|e| format!("failed to write {filename}: {e}"))?;
+                if let Some(ref dir) = resolved.output_dir {
+                    write_to_file(dir, &filename, &json)?;
+                } else {
+                    std::fs::write(&filename, &json)
+                        .map_err(|e| format!("failed to write {filename}: {e}"))?;
+                }
 
                 let elapsed = status_resp
                     .get("elapsed_ms")
@@ -2336,7 +2527,7 @@ async fn main() {
 
     // --research: deep research via cloud API
     if let Some(ref query) = cli.research {
-        if let Err(e) = run_research(&cli, query).await {
+        if let Err(e) = run_research(&cli, &resolved, query).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2377,10 +2568,7 @@ async fn main() {
     }
 
     // --raw-html: skip extraction, dump the fetched HTML
-    if resolved.raw_html
-        && resolved.include_selectors.is_empty()
-        && resolved.exclude_selectors.is_empty()
-    {
+    if resolved.raw_html {
         match fetch_html(&cli, &resolved).await {
             Ok(r) => println!("{}", r.html),
             Err(e) => {
@@ -2394,7 +2582,7 @@ async fn main() {
     // Single-page extraction (handles both HTML and PDF via content-type detection)
     match fetch_and_extract(&cli, &resolved).await {
         Ok(FetchOutput::Local(result)) => {
-            if let Some(ref dir) = cli.output_dir {
+            if let Some(ref dir) = resolved.output_dir {
                 let url = cli
                     .urls
                     .first()
@@ -2413,7 +2601,23 @@ async fn main() {
             }
         }
         Ok(FetchOutput::Cloud(resp)) => {
-            print_cloud_output(&resp, &resolved.format);
+            if let Some(ref dir) = resolved.output_dir {
+                let url = cli
+                    .urls
+                    .first()
+                    .map(|u| normalize_url(u))
+                    .unwrap_or_default();
+                let custom_name = entries.first().and_then(|(_, name)| name.clone());
+                let filename =
+                    custom_name.unwrap_or_else(|| url_to_filename(&url, &resolved.format));
+                let content = format_cloud_output(&resp, &resolved.format);
+                if let Err(e) = write_to_file(dir, &filename, &content) {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            } else {
+                print_cloud_output(&resp, &resolved.format);
+            }
         }
         Err(e) => {
             eprintln!("{e}");

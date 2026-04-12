@@ -18,6 +18,8 @@ use url::Url;
 use crate::cloud::{self, CloudClient, SmartFetchResult};
 use crate::tools::*;
 
+const NO_LLM_PROVIDERS_MESSAGE: &str = "No LLM providers available (priority: Gemini CLI -> OpenAI -> Ollama -> Anthropic). Install gemini on PATH, set OPENAI_API_KEY, OLLAMA_HOST / OLLAMA_MODEL, or ANTHROPIC_API_KEY, or set NOXA_API_KEY for cloud fallback.";
+
 pub struct NoxaMcp {
     tool_router: ToolRouter<Self>,
     fetch_client: Arc<noxa_fetch::FetchClient>,
@@ -89,7 +91,7 @@ impl NoxaMcp {
 
         let chain = noxa_llm::ProviderChain::default().await;
         let llm_chain = if chain.is_empty() {
-            warn!("no LLM providers available (gemini CLI, OPENAI_API_KEY, ANTHROPIC_API_KEY) -- extract/summarize tools will fail");
+            warn!("{NO_LLM_PROVIDERS_MESSAGE} -- extract/summarize tools will fail");
             None
         } else {
             info!(providers = chain.len(), "LLM provider chain ready");
@@ -333,9 +335,7 @@ impl NoxaMcp {
 
         // No local LLM — fall back to cloud API directly
         if self.llm_chain.is_none() {
-            let cloud = self.cloud.as_ref().ok_or(
-                "No LLM providers available. Install the gemini CLI, set OPENAI_API_KEY, ANTHROPIC_API_KEY, or NOXA_API_KEY for cloud fallback.",
-            )?;
+            let cloud = self.cloud.as_ref().ok_or(NO_LLM_PROVIDERS_MESSAGE)?;
             let mut body = json!({"url": params.url});
             if let Some(ref schema) = params.schema {
                 body["schema"] = json!(schema);
@@ -386,9 +386,7 @@ impl NoxaMcp {
 
         // No local LLM — fall back to cloud API directly
         if self.llm_chain.is_none() {
-            let cloud = self.cloud.as_ref().ok_or(
-                "No LLM providers available. Install the gemini CLI, set OPENAI_API_KEY, ANTHROPIC_API_KEY, or NOXA_API_KEY for cloud fallback.",
-            )?;
+            let cloud = self.cloud.as_ref().ok_or(NO_LLM_PROVIDERS_MESSAGE)?;
             let mut body = json!({"url": params.url});
             if let Some(sentences) = params.max_sentences {
                 body["max_sentences"] = json!(sentences);
@@ -425,9 +423,8 @@ impl NoxaMcp {
     #[tool]
     async fn diff(&self, Parameters(params): Parameters<DiffParams>) -> Result<String, String> {
         validate_url(&params.url)?;
-        let previous: noxa_core::ExtractionResult =
-            serde_json::from_str(&params.previous_snapshot)
-                .map_err(|e| format!("Failed to parse previous_snapshot JSON: {e}"))?;
+        let previous: noxa_core::ExtractionResult = serde_json::from_str(&params.previous_snapshot)
+            .map_err(|e| format!("Failed to parse previous_snapshot JSON: {e}"))?;
 
         let result = cloud::smart_fetch(
             &self.fetch_client,
@@ -515,8 +512,7 @@ impl NoxaMcp {
             }
         }
 
-        let identity =
-            noxa_core::brand::extract_brand(&fetch_result.html, Some(&fetch_result.url));
+        let identity = noxa_core::brand::extract_brand(&fetch_result.html, Some(&fetch_result.url));
 
         Ok(serde_json::to_string_pretty(&identity).unwrap_or_default())
     }

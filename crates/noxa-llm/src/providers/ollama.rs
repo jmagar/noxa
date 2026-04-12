@@ -8,6 +8,8 @@ use crate::clean::strip_thinking_tags;
 use crate::error::LlmError;
 use crate::provider::{CompletionRequest, LlmProvider};
 
+const DEFAULT_HEALTH_TIMEOUT_MS: u64 = 2_000;
+
 pub struct OllamaProvider {
     client: reqwest::Client,
     base_url: String,
@@ -22,7 +24,7 @@ impl OllamaProvider {
 
         let default_model = model
             .or_else(|| std::env::var("OLLAMA_MODEL").ok())
-            .unwrap_or_else(|| "qwen3:8b".into());
+            .unwrap_or_else(|| "qwen3.5:9b".into());
 
         Self {
             client: reqwest::Client::new(),
@@ -98,7 +100,7 @@ impl LlmProvider for OllamaProvider {
     async fn is_available(&self) -> bool {
         let url = format!("{}/api/tags", self.base_url);
         matches!(
-            tokio::time::timeout(Duration::from_millis(500), self.client.get(&url).send()).await,
+            tokio::time::timeout(health_timeout(), self.client.get(&url).send()).await,
             Ok(Ok(r)) if r.status().is_success()
         )
     }
@@ -106,6 +108,18 @@ impl LlmProvider for OllamaProvider {
     fn name(&self) -> &str {
         "ollama"
     }
+}
+
+fn health_timeout() -> Duration {
+    health_timeout_from_env(std::env::var("OLLAMA_HEALTH_TIMEOUT_MS").ok())
+}
+
+fn health_timeout_from_env(value: Option<String>) -> Duration {
+    value
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_HEALTH_TIMEOUT_MS))
 }
 
 #[cfg(test)]
@@ -140,6 +154,27 @@ mod tests {
     fn default_model_accessor() {
         let provider = OllamaProvider::new(None, Some("phi3:mini".into()));
         assert_eq!(provider.default_model(), "phi3:mini");
+    }
+
+    #[test]
+    fn health_timeout_from_env_defaults_when_unset() {
+        assert_eq!(health_timeout_from_env(None), Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn health_timeout_from_env_parses_override() {
+        assert_eq!(
+            health_timeout_from_env(Some("1500".into())),
+            Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn health_timeout_from_env_ignores_invalid_values() {
+        assert_eq!(
+            health_timeout_from_env(Some("not-a-number".into())),
+            Duration::from_millis(2000)
+        );
     }
 
     // Env var fallback is a trivial `env::var().ok()` -- not worth the flakiness

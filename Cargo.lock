@@ -1746,7 +1746,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-cli"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "clap",
  "dotenvy",
@@ -1768,7 +1768,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-core"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "ego-tree",
  "once_cell",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-fetch"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "calamine",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-llm"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-mcp"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "dirs",
  "dotenvy",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-pdf"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "pdf-extract",
  "thiserror",

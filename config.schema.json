@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "./config.schema.json",
+  "title": "Noxa config.json",
+  "description": "Optional non-secret defaults for the noxa CLI. Unknown fields are ignored by the binary, and secrets/URLs belong in .env.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor hint pointing at this schema."
+    },
+    "_doc": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Human-readable notes. Ignored by noxa."
+    },
+    "format": {
+      "type": "string",
+      "enum": ["markdown", "json", "text", "llm", "html"],
+      "default": "markdown",
+      "description": "Default output format."
+    },
+    "browser": {
+      "type": "string",
+      "enum": ["chrome", "firefox", "random"],
+      "default": "chrome",
+      "description": "TLS/browser fingerprint profile."
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 30,
+      "description": "Request timeout in seconds."
+    },
+    "pdf_mode": {
+      "type": "string",
+      "enum": ["auto", "fast"],
+      "default": "auto",
+      "description": "How PDFs are handled."
+    },
+    "metadata": {
+      "type": "boolean",
+      "default": false,
+      "description": "Include metadata in output."
+    },
+    "verbose": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable verbose logging."
+    },
+    "output_dir": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Write outputs to files in this directory instead of stdout."
+    },
+    "only_main_content": {
+      "type": "boolean",
+      "default": false,
+      "description": "Strip nav/sidebar/footer noise automatically."
+    },
+    "include_selectors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "CSS selectors to force-include."
+    },
+    "exclude_selectors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "CSS selectors to exclude."
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1,
+      "description": "Maximum crawl depth."
+    },
+    "max_pages": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 20,
+      "description": "Maximum number of pages to crawl."
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5,
+      "description": "Maximum concurrent requests."
+    },
+    "delay": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 100,
+      "description": "Delay between requests in milliseconds."
+    },
+    "path_prefix": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Only crawl paths with this prefix."
+    },
+    "include_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "Glob patterns for crawl paths to include."
+    },
+    "exclude_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "Glob patterns for crawl paths to exclude."
+    },
+    "use_sitemap": {
+      "type": "boolean",
+      "default": false,
+      "description": "Seed crawl traversal from sitemap discovery."
+    },
+    "llm_provider": {
+      "type": "string",
+      "enum": ["gemini", "ollama", "openai", "anthropic"],
+      "description": "Optional LLM provider name."
+    },
+    "llm_model": {
+      "type": "string",
+      "description": "Optional LLM model override."
+    }
+  }
+}

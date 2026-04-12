@@ -50,7 +50,7 @@ Two binaries: `noxa` (CLI), `noxa-mcp` (MCP server).
 ### LLM Modules (`noxa-llm`)
 - Provider chain: Gemini CLI (primary) -> OpenAI -> Ollama -> Anthropic
 - Gemini CLI requires the `gemini` binary on PATH; `GEMINI_MODEL` env var controls model (default: `gemini-2.5-pro`)
-- JSON schema extraction with jsonschema validation; parse failures retry once; schema mismatches fail immediately
+- JSON schema extraction with jsonschema validation; retries once with a correction prompt on both parse failures and schema mismatches.
 - Prompt-based extraction, summarization
 
 ### PDF Modules (`noxa-pdf`)

@@ -19,6 +19,7 @@
   <a href="https://x.com/noxa_io"><img src="https://img.shields.io/badge/Follow-@noxa__io-000000?style=for-the-badge&logo=x&logoColor=white" alt="X / Twitter" /></a>
   <a href="https://noxa.io"><img src="https://img.shields.io/badge/Website-noxa.io-0A0A0A?style=for-the-badge&logo=safari&logoColor=white" alt="Website" /></a>
   <a href="https://noxa.io/docs"><img src="https://img.shields.io/badge/Docs-Read-3B82F6?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs" /></a>
+  <a href="docs/config.md"><img src="https://img.shields.io/badge/Config-Guide-10B981?style=for-the-badge&logo=json&logoColor=white" alt="Config guide" /></a>
 </p>
 
 ---
@@ -55,6 +56,8 @@ It extracts clean, structured content from any URL using Chrome-level TLS finger
 
 ## Get Started (30 seconds)
 
+Need config details? See [`docs/config.md`](docs/config.md) for how `config.json` and `.env` work together.
+
 ### For AI agents (Claude, Cursor, Windsurf, VS Code)
 
 ```bash
@@ -78,8 +81,11 @@ Download from [GitHub Releases](https://github.com/jmagar/noxa/releases) for mac
 
 ```bash
 cargo install --git https://github.com/jmagar/noxa.git noxa-cli --bin noxa
-cargo install --git https://github.com/jmagar/noxa.git noxa-mcp
 ```
+
+After installing the CLI, run the embedded MCP entrypoint with `noxa mcp`.
+If you still need the standalone server binary for legacy setups, `noxa-mcp`
+remains available as a separate package.
 
 ### Docker
 
@@ -331,7 +337,11 @@ noxa -H "X-Custom: value" -H "Authorization: Bearer token" https://example.com
 
 ### LLM-Powered Features
 
-These require an LLM provider (Ollama local, or OpenAI/Anthropic API key).
+These require an LLM provider. noxa tries Gemini CLI first (requires the `gemini`
+binary on PATH and uses `GEMINI_MODEL`, default `gemini-2.5-pro`), then falls
+back to OpenAI, Ollama local, and Anthropic. Structured JSON extraction is
+automatically validated against your schema and retried once with a correction
+prompt if the first attempt fails.
 
 ```bash
 # Summarize a page (default: 3 sentences)
@@ -350,6 +360,7 @@ noxa --extract-json @schema.json https://example.com/product
 noxa --extract-prompt "Get all pricing tiers with name, price, and features" https://stripe.com/pricing
 
 # Use a specific LLM provider
+noxa --llm-provider gemini --summarize https://example.com
 noxa --llm-provider ollama --summarize https://example.com
 noxa --llm-provider openai --llm-model gpt-4o --extract-prompt "..." https://example.com
 noxa --llm-provider anthropic --summarize https://example.com
@@ -440,7 +451,8 @@ Or manual setup — add to your Claude Desktop config:
 {
   "mcpServers": {
     "noxa": {
-      "command": "~/.noxa/noxa-mcp"
+      "command": "noxa",
+      "args": ["mcp"]
     }
   }
 }
@@ -580,7 +592,7 @@ noxa/
   crates/
     noxa-core     Pure extraction engine. Zero network deps. WASM-safe.
     noxa-fetch    HTTP client + TLS fingerprinting (wreq/BoringSSL). Crawler. Batch ops.
-    noxa-llm      LLM provider chain (Ollama -> OpenAI -> Anthropic)
+    noxa-llm      LLM provider chain (Gemini CLI -> OpenAI -> Ollama -> Anthropic)
     noxa-pdf      PDF text extraction
     noxa-mcp      MCP server (10 tools for AI agents)
     noxa      CLI binary
@@ -592,7 +604,10 @@ noxa/
 
 ## Configuration
 
-Non-secret defaults live in `config.json` in your working directory. Copy the example:
+Non-secret defaults live in `config.json` in your working directory. The full behavior contract is documented in [`docs/config.md`](docs/config.md).
+Set `output_dir` in `config.json` if you want results written to files instead of stdout.
+
+Copy the example:
 
 ```bash
 cp config.example.json config.json
@@ -600,7 +615,11 @@ cp config.example.json config.json
 
 **Precedence:** CLI flags > `config.json` > built-in defaults
 
-**Secrets and URLs** (API keys, proxy, webhook, LLM base URL) always go in `.env`, not `config.json`:
+For `llm_provider` and `llm_model`, leaving the keys unset preserves the
+Gemini -> OpenAI -> Ollama -> Anthropic fallback chain. Setting them in
+`config.json` or on the CLI forces that specific provider/model.
+
+**Secrets and URLs** always go in `.env`, not `config.json`:
 
 ```bash
 cp env.example .env
@@ -613,18 +632,64 @@ NOXA_CONFIG=/path/to/other-config.json noxa https://example.com
 NOXA_CONFIG=/dev/null noxa https://example.com  # bypass config entirely
 ```
 
-**Bool flag limitation:** flags like `--metadata`, `--only-main-content`, `--verbose` set to `true` in `config.json` cannot be overridden to `false` from the CLI for a single run (clap has no `--no-flag` variant). Use `NOXA_CONFIG=/dev/null` to bypass.
+**Bool flag limitation:** flags like `--metadata`, `--only-main-content`, `--verbose`, and `--use-sitemap` set to `true` in `config.json` cannot be overridden to `false` from the CLI for a single run (clap has no `--no-flag` variant). Use `NOXA_CONFIG=/dev/null` to bypass.
+
+### Cloud configuration
+
+The `cloud` block in `config.json` allows you to configure the cloud provider settings.
+
+```json
+{
+  "cloud": {
+    "provider": "gcp",
+    "project": "my-gcp-project",
+    "zone": "us-central1-a",
+    "cluster": "my-cluster",
+    "service_account_key": "/path/to/key.json",
+    "disabled": false
+  }
+}
+```
+
+These settings can also be controlled via command-line flags:
+
+- `--cloud-provider`: Cloud provider to use (e.g. "gcp", "aws")
+- `--cloud-project`: Cloud project ID
+- `--cloud-zone`: Cloud zone or region
+- `--cloud-cluster`: Cloud cluster name
+- `--cloud-service-account-key`: Path to cloud service account key file
+- `--cloud-disabled`: Disable cloud features
 
 ### Environment variables
 
 | Variable | Description |
 |----------|-------------|
 | `NOXA_API_KEY` | Cloud API key (enables bot bypass, JS rendering, search, research) |
-| `OLLAMA_HOST` | Ollama URL for local LLM features (default: `http://localhost:11434`) |
-| `OPENAI_API_KEY` | OpenAI API key for LLM features |
-| `ANTHROPIC_API_KEY` | Anthropic API key for LLM features |
 | `NOXA_PROXY` | Single proxy URL |
 | `NOXA_PROXY_FILE` | Path to proxy pool file |
+| `NOXA_WEBHOOK_URL` | Webhook URL for notifications |
+| `NOXA_LLM_BASE_URL` | LLM base URL for Ollama or OpenAI-compatible endpoints |
+| `NOXA_LLM_PROVIDER` | Default LLM provider |
+| `NOXA_LLM_MODEL` | Default LLM model |
+| `OLLAMA_HEALTH_TIMEOUT_MS` | Ollama availability check timeout in milliseconds |
+| `NOXA_CONFIG` | Path to `config.json` or `/dev/null` to bypass it |
+
+The `env.example` file covers the runtime noxa variables above.
+
+If you use `setup.sh` or the Docker Compose stack, they also rely on these local deployment variables:
+
+- `NOXA_PORT`
+- `NOXA_HOST`
+- `NOXA_AUTH_KEY`
+- `NOXA_LOG`
+- `OLLAMA_HOST`
+- `OLLAMA_MODEL`
+
+LLM provider backends may also use these environment variables:
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GEMINI_MODEL`
 
 ---
 

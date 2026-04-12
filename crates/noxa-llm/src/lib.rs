@@ -2,7 +2,7 @@
 ///
 /// Provider chain: Gemini CLI (primary) → OpenAI → Ollama → Anthropic.
 /// Gemini CLI requires the `gemini` binary on PATH; GEMINI_MODEL env var sets the model.
-/// Provides schema-validated extraction (with one retry on parse failure),
+/// Provides schema-validated extraction (with one retry on parse or schema mismatch),
 /// prompt extraction, and summarization on top of noxa-core's content pipeline.
 pub mod chain;
 pub mod clean;

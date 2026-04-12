@@ -29,9 +29,6 @@ mod tests {
 
     #[test]
     fn none_override_with_no_env_returns_none() {
-        assert_eq!(
-            load_api_key(None, "NOXA_TEST_NONEXISTENT_KEY_12345"),
-            None
-        );
+        assert_eq!(load_api_key(None, "NOXA_TEST_NONEXISTENT_KEY_12345"), None);
     }
 }

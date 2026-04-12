@@ -4,8 +4,8 @@
 /// extract, chain, and other modules that need a fake LLM backend.
 #[cfg(test)]
 pub(crate) mod mock {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
 
@@ -50,7 +50,7 @@ pub(crate) mod mock {
     }
 
     /// A mock provider that returns responses from a sequence.
-    /// Call N → returns responses[N], wrapping at the end.
+    /// Call N → returns responses[N], clamping to the final response.
     /// Useful for testing first-failure / second-success retry paths.
     pub struct SequenceMockProvider {
         pub name: &'static str,
@@ -60,10 +60,11 @@ pub(crate) mod mock {
     }
 
     impl SequenceMockProvider {
-        pub fn new(
-            name: &'static str,
-            responses: Vec<Result<String, String>>,
-        ) -> Self {
+        pub fn new(name: &'static str, responses: Vec<Result<String, String>>) -> Self {
+            assert!(
+                !responses.is_empty(),
+                "SequenceMockProvider requires at least one response"
+            );
             Self {
                 name,
                 responses,

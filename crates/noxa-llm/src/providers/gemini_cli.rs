@@ -12,11 +12,11 @@
 ///
 /// Two flags reduce this:
 /// - `--extensions ""` — skips extension loading (~3 s saved)
-/// - `current_dir` set to a temp workdir containing `.gemini/settings.json` with
-///   `{"mcpServers":{}}` — workspace settings override user settings, so all 6 MCP
+/// - `current_dir` set to a best-effort temp workdir containing `.gemini/settings.json`
+///   with `{"mcpServers":{}}` — workspace settings override user settings, so all 6 MCP
 ///   servers are skipped at subprocess startup (major speedup).
 ///
-/// The workdir is created once at construction and reused for every call.
+/// The workdir is created once at construction and reused for every call when available.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,10 +36,6 @@ const MAX_CONCURRENT: usize = 6;
 /// Subprocess deadline — prevents hung `gemini` processes blocking the chain.
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Fixed workdir used for every subprocess call.
-/// A workspace-level `.gemini/settings.json` here overrides the user's MCP server config.
-const NOXA_GEMINI_WORKDIR: &str = "/tmp/noxa-gemini";
-
 pub struct GeminiCliProvider {
     default_model: String,
     semaphore: Arc<Semaphore>,
@@ -56,7 +52,7 @@ impl GeminiCliProvider {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "gemini-2.5-pro".into());
 
-        let workdir = PathBuf::from(NOXA_GEMINI_WORKDIR);
+        let workdir = std::env::temp_dir().join("noxa-gemini");
         ensure_gemini_workdir(&workdir);
 
         Self {
@@ -106,11 +102,14 @@ impl LlmProvider for GeminiCliProvider {
         // Workspace settings in self.workdir override the user's ~/.gemini/settings.json,
         // replacing the user's MCP server list with {} so none are spawned at startup.
         // Without this, each of the user's MCP servers adds latency to every call.
-        cmd.current_dir(&self.workdir);
+        if self.workdir.is_dir() {
+            cmd.current_dir(&self.workdir);
+        }
 
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
 
         debug!(model, workdir = %self.workdir.display(), "spawning gemini subprocess");
 
@@ -169,7 +168,9 @@ fn extract_response_from_output(stdout: &str) -> Result<String, LlmError> {
     let json_str = &stdout[json_start..];
     let outer: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
         let preview = &json_str[..json_str.len().min(300)];
-        LlmError::ProviderError(format!("failed to parse gemini JSON output: {e} — {preview}"))
+        LlmError::ProviderError(format!(
+            "failed to parse gemini JSON output: {e} — {preview}"
+        ))
     })?;
 
     // `response` holds the model's actual text output.
@@ -320,10 +321,7 @@ mod tests {
     fn extracts_response_skipping_mcp_noise() {
         // MCP warning line appears before the JSON object in real gemini output.
         let stdout = "MCP issues detected. Run /mcp list for status.\n{\"session_id\":\"abc\",\"response\":\"the answer\",\"stats\":{}}";
-        assert_eq!(
-            extract_response_from_output(stdout).unwrap(),
-            "the answer"
-        );
+        assert_eq!(extract_response_from_output(stdout).unwrap(), "the answer");
     }
 
     #[test]

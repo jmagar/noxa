@@ -12,10 +12,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use noxa_pdf::PdfMode;
 use rand::seq::SliceRandom;
 use tokio::sync::Semaphore;
 use tracing::{debug, instrument, warn};
-use noxa_pdf::PdfMode;
 
 use crate::browser::{self, BrowserProfile, BrowserVariant};
 use crate::error::FetchError;
@@ -573,10 +573,7 @@ fn extract_homepage(url: &str) -> Option<String> {
 }
 
 /// Convert a noxa-pdf PdfResult into a noxa-core ExtractionResult.
-fn pdf_to_extraction_result(
-    pdf: &noxa_pdf::PdfResult,
-    url: &str,
-) -> noxa_core::ExtractionResult {
+fn pdf_to_extraction_result(pdf: &noxa_pdf::PdfResult, url: &str) -> noxa_core::ExtractionResult {
     let markdown = noxa_pdf::to_markdown(pdf);
     let word_count = markdown.split_whitespace().count();
 

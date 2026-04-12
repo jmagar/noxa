@@ -1,3 +1,4 @@
+use noxa_core::{Content, ExtractionResult, Metadata};
 /// LinkedIn post extraction from authenticated HTML.
 ///
 /// LinkedIn's SPA stores all data in `<code>` tags as HTML-escaped JSON.
@@ -5,7 +6,6 @@
 /// Profile, etc. We parse these to reconstruct post + comments as markdown.
 use serde_json::Value;
 use tracing::debug;
-use noxa_core::{Content, ExtractionResult, Metadata};
 
 /// Check if a URL is a LinkedIn post/activity.
 pub fn is_linkedin_post(url: &str) -> bool {

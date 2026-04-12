@@ -3,6 +3,24 @@
 All notable changes to noxa are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0] — 2026-04-12
+
+### Added
+- **Gemini CLI provider**: new primary LLM provider that shells out to the `gemini` binary. Passes prompts via `-p` flag (injection-safe), requests `--output-format json`, and suppresses MCP server startup via a temp workdir with `{"mcpServers":{}}`. Concurrency limited to 6 parallel subprocess calls with a 60s deadline.
+- **`--llm-provider` flag**: force a specific provider (`gemini`, `ollama`, `openai`, `anthropic`) per invocation.
+- **`--llm-model` flag**: override the model name for the selected provider.
+- **`--llm-base-url` flag**: override the base URL for Ollama or OpenAI-compatible endpoints.
+- **MCP `noxa mcp` subcommand**: expose the MCP server via a dedicated CLI subcommand.
+- **LLM benchmark report**: `docs/reports/llm-benchmark-2026-04-11.md` — timing and quality comparison of Gemini CLI vs qwen3.5:4b vs qwen3.5:9b across summarize, prompt extract, and schema extract tasks.
+
+### Changed
+- **Provider chain order**: Gemini CLI → OpenAI → Ollama → Anthropic (Gemini is now the default primary).
+- **Default Ollama model**: changed from `qwen3:8b` to `qwen3.5:9b` based on benchmark results showing better quality on schema extraction.
+- **LLM timing moved to dispatch layer**: `LLM: Xs` line printed to stderr at the call site rather than inside individual providers.
+- **Gemini startup optimization**: workspace settings override disables all MCP servers for subprocess calls, saving 10–60s of startup latency per call.
+
+---
+
 ## [0.3.11] — 2026-04-10
 
 ### Added

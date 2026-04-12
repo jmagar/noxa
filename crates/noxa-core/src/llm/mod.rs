@@ -92,6 +92,51 @@ mod tests {
     }
 
     #[test]
+    fn strips_emphasis_from_body() {
+        let md = "# Hello\n\nThis is **bold** and this is *italic*. Also __underbold__ and _underitalic_.";
+        let result = make_result(md);
+        let out = to_llm_text(&result, None);
+
+        assert!(out.contains("This is bold and this is italic. Also underbold and underitalic."));
+        assert!(!out.contains("**"));
+        assert!(!out.contains("__"));
+        assert!(!out.contains("* italic *")); // regex shouldn't leave spaces usually but checking marker absence
+        assert!(!out.contains("_underitalic_"));
+    }
+
+    #[test]
+    fn dedups_repeated_phrases_in_line() {
+        let md = "Read more Read more Read more\n\nSome other text.";
+        let result = make_result(md);
+        let out = to_llm_text(&result, None);
+
+        assert!(out.contains("Read more"));
+        assert_eq!(out.matches("Read more").count(), 1);
+    }
+
+    #[test]
+    fn dedups_repeated_content_blocks() {
+        let md = "This is a block of text that is long enough to be deduped properly by the fingerprinting logic.\n\n\
+                  This is a block of text that is long enough to be deduped properly by the fingerprinting logic.";
+        let result = make_result(md);
+        let out = to_llm_text(&result, None);
+
+        // Should only appear once
+        assert_eq!(out.matches("fingerprinting logic").count(), 1);
+    }
+
+    #[test]
+    fn dedups_near_duplicate_content_blocks() {
+        let md = "First ten words of this block should be unique enough for prefix matching.\n\n\
+                  First ten words of this block should be unique enough for prefix matching but with extra text.";
+        let result = make_result(md);
+        let out = to_llm_text(&result, None);
+
+        // Near duplicate (same first 10 words) should be removed
+        assert_eq!(out.matches("First ten words").count(), 1);
+    }
+
+    #[test]
     fn metadata_header_includes_populated_fields() {
         let result = make_result("# Hello");
         let out = to_llm_text(&result, Some("https://example.com/page"));

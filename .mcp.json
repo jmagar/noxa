@@ -1,0 +1,7 @@
+{
+    "mcpServers": {
+        "noxa": {
+            "command": "/home/jmagar/workspace/noxa/target/debug/noxa-mcp"
+        }
+    }
+}

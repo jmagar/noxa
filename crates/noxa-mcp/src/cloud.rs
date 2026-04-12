@@ -7,7 +7,6 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracing::info;
 
-
 const API_BASE: &str = "https://api.noxa.io/v1";
 
 /// Lightweight client for the noxa cloud API.

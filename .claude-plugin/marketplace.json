@@ -1,0 +1,21 @@
+{
+  "name": "noxa-marketplace",
+  "owner": {
+    "name": "jmagar"
+  },
+  "metadata": {
+    "description": "Marketplace for the noxa plugin",
+    "version": "0.3.11",
+    "pluginRoot": "./"
+  },
+  "plugins": [
+    {
+      "name": "noxa",
+      "source": "./",
+      "description": "noxa CLI, MCP server, and skills for AI-assisted web extraction",
+      "version": "0.3.11",
+      "category": "Productivity",
+      "tags": ["web", "extraction", "mcp", "skills"]
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+use noxa_core::{Content, ExtractionResult, Metadata};
 /// Reddit JSON API fallback for extracting posts + comments without JS rendering.
 ///
 /// Reddit's new `shreddit` frontend only SSRs the post body — comments are
@@ -5,7 +6,6 @@
 /// comment tree as structured JSON, which we convert to clean markdown.
 use serde::Deserialize;
 use tracing::debug;
-use noxa_core::{Content, ExtractionResult, Metadata};
 
 /// Check if a URL points to a Reddit post/comment page.
 pub fn is_reddit_url(url: &str) -> bool {

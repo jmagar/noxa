@@ -1,5 +1,5 @@
 /// Provider chain — tries providers in order until one succeeds.
-/// Default order: Ollama (local, free) -> OpenAI -> Anthropic.
+/// Default order: Gemini CLI (primary) -> OpenAI -> Ollama -> Anthropic.
 /// Only includes providers that are actually configured/available.
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
@@ -7,9 +7,7 @@ use tracing::{debug, info, warn};
 use crate::error::LlmError;
 use crate::provider::{CompletionRequest, LlmProvider};
 use crate::providers::{
-    anthropic::AnthropicProvider,
-    gemini_cli::GeminiCliProvider,
-    ollama::OllamaProvider,
+    anthropic::AnthropicProvider, gemini_cli::GeminiCliProvider, ollama::OllamaProvider,
     openai::OpenAiProvider,
 };
 
@@ -94,7 +92,11 @@ impl LlmProvider for ProviderChain {
             let t = std::time::Instant::now();
             match provider.complete(request).await {
                 Ok(response) => {
-                    info!(provider = provider.name(), elapsed_ms = t.elapsed().as_millis(), "completion succeeded");
+                    info!(
+                        provider = provider.name(),
+                        elapsed_ms = t.elapsed().as_millis(),
+                        "completion succeeded"
+                    );
                     return Ok(response);
                 }
                 Err(e) => {
