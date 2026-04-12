@@ -308,6 +308,22 @@ struct Cli {
     #[arg(long)]
     deep: bool,
 
+    /// Search via SearXNG (SEARXNG_URL) or noxa cloud (NOXA_API_KEY).
+    #[arg(long)]
+    search: Option<String>,
+
+    /// Number of search results (1-50, default: 10).
+    #[arg(long, default_value = "10")]
+    num_results: u32,
+
+    /// Print snippets only; skip scraping result URLs.
+    #[arg(long)]
+    no_scrape: bool,
+
+    /// Concurrency for scraping search result URLs (default: 3).
+    #[arg(long, default_value = "3")]
+    num_scrape_concurrency: usize,
+
     /// Output directory: save each page to a separate file instead of stdout.
     /// Works with --crawl, batch (multiple URLs), and single URL mode.
     /// Filenames are derived from URL paths (e.g. /docs/api -> docs/api.md).
@@ -744,6 +760,13 @@ fn file_extension_for_format(format: &OutputFormat) -> &'static str {
         OutputFormat::Text => "txt",
         OutputFormat::Html => "html",
     }
+}
+
+fn default_search_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".noxa")
+        .join("search")
 }
 
 fn format_cloud_output(resp: &serde_json::Value, format: &OutputFormat) -> String {
@@ -2591,6 +2614,143 @@ async fn run_research(
     ))
 }
 
+async fn run_search(
+    cli: &Cli,
+    fetch_client: &Arc<noxa_fetch::FetchClient>,
+    store: &noxa_fetch::ContentStore,
+    query: &str,
+) -> Result<(), String> {
+    let num = cli.num_results.clamp(1, 50);
+    let concurrency = cli.num_scrape_concurrency.min(20);
+
+    let results: Vec<(String, String, String)> = {
+        let searxng_url = std::env::var("SEARXNG_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if let Some(base_url) = searxng_url {
+            validate_url(&base_url).map_err(|e| format!("SEARXNG_URL is invalid: {e}"))?;
+            let client = wreq::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| format!("wreq client error: {e}"))?;
+            noxa_fetch::searxng_search(&client, &base_url, query, num)
+                .await
+                .map_err(|e| format!("SearXNG search failed: {e}"))?
+                .into_iter()
+                .map(|r| (r.title, r.url, r.content))
+                .collect()
+        } else {
+            let api_key = std::env::var("NOXA_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| cli.api_key.clone())
+                .ok_or("--search requires SEARXNG_URL or NOXA_API_KEY")?;
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("http client error: {e}"))?;
+            let resp: serde_json::Value = client
+                .post("https://api.noxa.io/v1/search")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&serde_json::json!({ "query": query, "num_results": num }))
+                .send()
+                .await
+                .map_err(|e| format!("API error: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("parse error: {e}"))?;
+            resp.get("results")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|r| {
+                            (
+                                r.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                r.get("url")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                r.get("snippet")
+                                    .or_else(|| r.get("content"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    };
+
+    if results.is_empty() {
+        eprintln!("No results found for: {query}");
+        return Ok(());
+    }
+
+    println!("# Search: {query}");
+    println!("# {} result(s)\n", results.len());
+
+    if cli.no_scrape {
+        for (i, (title, url, snip)) in results.iter().enumerate() {
+            println!("{}. {title}\n   {url}", i + 1);
+            if !snip.is_empty() {
+                println!("   {snip}");
+            }
+            println!();
+        }
+        return Ok(());
+    }
+
+    let valid: Vec<(usize, String, String, String)> = results
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, (title, url, snip))| match validate_url(&url) {
+            Ok(()) => Some((i + 1, title, url, snip)),
+            Err(e) => {
+                eprintln!("   skip {url}: {e}");
+                None
+            }
+        })
+        .collect();
+
+    let url_refs: Vec<&str> = valid.iter().map(|(_, _, u, _)| u.as_str()).collect();
+    let scraped = fetch_client
+        .fetch_and_extract_batch(&url_refs, concurrency)
+        .await;
+
+    for ((idx, title, url, snip), scrape) in valid.iter().zip(scraped.iter()) {
+        println!("{idx}. {title}\n   {url}");
+        if !snip.is_empty() {
+            println!("   {snip}");
+        }
+        match &scrape.result {
+            Ok(extraction) => match store.write(url, extraction).await {
+                Ok(sr) => {
+                    let label = if sr.is_new {
+                        "saved"
+                    } else if sr.changed {
+                        "updated"
+                    } else {
+                        "unchanged"
+                    };
+                    println!("   {label}: {}", sr.md_path.display());
+                }
+                Err(e) => eprintln!("   store warning: {e}"),
+            },
+            Err(e) => eprintln!("   scrape failed: {e}"),
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -2678,6 +2838,21 @@ async fn main() {
     // --research: deep research via cloud API
     if let Some(ref query) = cli.research {
         if let Err(e) = run_research(&cli, &resolved, query).await {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+        return;
+    }
+
+    if let Some(ref query) = cli.search {
+        let store = noxa_fetch::ContentStore::open();
+        let fetch_client = Arc::new(
+            noxa_fetch::FetchClient::new(noxa_fetch::FetchConfig::default()).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }),
+        );
+        if let Err(e) = run_search(&cli, &fetch_client, &store, query).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2897,6 +3072,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(write_to_file(&dir, "sub/file.md", "hello").is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_default_search_dir_under_noxa() {
+        let d = default_search_dir();
+        assert!(d.to_string_lossy().contains(".noxa"));
+        assert!(d.to_string_lossy().contains("search"));
+    }
+
+    #[test]
+    fn test_url_to_filename_flat_for_search() {
+        let raw = url_to_filename("https://example.com/blog/post", &OutputFormat::Markdown);
+        let flat = raw.replace('/', "_");
+        assert!(!flat.contains('/'));
+        assert!(flat.ends_with(".md"));
     }
 }
 
