@@ -719,6 +719,70 @@ fn write_to_file(dir: &Path, filename: &str, content: &str) -> Result<(), String
     Ok(())
 }
 
+
+fn parse_http_url(url: &str) -> Result<url::Url, String> {
+    if url.is_empty() {
+        return Err("Invalid URL: must not be empty".into());
+    }
+
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => {
+            return Err(format!(
+                "Invalid URL: scheme '{s}' not allowed, must start with http:// or https://"
+            ));
+        }
+    }
+    parsed.host_str().ok_or("Invalid URL: no host")?;
+    Ok(parsed)
+}
+
+/// Validate a URL provided by the operator (e.g. SEARXNG_URL). Only checks scheme and
+/// host presence; does NOT reject private/loopback addresses (operator-trusted config).
+fn validate_operator_url(url: &str) -> Result<(), String> {
+    parse_http_url(url).map(|_| ())
+}
+
+/// Synchronous URL safety check (no DNS resolution) used for filtering search results.
+/// Rejects private/loopback IP addresses but does not resolve hostnames.
+fn validate_url_sync(url: &str) -> Result<(), String> {
+    let parsed = parse_http_url(url)?;
+    let host = parsed.host_str().ok_or("Invalid URL: no host")?;
+    if matches!(host, "localhost" | "ip6-localhost" | "ip6-loopback")
+        || host.ends_with(".localhost")
+    {
+        return Err(format!(
+            "Invalid URL: host '{host}' is not a routable public address"
+        ));
+    }
+
+    let private = match parsed.host() {
+        Some(url::Host::Ipv4(addr)) => {
+            let ip = std::net::IpAddr::V4(addr);
+            ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip)
+        }
+        Some(url::Host::Ipv6(addr)) => {
+            let ip = std::net::IpAddr::V6(addr);
+            ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip)
+        }
+        Some(url::Host::Domain(_)) => false, // DNS not checked in sync path
+        None => true,
+    };
+    if private {
+        return Err(format!(
+            "Invalid URL: host '{host}' is not a routable public address"
+        ));
+    }
+
+    Ok(())
+}
+
+fn clamp_search_scrape_concurrency(concurrency: usize) -> usize {
+    concurrency.clamp(1, 20)
+}
+
+
 /// Get raw HTML from an extraction result, falling back to markdown if unavailable.
 fn raw_html_or_markdown(result: &ExtractionResult) -> &str {
     result
@@ -2621,7 +2685,7 @@ async fn run_search(
     query: &str,
 ) -> Result<(), String> {
     let num = cli.num_results.clamp(1, 50);
-    let concurrency = cli.num_scrape_concurrency.min(20);
+    let concurrency = clamp_search_scrape_concurrency(cli.num_scrape_concurrency);
 
     let results: Vec<(String, String, String)> = {
         let searxng_url = std::env::var("SEARXNG_URL")
@@ -2630,22 +2694,19 @@ async fn run_search(
             .filter(|s| !s.is_empty());
 
         if let Some(base_url) = searxng_url {
-            validate_url(&base_url).map_err(|e| format!("SEARXNG_URL is invalid: {e}"))?;
-            let client = wreq::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|e| format!("wreq client error: {e}"))?;
-            noxa_fetch::searxng_search(&client, &base_url, query, num)
+            validate_operator_url(&base_url).map_err(|e| format!("SEARXNG_URL is invalid: {e}"))?;
+            noxa_fetch::searxng_search(fetch_client, &base_url, query, num)
                 .await
                 .map_err(|e| format!("SearXNG search failed: {e}"))?
                 .into_iter()
                 .map(|r| (r.title, r.url, r.content))
                 .collect()
         } else {
-            let api_key = std::env::var("NOXA_API_KEY")
-                .ok()
+            let api_key = cli
+                .api_key
+                .clone()
                 .filter(|s| !s.is_empty())
-                .or_else(|| cli.api_key.clone())
+                .or_else(|| std::env::var("NOXA_API_KEY").ok().filter(|s| !s.is_empty()))
                 .ok_or("--search requires SEARXNG_URL or NOXA_API_KEY")?;
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
@@ -2710,7 +2771,7 @@ async fn run_search(
     let valid: Vec<(usize, String, String, String)> = results
         .into_iter()
         .enumerate()
-        .filter_map(|(i, (title, url, snip))| match validate_url(&url) {
+        .filter_map(|(i, (title, url, snip))| match validate_url_sync(&url) {
             Ok(()) => Some((i + 1, title, url, snip)),
             Err(e) => {
                 eprintln!("   skip {url}: {e}");
@@ -2847,7 +2908,7 @@ async fn main() {
     if let Some(ref query) = cli.search {
         let store = noxa_fetch::ContentStore::open();
         let fetch_client = Arc::new(
-            noxa_fetch::FetchClient::new(noxa_fetch::FetchConfig::default()).unwrap_or_else(|e| {
+            noxa_fetch::FetchClient::new(build_fetch_config(&cli, &resolved)).unwrap_or_else(|e| {
                 eprintln!("error: {e}");
                 process::exit(1);
             }),
@@ -3087,6 +3148,25 @@ mod tests {
         let flat = raw.replace('/', "_");
         assert!(!flat.contains('/'));
         assert!(flat.ends_with(".md"));
+    }
+
+    #[tokio::test]
+    async fn validate_public_url_rejects_ipv6_private_ranges() {
+        assert!(validate_url("http://[fe80::1]/").await.is_err());
+        assert!(validate_url("http://[fc00::1]/").await.is_err());
+    }
+
+    #[test]
+    fn validate_operator_url_allows_localhost() {
+        assert!(validate_operator_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_operator_url("https://localhost/search").is_ok());
+    }
+
+    #[test]
+    fn search_scrape_concurrency_is_clamped() {
+        assert_eq!(clamp_search_scrape_concurrency(0), 1);
+        assert_eq!(clamp_search_scrape_concurrency(50), 20);
+        assert_eq!(clamp_search_scrape_concurrency(4), 4);
     }
 }
 

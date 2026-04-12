@@ -1,8 +1,7 @@
 //! Shared SearXNG JSON search support.
-use std::time::Duration;
-
 use serde::Deserialize;
 
+use crate::FetchClient;
 use crate::error::FetchError;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,7 +20,7 @@ pub struct SearxngResponse {
 }
 
 pub async fn searxng_search(
-    client: &wreq::Client,
+    client: &FetchClient,
     base_url: &str,
     query: &str,
     num_results: u32,
@@ -32,13 +31,9 @@ pub async fn searxng_search(
         base_url.trim_end_matches('/')
     );
 
-    let resp = client
-        .get(&search_url)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await?;
+    let resp = client.fetch(&search_url).await?;
 
-    let status = resp.status().as_u16();
+    let status = resp.status;
     if status == 403 {
         return Err(FetchError::Build(
             "SearXNG returned 403 — add 'json' to formats in settings.yml".into(),
@@ -49,7 +44,7 @@ pub async fn searxng_search(
     }
 
     let content_type = resp
-        .headers()
+        .headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -59,11 +54,7 @@ pub async fn searxng_search(
         )));
     }
 
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| FetchError::BodyDecode(e.to_string()))?;
-    let parsed: SearxngResponse = serde_json::from_slice(&body)
+    let parsed: SearxngResponse = serde_json::from_str(&resp.html)
         .map_err(|e| FetchError::Build(format!("SearXNG parse error: {e}")))?;
 
     Ok(parsed
@@ -82,7 +73,10 @@ mod tests {
         let json = r#"{"results":[{"title":"Rust","url":"https://rust-lang.org","content":"A language.","publishedDate":"2024-01-01"}]}"#;
         let resp: SearxngResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.results[0].title, "Rust");
-        assert_eq!(resp.results[0].published_date.as_deref(), Some("2024-01-01"));
+        assert_eq!(
+            resp.results[0].published_date.as_deref(),
+            Some("2024-01-01")
+        );
     }
 
     #[test]

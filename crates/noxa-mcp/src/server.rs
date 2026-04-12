@@ -25,7 +25,6 @@ pub struct NoxaMcp {
     fetch_client: Arc<noxa_fetch::FetchClient>,
     llm_chain: Option<noxa_llm::ProviderChain>,
     cloud: Option<CloudClient>,
-    searxng_client: wreq::Client,
     store: noxa_fetch::ContentStore,
 }
 
@@ -191,10 +190,6 @@ impl NoxaMcp {
             );
         }
 
-        let searxng_client = wreq::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
         let store = noxa_fetch::ContentStore::open();
         info!("content store ready");
 
@@ -203,7 +198,6 @@ impl NoxaMcp {
             fetch_client: Arc::new(fetch_client),
             llm_chain,
             cloud,
-            searxng_client,
             store,
         }
     }
@@ -736,10 +730,10 @@ impl NoxaMcp {
             .filter(|s| !s.is_empty());
 
         if let Some(base_url) = searxng_url {
-            validate_url(&base_url)?;
+            parse_http_url(&base_url)?;
 
             let results =
-                noxa_fetch::searxng_search(&self.searxng_client, &base_url, &params.query, num)
+                noxa_fetch::searxng_search(&self.fetch_client, &base_url, &params.query, num)
                     .await
                     .map_err(|e| format!("SearXNG search failed: {e}"))?;
 
@@ -759,10 +753,13 @@ impl NoxaMcp {
                 })
                 .collect();
             let valid_urls: Vec<&str> = valid_results.iter().map(|r| r.url.as_str()).collect();
-            let scraped = self.fetch_client.fetch_and_extract_batch(&valid_urls, 4).await;
+            let scraped = self
+                .fetch_client
+                .fetch_and_extract_batch(&valid_urls, 4)
+                .await;
 
             let mut out = String::with_capacity(results.len() * 256);
-            out.push_str(&format!("Found {} result(s):\n\n", results.len()));
+            out.push_str(&format!("Found {} result(s):\n\n", valid_results.len()));
 
             for (idx, (r, scrape)) in valid_results.iter().zip(scraped.iter()).enumerate() {
                 out.push_str(&format!("{}. {}\n   {}\n", idx + 1, r.title, r.url));
@@ -1014,6 +1011,12 @@ mod tests {
         })
         .await;
         assert!(result.is_err(), "DNS failure should be rejected (fail-closed)");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv6_link_local_and_ula() {
+        assert!(validate_url("http://[fe80::1]/").is_err());
+        assert!(validate_url("http://[fc00::1]/").is_err());
     }
 
     #[test]

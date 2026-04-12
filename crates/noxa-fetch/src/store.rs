@@ -1,5 +1,5 @@
 //! Canonical content store for search snapshots.
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 /// Map a URL to a relative store path without extension.
 pub fn url_to_store_path(url: &str) -> PathBuf {
@@ -9,18 +9,26 @@ pub fn url_to_store_path(url: &str) -> PathBuf {
     };
 
     let host = parsed.host_str().unwrap_or("unknown");
-    let clean_host = host.strip_prefix("www.").unwrap_or(host).replace('.', "_");
+    let clean_host = sanitize_component(host.strip_prefix("www.").unwrap_or(host));
 
-    let raw_path = parsed.path().trim_matches('/');
-    let path_part = if raw_path.is_empty() {
-        "index"
-    } else if raw_path.len() > 200 {
-        &raw_path[..200]
+    let segments: Vec<String> = parsed
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
+        .map(sanitize_component)
+        .collect();
+
+    let path_part = if segments.is_empty() {
+        "index".to_string()
     } else {
-        raw_path
+        segments.join("/")
     };
 
     let mut rel = format!("{clean_host}/{path_part}");
+    if rel.len() > 240 {
+        rel.truncate(240);
+    }
     if parsed.query().is_some() {
         rel.push('_');
         rel.push_str(&format!("{:08x}", url_hash(url)));
@@ -31,8 +39,25 @@ pub fn url_to_store_path(url: &str) -> PathBuf {
 
 fn url_hash(url: &str) -> u32 {
     url.bytes().fold(2166136261_u32, |acc, b| {
-        acc.wrapping_mul(16777619).wrapping_add(b as u32)
+        (acc ^ (b as u32)).wrapping_mul(16777619)
     })
+}
+
+fn sanitize_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "index".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub struct StoreResult {
@@ -66,6 +91,12 @@ impl ContentStore {
         extraction: &noxa_core::ExtractionResult,
     ) -> Result<StoreResult, String> {
         let rel = url_to_store_path(url);
+        if rel
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!("store: computed path escapes root for url: {url}"));
+        }
         let base = self.root.join(&rel);
         if !base.starts_with(&self.root) {
             return Err(format!("store: computed path escapes root for url: {url}"));
@@ -103,7 +134,8 @@ impl ContentStore {
             .await
             .map_err(|e| format!("store: write md: {e}"))?;
 
-        let json = serde_json::to_string(extraction).map_err(|e| format!("store: serialize: {e}"))?;
+        let json =
+            serde_json::to_string(extraction).map_err(|e| format!("store: serialize: {e}"))?;
         tokio::fs::write(&json_path, json.as_bytes())
             .await
             .map_err(|e| format!("store: write json: {e}"))?;
@@ -121,6 +153,7 @@ impl ContentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Component;
 
     fn make_extraction(markdown: &str) -> noxa_core::ExtractionResult {
         noxa_core::ExtractionResult {
@@ -190,7 +223,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ContentStore::new(dir.path());
         let first = make_extraction("# Hello\n\nFirst content.");
-        store.write("https://example.com/page", &first).await.unwrap();
+        store
+            .write("https://example.com/page", &first)
+            .await
+            .unwrap();
         let second = make_extraction("# Hello\n\nUpdated content.");
         let result = store
             .write("https://example.com/page", &second)
@@ -236,5 +272,27 @@ mod tests {
     async fn test_store_path_stays_within_root() {
         let p = url_to_store_path("https://evil.com/../../../etc/passwd");
         assert!(p.to_string_lossy().starts_with("evil_com/"));
+    }
+
+    #[tokio::test]
+    async fn test_url_to_store_path_strips_parent_components() {
+        let p = url_to_store_path("https://evil.com/a/../../etc/./passwd");
+        assert!(!p.components().any(|c| matches!(c, Component::ParentDir)));
+        assert!(!p.components().any(|c| matches!(c, Component::CurDir)));
+    }
+
+    #[tokio::test]
+    async fn test_url_to_store_path_sanitizes_ipv6_host_and_path() {
+        let p = url_to_store_path("https://[fe80::1]/bad:path/segment");
+        let s = p.to_string_lossy();
+        assert!(s.starts_with("fe80__1/"));
+        assert!(!s.contains(':'));
+        assert!(!s.contains('['));
+        assert!(!s.contains(']'));
+    }
+
+    #[test]
+    fn test_url_hash_matches_fnv1a() {
+        assert_eq!(url_hash("hello"), 0x4f9f2cab);
     }
 }
