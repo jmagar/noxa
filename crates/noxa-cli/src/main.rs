@@ -647,19 +647,41 @@ fn write_to_file(dir: &Path, filename: &str, content: &str) -> Result<(), String
     if !dest.starts_with(dir) {
         return Err(format!("filename escapes output directory: {filename}"));
     }
+
+    // Ensure the output directory exists, then canonicalize it before any other I/O.
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("failed to create output directory: {e}"))?;
+    let canonical_dir = std::fs::canonicalize(dir)
+        .map_err(|e| format!("failed to resolve output directory: {e}"))?;
+
+    // If `dest` already exists, check for symlinks before any further side-effects.
+    // Use symlink_metadata (not exists/metadata) so dangling symlinks are also detected.
+    if let Ok(meta) = dest.symlink_metadata() {
+        if meta.file_type().is_symlink() {
+            // Any symlink at the destination — dangling or not — is rejected.
+            return Err(format!("filename escapes output directory via symlink: {filename}"));
+        }
+        // Regular file or directory: verify it's inside the canonical output dir.
+        let canonical_dest = std::fs::canonicalize(&dest)
+            .map_err(|e| format!("failed to resolve destination path: {e}"))?;
+        if !canonical_dest.starts_with(&canonical_dir) {
+            return Err(format!("filename escapes output directory: {filename}"));
+        }
+    }
+
+    // Create parent directories only after symlink checks pass.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
-        // Symlink-aware containment: canonicalize both paths to resolve any symlinks
-        // that could redirect writes outside the intended output directory.
-        let canonical_dir = std::fs::canonicalize(dir)
-            .map_err(|e| format!("failed to resolve output directory: {e}"))?;
+        // Re-verify after dir creation: intermediate symlinks in the path may resolve
+        // to a location outside `dir`.
         let canonical_parent = std::fs::canonicalize(parent)
             .map_err(|e| format!("failed to resolve destination parent: {e}"))?;
         if !canonical_parent.starts_with(&canonical_dir) {
             return Err(format!("filename escapes output directory via symlink: {filename}"));
         }
     }
+
     std::fs::write(&dest, content)
         .map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
     let word_count = content.split_whitespace().count();
@@ -2931,6 +2953,7 @@ mod enum_deserialize_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires external DNS"]
     async fn validate_accepts_public_hostname() {
         assert!(validate_url("https://example.com").await.is_ok());
     }
@@ -2955,6 +2978,7 @@ mod enum_deserialize_tests {
         assert!(path.join("sub/file.md").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_write_to_file_rejects_symlink_escape() {
         let dir = tempfile::tempdir().unwrap();
@@ -2965,5 +2989,19 @@ mod enum_deserialize_tests {
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
         // Attempting to write through the symlink should be rejected.
         assert!(write_to_file(path, "link/escape.md", "x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_to_file_rejects_leaf_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        // Create a leaf symlink inside `dir` pointing to a file outside.
+        let link = path.join("output.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // Writing to the leaf symlink should be rejected.
+        assert!(write_to_file(path, "output.md", "x").is_err());
     }
 }

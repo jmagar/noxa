@@ -904,8 +904,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires external DNS"]
     async fn validate_accepts_public_hostname() {
-        // Requires network — skip in offline environments.
         assert!(validate_url("https://example.com").await.is_ok());
     }
 }
