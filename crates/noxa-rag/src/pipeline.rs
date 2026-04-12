@@ -398,6 +398,9 @@ async fn process_job(
     }
 
     // ── 6. Build points with deterministic UUID v5 ────────────────────────────
+    // Use the normalized URL for both the UUID seed and payload.url so that
+    // delete_by_url (which also normalizes) matches the stored value for any
+    // equivalent URL form (trailing slash, fragment, etc.).
     let points: Vec<Point> = chunks
         .iter()
         .zip(vectors.iter())
@@ -405,14 +408,14 @@ async fn process_job(
         .map(|(i, (chunk, vector))| {
             let id = uuid::Uuid::new_v5(
                 &config.uuid_namespace,
-                format!("{}#chunk{}", chunk.source_url, i).as_bytes(),
+                format!("{}#chunk{}", url, i).as_bytes(),
             );
             Point {
                 id,
                 vector: vector.clone(),
                 payload: PointPayload {
                     text: chunk.text.clone(),
-                    url: chunk.source_url.clone(),
+                    url: url.clone(),
                     domain: chunk.domain.clone(),
                     chunk_index: chunk.chunk_index,
                     total_chunks: chunk.total_chunks,
@@ -445,10 +448,11 @@ async fn process_job(
     }
 
     drop(_guard);
+    // Drop the local Arc clone before eviction check so the only remaining
+    // reference is the DashMap entry itself (strong_count == 1).  Without this
+    // drop the count is always >= 2 and remove_if never fires, leaking the map.
+    drop(url_lock);
 
-    // Remove the lock entry if no other task holds a clone of the Arc.
-    // Arc::strong_count == 1 means only url_locks itself holds a reference,
-    // so it is safe to evict and avoid unbounded map growth.
     url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
 
     // ── 8. Done ───────────────────────────────────────────────────────────────

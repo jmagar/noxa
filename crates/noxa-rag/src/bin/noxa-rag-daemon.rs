@@ -111,7 +111,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         EmbedProviderConfig::Tei { model, local_path, .. } => {
             (model.clone(), local_path.clone())
         }
-        _ => ("Qwen/Qwen3-Embedding-0.6B".to_string(), None),
+        _ => {
+            return Err(
+                "only the TEI embed provider is supported; set [embed_provider] type = \"tei\"".into(),
+            );
+        }
     };
 
     // Rust tokenizers crate has no from_pretrained — local_path is required.
@@ -172,9 +176,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Run until a shutdown signal is received; the pipeline drains workers
     // internally with a 10s timeout before returning.
-    if let Err(e) = pipeline.run().await {
-        eprintln!("[noxa-rag] pipeline error: {e}");
-    }
+    pipeline
+        .run()
+        .await
+        .map_err(|e| format!("pipeline error: {e}"))?;
 
     eprintln!("[noxa-rag] daemon stopped");
     Ok(())

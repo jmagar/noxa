@@ -110,7 +110,7 @@ impl TeiProvider {
             normalize: true,
         };
 
-        let mut delay_ms: u64 = 100;
+        let mut delay_ms: u64 = 200;
         for attempt in 0..=MAX_RETRIES {
             let resp = self
                 .client
@@ -137,7 +137,7 @@ impl TeiProvider {
 
             if (status.as_u16() == 429 || status.as_u16() == 503) && attempt < MAX_RETRIES {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                delay_ms = (delay_ms * 2).min(400);
+                delay_ms = (delay_ms * 2).min(2_000);
                 continue;
             }
 

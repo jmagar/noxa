@@ -267,17 +267,28 @@ impl VectorStore for QdrantStore {
             .into_iter()
             .filter_map(|hit| {
                 let payload = hit.payload?;
-                let text = payload.get("text")?.as_str()?.to_string();
-                let url = payload.get("url")?.as_str()?.to_string();
-                let chunk_index = payload
-                    .get("chunk_index")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let token_estimate = payload
-                    .get("token_estimate")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                Some(SearchResult { text, url, score: hit.score, chunk_index, token_estimate })
+                let text = payload.get("text").and_then(|v| v.as_str()).map(str::to_string);
+                let url = payload.get("url").and_then(|v| v.as_str()).map(str::to_string);
+                match (text, url) {
+                    (Some(text), Some(url)) => {
+                        let chunk_index = payload
+                            .get("chunk_index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        let token_estimate = payload
+                            .get("token_estimate")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        Some(SearchResult { text, url, score: hit.score, chunk_index, token_estimate })
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "search hit dropped: missing required payload field (text or url) \
+                             — possible schema mismatch or data corruption"
+                        );
+                        None
+                    }
+                }
             })
             .collect();
 
