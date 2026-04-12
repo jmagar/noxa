@@ -1,6 +1,7 @@
 target/
 .DS_Store
 .env
+.env.bak
 config.json
 proxies.txt
 .claude/skills/
@@ -13,8 +14,8 @@ docs/superpowers
 docs/reports
 docs/sessions
 benchmarks
-docs/*
-!docs/config.md
+
+config.md
 .worktrees/
 
 # Beads / Dolt files (added by bd init)
