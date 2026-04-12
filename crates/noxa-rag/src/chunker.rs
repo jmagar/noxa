@@ -79,12 +79,7 @@ pub fn chunk(
     };
 
     // Source URL and domain.
-    let source_url: String = result
-        .metadata
-        .url
-        .as_deref()
-        .unwrap_or("")
-        .to_string();
+    let source_url: String = result.metadata.url.as_deref().unwrap_or("").to_string();
     let domain = extract_domain(&source_url);
 
     // Build the splitter with a token-range chunk config.
@@ -94,9 +89,8 @@ pub fn chunk(
     // Ensure lower < upper so the range is valid.
     let lower = lower.min(upper - 1);
 
-    let splitter = MarkdownSplitter::new(
-        ChunkConfig::new(lower..upper).with_sizer(tokenizer.clone()),
-    );
+    let splitter =
+        MarkdownSplitter::new(ChunkConfig::new(lower..upper).with_sizer(tokenizer.clone()));
 
     // Split and collect (char_offset, chunk_text) pairs via chunk_char_indices.
     let raw_chunks: Vec<(usize, String)> = splitter

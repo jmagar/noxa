@@ -91,10 +91,18 @@ impl Default for ChunkerConfig {
     }
 }
 
-fn default_target_tokens() -> usize { 512 }
-fn default_overlap_tokens() -> usize { 64 }
-fn default_min_words() -> usize { 50 }
-fn default_max_chunks_per_page() -> usize { 100 }
+fn default_target_tokens() -> usize {
+    512
+}
+fn default_overlap_tokens() -> usize {
+    64
+}
+fn default_min_words() -> usize {
+    50
+}
+fn default_max_chunks_per_page() -> usize {
+    100
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PipelineConfig {
@@ -113,12 +121,15 @@ impl Default for PipelineConfig {
     }
 }
 
-fn default_embed_concurrency() -> usize { 4 }
+fn default_embed_concurrency() -> usize {
+    4
+}
 
 /// Load and validate config from a TOML file.
 pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| RagError::Config(format!("cannot read config file {}: {}", path.display(), e)))?;
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        RagError::Config(format!("cannot read config file {}: {}", path.display(), e))
+    })?;
 
     let config: RagConfig = toml::from_str(&content)
         .map_err(|e| RagError::Config(format!("config parse error: {}", e)))?;

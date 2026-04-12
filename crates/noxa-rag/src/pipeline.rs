@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
+use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -79,9 +79,10 @@ impl Pipeline {
     pub async fn run(&self) -> Result<(), RagError> {
         // Extract watch config.
         let (watch_dir, debounce_ms) = match &self.config.source {
-            SourceConfig::FsWatcher { watch_dir, debounce_ms } => {
-                (watch_dir.clone(), *debounce_ms)
-            }
+            SourceConfig::FsWatcher {
+                watch_dir,
+                debounce_ms,
+            } => (watch_dir.clone(), *debounce_ms),
         };
 
         tracing::info!(
@@ -120,12 +121,7 @@ impl Pipeline {
                             let span = job.span.clone();
                             async {
                                 if let Err(e) = process_job(
-                                    job,
-                                    &embed,
-                                    &store,
-                                    &tokenizer,
-                                    &config,
-                                    &url_locks,
+                                    job, &embed, &store, &tokenizer, &config, &url_locks,
                                 )
                                 .await
                                 {
@@ -165,9 +161,7 @@ impl Pipeline {
 
         let mut debouncer =
             new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
-                .map_err(|e| {
-                    RagError::Generic(format!("failed to create fs watcher: {e}"))
-                })?;
+                .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
 
         debouncer
             .watcher()
@@ -280,7 +274,9 @@ fn is_private_ip(host: &str) -> bool {
     if let Ok(addr) = host.parse::<IpAddr>() {
         return match addr {
             IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
-            IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+            IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+            }
         };
     }
     false
@@ -289,10 +285,12 @@ fn is_private_ip(host: &str) -> bool {
 /// Validate that `url` uses http or https and does not point to a private IP.
 fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     if url.is_empty() {
-        return Err(RagError::Generic("extraction result has no URL".to_string()));
+        return Err(RagError::Generic(
+            "extraction result has no URL".to_string(),
+        ));
     }
-    let parsed = url::Url::parse(url)
-        .map_err(|e| RagError::Generic(format!("invalid URL {url:?}: {e}")))?;
+    let parsed =
+        url::Url::parse(url).map_err(|e| RagError::Generic(format!("invalid URL {url:?}: {e}")))?;
 
     match parsed.scheme() {
         "http" | "https" => {}
@@ -338,9 +336,7 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, config: 
         .await
     {
         use tokio::io::AsyncWriteExt;
-        let _ = file
-            .write_all(format!("{}\n", entry).as_bytes())
-            .await;
+        let _ = file.write_all(format!("{}\n", entry).as_bytes()).await;
     }
 }
 
@@ -402,11 +398,14 @@ async fn process_job(
     let vectors = embed.embed(&texts).await?;
 
     if vectors.len() != chunks.len() {
-        return Err(RagError::Embed(format!(
-            "embed returned {} vectors for {} chunks",
-            vectors.len(),
-            chunks.len()
-        )));
+        return Err(RagError::Embed {
+            message: format!(
+                "embed returned {} vectors for {} chunks",
+                vectors.len(),
+                chunks.len()
+            ),
+            status: None,
+        });
     }
 
     // ── 6. Build points with deterministic UUID v5 ────────────────────────────

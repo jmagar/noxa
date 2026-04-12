@@ -13,7 +13,9 @@ use crate::store::{DynVectorStore, QdrantStore, VectorStore};
 /// Fails fast at startup if the provider is unavailable or returns wrong dimensions.
 /// `is_available()` and `dimensions()` are concrete methods on the provider struct,
 /// called here directly (not via dyn dispatch).
-pub async fn build_embed_provider(config: &RagConfig) -> Result<(DynEmbedProvider, usize), RagError> {
+pub async fn build_embed_provider(
+    config: &RagConfig,
+) -> Result<(DynEmbedProvider, usize), RagError> {
     match &config.embed_provider {
         EmbedProviderConfig::Tei { url, model, .. } => {
             let client = reqwest::Client::new();

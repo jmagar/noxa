@@ -32,7 +32,7 @@ pub mod store;
 pub mod types;
 
 // Re-export most-used types at crate root
-pub use config::{load_config, RagConfig};
+pub use config::{RagConfig, load_config};
 pub use embed::{DynEmbedProvider, EmbedProvider};
 pub use error::RagError;
 pub use factory::{build_embed_provider, build_vector_store};

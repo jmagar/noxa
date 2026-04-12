@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 
 use crate::error::RagError;
 use crate::store::VectorStore;
@@ -25,12 +26,17 @@ struct CollectionConfig {
 
 #[derive(Deserialize)]
 struct CollectionParams {
-    vectors: CollectionVectors,
+    vectors: serde_json::Value,
 }
 
 #[derive(Deserialize)]
 struct CollectionVectors {
     size: usize,
+}
+
+#[derive(Deserialize)]
+struct CollectionNamedVectors {
+    vectors: HashMap<String, CollectionVectors>,
 }
 
 #[derive(Serialize)]
@@ -89,7 +95,8 @@ impl QdrantStore {
         if let Some(key) = api_key {
             headers.insert(
                 "api-key",
-                key.parse().map_err(|_| RagError::Config("invalid Qdrant api-key".into()))?,
+                key.parse()
+                    .map_err(|_| RagError::Config("invalid Qdrant api-key".into()))?,
             );
         }
         let client = reqwest::Client::builder()
@@ -114,7 +121,9 @@ impl QdrantStore {
         match resp.status().as_u16() {
             200 => Ok(true),
             404 => Ok(false),
-            s => Err(RagError::Store(format!("collection_exists: unexpected HTTP {s}"))),
+            s => Err(RagError::Store(format!(
+                "collection_exists: unexpected HTTP {s}"
+            ))),
         }
     }
 
@@ -139,10 +148,7 @@ impl QdrantStore {
 
         // Payload indexes for fast URL/domain filtering.
         for (field, schema_type) in [("url", "keyword"), ("domain", "keyword")] {
-            let idx_url = format!(
-                "{}/collections/{}/index",
-                self.base_url, self.collection
-            );
+            let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {
@@ -172,8 +178,61 @@ impl QdrantStore {
             .await
             .map_err(|e| RagError::Store(format!("collection_info parse failed: {e}")))?;
         info.result
-            .map(|r| r.config.params.vectors.size)
+            .map(|r| parse_collection_vector_size(r.config.params.vectors))
+            .transpose()?
             .ok_or_else(|| RagError::Store("collection_info missing result".to_string()))
+    }
+}
+
+fn parse_collection_vector_size(vectors: serde_json::Value) -> Result<usize, RagError> {
+    if let Ok(config) = serde_json::from_value::<CollectionVectors>(vectors.clone()) {
+        return Ok(config.size);
+    }
+
+    let named: CollectionNamedVectors = serde_json::from_value(json!({ "vectors": vectors }))
+        .map_err(|e| RagError::Store(format!("collection_info parse failed: {e}")))?;
+
+    let mut sizes = named.vectors.into_iter().map(|(_, config)| config.size);
+    let first = sizes
+        .next()
+        .ok_or_else(|| RagError::Store("collection_info missing vectors".to_string()))?;
+
+    if sizes.all(|size| size == first) {
+        Ok(first)
+    } else {
+        Err(RagError::Store(
+            "collection_info has named vectors with mismatched sizes".to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_collection_vector_size;
+
+    #[test]
+    fn parses_named_vector_collection_size() {
+        let payload = serde_json::json!({
+            "default": { "size": 1024 },
+            "title": { "size": 1024 }
+        });
+
+        let size = parse_collection_vector_size(payload).expect("named vectors should parse");
+        assert_eq!(size, 1024);
+    }
+
+    #[test]
+    fn rejects_mixed_named_vector_sizes() {
+        let payload = serde_json::json!({
+            "default": { "size": 1024 },
+            "title": { "size": 768 }
+        });
+
+        let err = parse_collection_vector_size(payload).expect_err("mixed sizes should fail");
+        assert!(
+            err.to_string().contains("mismatched sizes"),
+            "unexpected error: {err}"
+        );
     }
 }
 
@@ -208,7 +267,9 @@ impl VectorStore for QdrantStore {
             let resp = self
                 .client
                 .put(&url)
-                .json(&UpsertRequest { points: qdrant_points })
+                .json(&UpsertRequest {
+                    points: qdrant_points,
+                })
                 .send()
                 .await?;
 
@@ -269,8 +330,14 @@ impl VectorStore for QdrantStore {
             .into_iter()
             .filter_map(|hit| {
                 let payload = hit.payload?;
-                let text = payload.get("text").and_then(|v| v.as_str()).map(str::to_string);
-                let url = payload.get("url").and_then(|v| v.as_str()).map(str::to_string);
+                let text = payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let url = payload
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 match (text, url) {
                     (Some(text), Some(url)) => {
                         let chunk_index = payload
@@ -281,7 +348,13 @@ impl VectorStore for QdrantStore {
                             .get("token_estimate")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as usize;
-                        Some(SearchResult { text, url, score: hit.score, chunk_index, token_estimate })
+                        Some(SearchResult {
+                            text,
+                            url,
+                            score: hit.score,
+                            chunk_index,
+                            token_estimate,
+                        })
                     }
                     _ => {
                         tracing::warn!(

@@ -1,3 +1,4 @@
+use clap::Parser;
 /// noxa-rag-daemon — watches an output directory for ExtractionResult JSON files
 /// and indexes them via TEI + Qdrant.
 ///
@@ -5,13 +6,13 @@
 ///   noxa-rag-daemon [--config <PATH>] [--log-level <LEVEL>] [--version]
 use std::path::PathBuf;
 use std::sync::Arc;
-use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use noxa_rag::{
-    build_embed_provider, build_vector_store, load_config,
+    build_embed_provider, build_vector_store,
     config::{EmbedProviderConfig, SourceConfig},
+    load_config,
     pipeline::Pipeline,
 };
 
@@ -43,8 +44,7 @@ async fn main() {
     // Init tracing to stderr (stdout may be piped).
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&args.log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level)),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -76,9 +76,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load config — fail fast with clear error.
-    let config = load_config(config_path).map_err(|e| {
-        format!("failed to load config from {}: {e}", config_path.display())
-    })?;
+    let config = load_config(config_path)
+        .map_err(|e| format!("failed to load config from {}: {e}", config_path.display()))?;
 
     // Ensure watch_dir exists (create if missing — convenience for first-run).
     let watch_dir = match &config.source {
@@ -108,12 +107,13 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load tokenizer.
     let tokenizer_model = match &config.embed_provider {
-        EmbedProviderConfig::Tei { model, local_path, .. } => {
-            (model.clone(), local_path.clone())
-        }
+        EmbedProviderConfig::Tei {
+            model, local_path, ..
+        } => (model.clone(), local_path.clone()),
         _ => {
             return Err(
-                "only the TEI embed provider is supported; set [embed_provider] type = \"tei\"".into(),
+                "only the TEI embed provider is supported; set [embed_provider] type = \"tei\""
+                    .into(),
             );
         }
     };
@@ -136,29 +136,27 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             path.clone()
         };
-        tokenizers::Tokenizer::from_file(&tokenizer_file)
-            .map_err(|e| format!("failed to load tokenizer from {}: {e}", tokenizer_file.display()))?
+        tokenizers::Tokenizer::from_file(&tokenizer_file).map_err(|e| {
+            format!(
+                "failed to load tokenizer from {}: {e}",
+                tokenizer_file.display()
+            )
+        })?
     };
 
     eprintln!("[noxa-rag] tokenizer: {} — loaded", tokenizer_model.0);
 
     let shutdown = CancellationToken::new();
-    let pipeline = Pipeline::new(
-        config,
-        embed,
-        store,
-        Arc::new(tokenizer),
-        shutdown.clone(),
-    );
+    let pipeline = Pipeline::new(config, embed, store, Arc::new(tokenizer), shutdown.clone());
 
     // Signal handling: Ctrl-C + SIGTERM -> cancel.
     let shutdown_signal = shutdown.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm = signal(SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = sigterm.recv() => {}

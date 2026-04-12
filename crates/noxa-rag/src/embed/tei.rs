@@ -1,8 +1,8 @@
 // TeiProvider — TEI (Text Embeddings Inference) embed provider
 // Targets Qwen3-0.6B (1024-dim) served via Hugging Face TEI.
-use async_trait::async_trait;
 use crate::embed::EmbedProvider;
 use crate::error::RagError;
+use async_trait::async_trait;
 
 /// Batch size tuned for RTX 4070 (~3x throughput vs default 32).
 const BATCH_SIZE: usize = 96;
@@ -60,18 +60,21 @@ impl TeiProvider {
             .await?;
 
         if !resp.status().is_success() {
-            return Err(RagError::Embed(format!(
-                "TEI probe failed with status {}",
-                resp.status()
-            )));
+            return Err(RagError::Embed {
+                message: format!("TEI probe failed with status {}", resp.status()),
+                status: Some(resp.status().as_u16()),
+            });
         }
 
         let vecs: Vec<Vec<f32>> = resp.json().await?;
-        let dimensions = vecs
-            .into_iter()
-            .next()
-            .map(|v| v.len())
-            .ok_or_else(|| RagError::Embed("TEI probe returned empty embedding response".to_string()))?;
+        let dimensions =
+            vecs.into_iter()
+                .next()
+                .map(|v| v.len())
+                .ok_or_else(|| RagError::Embed {
+                    message: "TEI probe returned empty embedding response".to_string(),
+                    status: None,
+                })?;
 
         Ok(Self {
             client,
@@ -129,10 +132,13 @@ impl TeiProvider {
 
             if status.as_u16() == 413 {
                 // Caller must halve the batch; no point retrying at this size.
-                return Err(RagError::Embed(format!(
-                    "TEI returned 413 (payload too large) for batch of {}",
-                    batch.len()
-                )));
+                return Err(RagError::Embed {
+                    message: format!(
+                        "TEI returned 413 (payload too large) for batch of {}",
+                        batch.len()
+                    ),
+                    status: Some(status.as_u16()),
+                });
             }
 
             if (status.as_u16() == 429 || status.as_u16() == 503) && attempt < MAX_RETRIES {
@@ -141,13 +147,16 @@ impl TeiProvider {
                 continue;
             }
 
-            return Err(RagError::Embed(format!(
-                "TEI /embed returned HTTP {}",
-                status
-            )));
+            return Err(RagError::Embed {
+                message: format!("TEI /embed returned HTTP {}", status),
+                status: Some(status.as_u16()),
+            });
         }
 
-        Err(RagError::Embed("TEI /embed: max retries exceeded".to_string()))
+        Err(RagError::Embed {
+            message: "TEI /embed: max retries exceeded".to_string(),
+            status: None,
+        })
     }
 }
 
@@ -163,7 +172,9 @@ impl EmbedProvider for TeiProvider {
         for chunk in texts.chunks(BATCH_SIZE) {
             match self.embed_batch(chunk).await {
                 Ok(vecs) => results.extend(vecs),
-                Err(RagError::Embed(ref msg)) if msg.contains("413") => {
+                Err(RagError::Embed {
+                    status: Some(413), ..
+                }) => {
                     // Halve batch size and retry once. Propagate real errors directly.
                     let mut chunk_results: Vec<Vec<f32>> = Vec::with_capacity(chunk.len());
                     for sub_chunk in chunk.chunks(BATCH_SIZE_REDUCED) {
