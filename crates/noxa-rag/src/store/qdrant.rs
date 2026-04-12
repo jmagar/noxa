@@ -245,38 +245,36 @@ impl VectorStore for QdrantStore {
             self.base_url, self.collection
         );
 
-        for chunk in points.chunks(256) {
-            let qdrant_points: Vec<QdrantPoint> = chunk
-                .iter()
-                .map(|p| {
-                    let mut payload = std::collections::HashMap::new();
-                    payload.insert("text".into(), json!(p.payload.text));
-                    payload.insert("url".into(), json!(p.payload.url));
-                    payload.insert("domain".into(), json!(p.payload.domain));
-                    payload.insert("chunk_index".into(), json!(p.payload.chunk_index));
-                    payload.insert("total_chunks".into(), json!(p.payload.total_chunks));
-                    payload.insert("token_estimate".into(), json!(p.payload.token_estimate));
-                    QdrantPoint {
-                        id: p.id.to_string(),
-                        vector: p.vector.clone(),
-                        payload,
-                    }
-                })
-                .collect();
+        let qdrant_points: Vec<QdrantPoint> = points
+            .iter()
+            .map(|p| {
+                let mut payload = std::collections::HashMap::new();
+                payload.insert("text".into(), json!(p.payload.text));
+                payload.insert("url".into(), json!(p.payload.url));
+                payload.insert("domain".into(), json!(p.payload.domain));
+                payload.insert("chunk_index".into(), json!(p.payload.chunk_index));
+                payload.insert("total_chunks".into(), json!(p.payload.total_chunks));
+                payload.insert("token_estimate".into(), json!(p.payload.token_estimate));
+                QdrantPoint {
+                    id: p.id.to_string(),
+                    vector: p.vector.clone(),
+                    payload,
+                }
+            })
+            .collect();
 
-            let resp = self
-                .client
-                .put(&url)
-                .json(&UpsertRequest {
-                    points: qdrant_points,
-                })
-                .send()
-                .await?;
+        let resp = self
+            .client
+            .put(&url)
+            .json(&UpsertRequest {
+                points: qdrant_points,
+            })
+            .send()
+            .await?;
 
-            if !resp.status().is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(RagError::Store(format!("upsert failed: {text}")));
-            }
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RagError::Store(format!("upsert failed: {text}")));
         }
 
         Ok(())

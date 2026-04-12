@@ -85,6 +85,12 @@ impl Pipeline {
             } => (watch_dir.clone(), *debounce_ms),
         };
 
+        if self.config.pipeline.embed_concurrency == 0 {
+            return Err(RagError::Config(
+                "pipeline.embed_concurrency must be > 0 or no workers will run".to_string(),
+            ));
+        }
+
         tracing::info!(
             watch_dir = %watch_dir.display(),
             debounce_ms,
@@ -202,12 +208,23 @@ impl Pipeline {
                                 path = %path.display(),
                             );
                             let job = IndexJob { path, span };
-                            // blocking_send is safe here — we are inside spawn_blocking.
-                            // It blocks until capacity is available (backpressure) rather
-                            // than dropping events the way try_send would.
-                            if tx_clone.blocking_send(job).is_err() {
-                                // Receiver dropped — workers are done; exit.
-                                break;
+                            // Retry with a short sleep so shutdown can interrupt a full queue.
+                            let mut pending_job = job;
+                            loop {
+                                match tx_clone.try_send(pending_job) {
+                                    Ok(()) => break,
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(job)) => {
+                                        if shutdown_clone.is_cancelled() {
+                                            break;
+                                        }
+                                        pending_job = job;
+                                        std::thread::sleep(Duration::from_millis(10));
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        // Receiver dropped — workers are done; exit.
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }

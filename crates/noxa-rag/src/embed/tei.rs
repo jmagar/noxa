@@ -114,7 +114,7 @@ impl TeiProvider {
         };
 
         let mut delay_ms: u64 = 200;
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..MAX_RETRIES {
             let resp = self
                 .client
                 .post(&url)
@@ -141,7 +141,10 @@ impl TeiProvider {
                 });
             }
 
-            if (status.as_u16() == 429 || status.as_u16() == 503) && attempt < MAX_RETRIES {
+            if status.as_u16() == 429 || status.as_u16() == 503 {
+                if attempt + 1 == MAX_RETRIES {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 delay_ms = (delay_ms * 2).min(2_000);
                 continue;
