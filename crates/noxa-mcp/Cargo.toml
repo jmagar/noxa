@@ -27,5 +27,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+wreq = { version = "6.0.0-rc.28", features = ["cookies", "gzip", "brotli", "zstd", "deflate"] }
 url = "2"
 dirs = { workspace = true }
