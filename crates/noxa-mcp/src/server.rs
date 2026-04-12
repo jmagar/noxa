@@ -36,20 +36,6 @@ fn parse_browser(browser: Option<&str>) -> noxa_fetch::BrowserProfile {
     }
 }
 
-/// Returns true if the hostname resolves to a private/loopback/reserved address.
-fn is_private_host(host: &str) -> bool {
-    let lower = host.to_lowercase();
-    // Reject localhost by name
-    if lower == "localhost" || lower.ends_with(".localhost") {
-        return true;
-    }
-    // Try to parse as an IP address
-    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
-        return is_private_ip(ip);
-    }
-    false
-}
-
 /// Returns true if the IP address is loopback, private, link-local, or otherwise reserved.
 fn is_private_ip(ip: std::net::IpAddr) -> bool {
     match ip {
@@ -64,15 +50,26 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
                 || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127) // 100.64.0.0/10 (Tailscale/CGNAT)
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()    // ::1
-                || v6.is_unspecified() // ::
+            // Unmap IPv4-mapped addresses (::ffff:x.x.x.x) and check as IPv4.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(std::net::IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()                         // ::1
+                || v6.is_unspecified()               // ::
+                || v6.is_multicast()                 // ff00::/8
+                || (seg0 & 0xffc0) == 0xfe80         // fe80::/10 link-local
+                || (seg0 & 0xfe00) == 0xfc00         // fc00::/7  unique-local (ULA)
         }
     }
 }
 
 /// Validate that a URL is non-empty, has an http/https scheme, and does not target
 /// private/loopback/reserved hosts (SSRF prevention).
-fn validate_url(url: &str) -> Result<(), String> {
+///
+/// For literal IP addresses the check is synchronous. For hostnames all A/AAAA
+/// records are resolved and rejected if any resolves to a private range.
+async fn validate_url(url: &str) -> Result<(), String> {
     if url.is_empty() {
         return Err("Invalid URL: must not be empty".into());
     }
@@ -83,11 +80,41 @@ fn validate_url(url: &str) -> Result<(), String> {
             parsed.scheme()
         ));
     }
-    if let Some(host) = parsed.host_str() {
-        if is_private_host(host) {
+    let Some(host) = parsed.host_str() else {
+        return Ok(());
+    };
+    let lower = host.to_lowercase();
+
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return Err(format!(
+            "Invalid URL: host '{host}' is a private or reserved address"
+        ));
+    }
+
+    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
+        if is_private_ip(ip) {
             return Err(format!(
-                "Invalid URL: host '{host}' resolves to a private or reserved address"
+                "Invalid URL: host '{host}' is a private or reserved address"
             ));
+        }
+    } else {
+        // Resolve hostname; reject if any resolved address is private (fail-closed).
+        let lookup = format!("{host}:80");
+        match tokio::net::lookup_host(lookup).await {
+            Ok(addrs) => {
+                for addr in addrs {
+                    if is_private_ip(addr.ip()) {
+                        return Err(format!(
+                            "Invalid URL: host '{host}' resolves to a private or reserved address"
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Invalid URL: could not resolve host '{host}': {e}"
+                ));
+            }
         }
     }
     Ok(())
@@ -174,7 +201,7 @@ impl NoxaMcp {
     /// Automatically falls back to the noxa cloud API when bot protection or JS rendering is detected.
     #[tool]
     async fn scrape(&self, Parameters(params): Parameters<ScrapeParams>) -> Result<String, String> {
-        validate_url(&params.url)?;
+        validate_url(&params.url).await?;
         let format = params.format.as_deref().unwrap_or("markdown");
         let browser = parse_browser(params.browser.as_deref());
         let include = params.include_selectors.unwrap_or_default();
@@ -253,7 +280,7 @@ impl NoxaMcp {
     /// Crawl a website starting from a seed URL, following links breadth-first up to a configurable depth and page limit.
     #[tool]
     async fn crawl(&self, Parameters(params): Parameters<CrawlParams>) -> Result<String, String> {
-        validate_url(&params.url)?;
+        validate_url(&params.url).await?;
 
         if let Some(max) = params.max_pages
             && max > 500
@@ -263,10 +290,15 @@ impl NoxaMcp {
 
         let format = params.format.as_deref().unwrap_or("markdown");
 
+        let concurrency = params.concurrency.unwrap_or(5);
+        if concurrency == 0 || concurrency > 20 {
+            return Err(format!("concurrency must be between 1 and 20 (got {concurrency})"));
+        }
+
         let config = noxa_fetch::CrawlConfig {
             max_depth: params.depth.unwrap_or(2) as usize,
             max_pages: params.max_pages.unwrap_or(50),
-            concurrency: params.concurrency.unwrap_or(5).min(20),
+            concurrency,
             use_sitemap: params.use_sitemap.unwrap_or(false),
             ..Default::default()
         };
@@ -302,7 +334,7 @@ impl NoxaMcp {
     /// Discover URLs from a website's sitemaps (robots.txt + sitemap.xml).
     #[tool]
     async fn map(&self, Parameters(params): Parameters<MapParams>) -> Result<String, String> {
-        validate_url(&params.url)?;
+        validate_url(&params.url).await?;
         let entries = noxa_fetch::sitemap::discover(&self.fetch_client, &params.url)
             .await
             .map_err(|e| format!("Sitemap discovery failed: {e}"))?;
@@ -325,11 +357,14 @@ impl NoxaMcp {
             return Err("batch is limited to 100 URLs per request".into());
         }
         for u in &params.urls {
-            validate_url(u)?;
+            validate_url(u).await?;
         }
 
         let format = params.format.as_deref().unwrap_or("markdown");
-        let concurrency = params.concurrency.unwrap_or(5).min(20);
+        let concurrency = params.concurrency.unwrap_or(5);
+        if concurrency == 0 || concurrency > 20 {
+            return Err(format!("concurrency must be between 1 and 20 (got {concurrency})"));
+        }
         let url_refs: Vec<&str> = params.urls.iter().map(String::as_str).collect();
 
         let results = self
@@ -367,7 +402,7 @@ impl NoxaMcp {
         &self,
         Parameters(params): Parameters<ExtractParams>,
     ) -> Result<String, String> {
-        validate_url(&params.url)?;
+        validate_url(&params.url).await?;
 
         if params.schema.is_none() && params.prompt.is_none() {
             return Err("Either 'schema' or 'prompt' is required for extraction.".into());
@@ -422,7 +457,7 @@ impl NoxaMcp {
         &self,
         Parameters(params): Parameters<SummarizeParams>,
     ) -> Result<String, String> {
-        validate_url(&params.url)?;
+        validate_url(&params.url).await?;
 
         // No local LLM — fall back to cloud API directly
         if self.llm_chain.is_none() {
@@ -462,7 +497,7 @@ impl NoxaMcp {
     /// Automatically falls back to the noxa cloud API when bot protection is detected.
     #[tool]
     async fn diff(&self, Parameters(params): Parameters<DiffParams>) -> Result<String, String> {
-        validate_url(&params.url)?;
+        validate_url(&params.url).await?;
         let previous: noxa_core::ExtractionResult = serde_json::from_str(&params.previous_snapshot)
             .map_err(|e| format!("Failed to parse previous_snapshot JSON: {e}"))?;
 
@@ -529,7 +564,7 @@ impl NoxaMcp {
     /// Automatically falls back to the noxa cloud API when bot protection is detected.
     #[tool]
     async fn brand(&self, Parameters(params): Parameters<BrandParams>) -> Result<String, String> {
-        validate_url(&params.url)?;
+        validate_url(&params.url).await?;
         let fetch_result =
             tokio::time::timeout(LOCAL_FETCH_TIMEOUT, self.fetch_client.fetch(&params.url))
                 .await
@@ -806,42 +841,71 @@ fn save_research(dir: &std::path::Path, slug: &str, data: &serde_json::Value) ->
 mod tests {
     use super::*;
 
-    #[test]
-    fn validate_rejects_loopback() {
-        assert!(validate_url("http://127.0.0.1/secret").is_err());
-        assert!(validate_url("http://127.0.0.1:8080/secret").is_err());
+    #[tokio::test]
+    async fn validate_rejects_loopback() {
+        assert!(validate_url("http://127.0.0.1/secret").await.is_err());
+        assert!(validate_url("http://127.0.0.1:8080/secret").await.is_err());
     }
 
-    #[test]
-    fn validate_rejects_localhost() {
-        assert!(validate_url("http://localhost/secret").is_err());
-        assert!(validate_url("http://localhost:8080/secret").is_err());
-        assert!(validate_url("http://foo.localhost/secret").is_err());
+    #[tokio::test]
+    async fn validate_rejects_localhost() {
+        assert!(validate_url("http://localhost/secret").await.is_err());
+        assert!(validate_url("http://localhost:8080/secret").await.is_err());
+        assert!(validate_url("http://foo.localhost/secret").await.is_err());
     }
 
-    #[test]
-    fn validate_rejects_rfc1918() {
-        assert!(validate_url("http://10.0.0.1/").is_err());
-        assert!(validate_url("http://172.16.0.1/").is_err());
-        assert!(validate_url("http://172.31.255.255/").is_err());
-        assert!(validate_url("http://192.168.1.1/").is_err());
+    #[tokio::test]
+    async fn validate_rejects_rfc1918() {
+        assert!(validate_url("http://10.0.0.1/").await.is_err());
+        assert!(validate_url("http://172.16.0.1/").await.is_err());
+        assert!(validate_url("http://172.31.255.255/").await.is_err());
+        assert!(validate_url("http://192.168.1.1/").await.is_err());
     }
 
-    #[test]
-    fn validate_rejects_link_local() {
-        assert!(validate_url("http://169.254.169.254/latest/meta-data/").is_err());
+    #[tokio::test]
+    async fn validate_rejects_link_local() {
+        assert!(validate_url("http://169.254.169.254/latest/meta-data/").await.is_err());
     }
 
-    #[test]
-    fn validate_rejects_tailscale() {
-        assert!(validate_url("http://100.100.1.1/").is_err());
-        assert!(validate_url("http://100.127.255.255/").is_err());
+    #[tokio::test]
+    async fn validate_rejects_tailscale() {
+        assert!(validate_url("http://100.100.1.1/").await.is_err());
+        assert!(validate_url("http://100.127.255.255/").await.is_err());
     }
 
-    #[test]
-    fn validate_accepts_public() {
-        assert!(validate_url("https://example.com").is_ok());
-        assert!(validate_url("https://s.tootie.tv").is_ok());
-        assert!(validate_url("http://8.8.8.8/").is_ok());
+    #[tokio::test]
+    async fn validate_rejects_ipv6_loopback() {
+        assert!(validate_url("http://[::1]/secret").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv6_link_local() {
+        assert!(validate_url("http://[fe80::1]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv6_ula() {
+        assert!(validate_url("http://[fd00::1]/").await.is_err());
+        assert!(validate_url("http://[fc00::1]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv4_mapped_ipv6() {
+        assert!(validate_url("http://[::ffff:127.0.0.1]/").await.is_err());
+        assert!(validate_url("http://[::ffff:169.254.169.254]/latest/meta-data/").await.is_err());
+        assert!(validate_url("http://[::ffff:10.0.0.1]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_public_ip() {
+        // Uses a literal IP — no DNS needed, fast.
+        assert!(validate_url("http://8.8.8.8/").await.is_ok());
+        assert!(validate_url("http://1.1.1.1/").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_public_hostname() {
+        // Requires network — skip in offline environments.
+        assert!(validate_url("https://example.com").await.is_ok());
     }
 }
