@@ -12,8 +12,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required files
+        run: |
+          missing=()
+          for f in README.md Cargo.toml; do
+            [[ -f "$f" ]] || missing+=("$f")
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "Missing required files: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          cargo_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$tag" != "$cargo_version" ]]; then
+            echo "Tag v${tag} does not match Cargo.toml version ${cargo_version}"
+            exit 1
+          fi
+
+      - name: Check noxa-cli crate exists
+        run: |
+          [[ -f "crates/noxa-cli/Cargo.toml" ]] || { echo "crates/noxa-cli/Cargo.toml not found"; exit 1; }
+
   build:
     name: Build ${{ matrix.target }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
