@@ -4,6 +4,9 @@
 mod cloud;
 mod config;
 mod setup;
+mod theme;
+
+use theme::*;
 
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -75,14 +78,14 @@ fn detect_empty(result: &ExtractionResult) -> EmptyReason {
 fn warn_empty(url: &str, reason: &EmptyReason) {
     match reason {
         EmptyReason::Antibot => eprintln!(
-            "\x1b[33mwarning:\x1b[0m Anti-bot protection detected on {url}\n\
-             This site requires CAPTCHA solving or browser rendering.\n\
-             Use the noxa Cloud API for automatic bypass: https://noxa.io/pricing"
+            "{}\nThis site requires CAPTCHA solving or browser rendering.\n\
+             Use the noxa Cloud API for automatic bypass: https://noxa.io/pricing",
+            warning(&format!("Anti-bot protection detected on {url}"))
         ),
         EmptyReason::JsRequired => eprintln!(
-            "\x1b[33mwarning:\x1b[0m No content extracted from {url}\n\
-             This site requires JavaScript rendering (SPA).\n\
-             Use the noxa Cloud API for JS rendering: https://noxa.io/pricing"
+            "{}\nThis site requires JavaScript rendering (SPA).\n\
+             Use the noxa Cloud API for JS rendering: https://noxa.io/pricing",
+            warning(&format!("No content extracted from {url}"))
         ),
         EmptyReason::None => {}
     }
@@ -777,18 +780,10 @@ fn print_save_hint(dest: &std::path::Path, content: &str) {
     let file_part = dest.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
-    let path_str = dest.to_string_lossy();
-    let bold   = "\x1b[1m";
-    let green  = "\x1b[92m";
-    let cyan   = "\x1b[96m";
-    let yellow = "\x1b[93m";
-    let pink   = "\x1b[95m";
-    let dim    = "\x1b[2m";
-    let reset  = "\x1b[0m";
     eprintln!(
         "\n  {green}{bold}✓ saved{reset}  {dim}{dir_part}{reset}{bold}{cyan}{file_part}{reset}  {yellow}{bold}{word_display} words{reset}\n\
          \n\
-         {dim}  search{reset}   {cyan}rg -n {green}\"TERM\"{reset} {dim}{path_str}{reset}\n\
+         {dim}  grep{reset}     {cyan}noxa --grep {green}\"TERM\"{reset}\n\
          {dim}  context{reset}  {pink}noxa <url>{reset} {dim}(omit --output-dir to pipe straight to LLM){reset}\n",
     );
 }
@@ -1124,7 +1119,7 @@ async fn fetch_and_extract(
     let reason = detect_empty(&result);
     if !matches!(reason, EmptyReason::None) {
         if let Some(ref c) = cloud_client {
-            eprintln!("\x1b[36minfo:\x1b[0m falling back to cloud API...");
+            eprintln!("{}", info("falling back to cloud API..."));
             let format_str = match resolved.format {
                 OutputFormat::Markdown => "markdown",
                 OutputFormat::Json => "json",
@@ -1144,7 +1139,7 @@ async fn fetch_and_extract(
             {
                 Ok(resp) => return Ok(FetchOutput::Cloud(resp)),
                 Err(e) => {
-                    eprintln!("\x1b[33mwarning:\x1b[0m cloud fallback failed: {e}");
+                    eprintln!("{}", warning(&format!("cloud fallback failed: {e}")));
                     // Fall through to return the local result with a warning
                 }
             }
@@ -1655,12 +1650,6 @@ fn write_crawl_status(
 }
 
 fn run_retrieve(query: &str) {
-    let bold   = "\x1b[1m";
-    let cyan   = "\x1b[96m";
-    let yellow = "\x1b[93m";
-    let pink   = "\x1b[95m";
-    let dim    = "\x1b[2m";
-    let reset  = "\x1b[0m";
 
     let store_root = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -1764,13 +1753,6 @@ trait Pipe: Sized {
 impl<T> Pipe for T {}
 
 fn run_status(domain: &str) {
-    let bold   = "\x1b[1m";
-    let green  = "\x1b[92m";
-    let cyan   = "\x1b[96m";
-    let yellow = "\x1b[93m";
-    let pink   = "\x1b[95m";
-    let dim    = "\x1b[2m";
-    let reset  = "\x1b[0m";
 
     // Accept domain with or without scheme, strip www.
     let key_input = domain
@@ -1845,11 +1827,6 @@ fn run_status(domain: &str) {
 }
 
 fn spawn_crawl_background(cli: &Cli) {
-    let bold  = "\x1b[1m";
-    let green = "\x1b[92m";
-    let cyan  = "\x1b[96m";
-    let dim   = "\x1b[2m";
-    let reset = "\x1b[0m";
 
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -2049,13 +2026,8 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
                 saved += 1;
             }
         }
-        let bold  = "\x1b[1m";
-        let green = "\x1b[92m";
-        let pink  = "\x1b[95m";
-        let dim   = "\x1b[2m";
-        let reset = "\x1b[0m";
         let err_part = if result.errors > 0 {
-            format!("  {}\x1b[93m{} errors\x1b[0m", dim, result.errors)
+            format!("  {yellow}{} errors{reset}", result.errors)
         } else { String::new() };
         eprintln!(
             "\n  {green}{bold}✓{reset} {bold}{saved} pages{reset}  {pink}{}{reset}  {dim}{:.1}s{reset}{err_part}\n",
@@ -3087,12 +3059,6 @@ async fn run_research(
 }
 
 fn run_list(filter: &str) {
-    let bold   = "\x1b[1m";
-    let cyan   = "\x1b[96m";
-    let pink   = "\x1b[95m";
-    let blue   = "\x1b[94m";
-    let dim    = "\x1b[2m";
-    let reset  = "\x1b[0m";
 
     let store_root = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -3140,13 +3106,13 @@ fn run_list(filter: &str) {
             }).collect();
             let alt = store_root.join(&sanitized);
             if alt.exists() {
-                list_domain_docs(&alt, &store_root, filter, bold, cyan, pink, blue, dim, reset);
+                list_domain_docs(&alt, &store_root, filter);
             } else {
                 eprintln!("{dim}no docs found for{reset} {bold}{filter}{reset}");
             }
             return;
         }
-        list_domain_docs(&domain_dir, &store_root, filter, bold, cyan, pink, blue, dim, reset);
+        list_domain_docs(&domain_dir, &store_root, filter);
     }
 }
 
@@ -3168,7 +3134,6 @@ fn list_domain_docs(
     dir: &std::path::Path,
     store_root: &std::path::Path,
     filter: &str,
-    bold: &str, cyan: &str, _pink: &str, blue: &str, dim: &str, reset: &str,
 ) {
     let mut docs: Vec<(String, std::path::PathBuf)> = Vec::new();
     collect_docs(dir, store_root, &mut docs);
@@ -3216,12 +3181,6 @@ fn collect_docs(
 }
 
 fn run_grep(pattern: &str) {
-    let bold    = "\x1b[1m";
-    let green   = "\x1b[92m";
-    let cyan    = "\x1b[96m";
-    let pink    = "\x1b[95m";
-    let dim     = "\x1b[2m";
-    let reset   = "\x1b[0m";
 
     let store_root = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -3255,7 +3214,7 @@ fn run_grep(pattern: &str) {
             let mut matched_files = 0usize;
             let mut matched_lines = 0usize;
             if let Ok(walker) = std::fs::read_dir(&store_root) {
-                grep_dir(walker, &pattern_lower, &store_root, &mut matched_files, &mut matched_lines, bold, green, cyan, pink, dim, reset);
+                grep_dir(walker, &pattern_lower, &store_root, &mut matched_files, &mut matched_lines);
             }
             if matched_files == 0 {
                 eprintln!("{dim}no matches for {reset}{bold}\"{pattern}\"{reset}");
@@ -3273,7 +3232,6 @@ fn grep_dir(
     root: &std::path::Path,
     matched_files: &mut usize,
     matched_lines: &mut usize,
-    bold: &str, green: &str, _cyan: &str, pink: &str, dim: &str, reset: &str,
 ) {
     let mut paths: Vec<std::path::PathBuf> = entries
         .flatten()
@@ -3283,7 +3241,7 @@ fn grep_dir(
     for path in paths {
         if path.is_dir() {
             if let Ok(sub) = std::fs::read_dir(&path) {
-                grep_dir(sub, pattern, root, matched_files, matched_lines, bold, green, _cyan, pink, dim, reset);
+                grep_dir(sub, pattern, root, matched_files, matched_lines);
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             let Ok(content) = std::fs::read_to_string(&path) else { continue };
@@ -3389,14 +3347,6 @@ async fn run_search(
         }
     };
 
-    let bold    = "\x1b[1m";
-    let green   = "\x1b[92m";   // bright green
-    let cyan    = "\x1b[96m";   // bright cyan (light blue)
-    let yellow  = "\x1b[93m";   // bright yellow
-    let pink    = "\x1b[95m";   // bright magenta (pink)
-    let blue    = "\x1b[94m";   // bright blue
-    let dim     = "\x1b[2m";
-    let reset   = "\x1b[0m";
 
     if results.is_empty() {
         eprintln!("{yellow}no results found for: {query}{reset}");
@@ -3459,9 +3409,8 @@ async fn run_search(
     let saved = scraped.iter().filter(|s| s.result.is_ok()).count();
     eprintln!(
         "{green}{bold}✓{reset} {bold}{saved}/{} scraped{reset}  {pink}{}{reset}\n\
-         {dim}  rg -n \"TERM\" {}{reset}\n",
+         {dim}  grep{reset}  {cyan}noxa --grep {green}\"TERM\"{reset}\n",
         valid.len(),
-        store_root.display(),
         store_root.display(),
     );
 

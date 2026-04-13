@@ -117,12 +117,7 @@ impl NoxaConfig {
             content.contains(&format!("\"{k}\""))
         });
 
-        let bold   = "\x1b[1m";
-        let green  = "\x1b[92m";  // bright green
-        let cyan   = "\x1b[96m";  // bright cyan
-        let yellow = "\x1b[93m";  // bright yellow
-        let dim    = "\x1b[2m";
-        let reset  = "\x1b[0m";
+        use crate::theme::*;
 
         if has_secrets {
             eprintln!(
