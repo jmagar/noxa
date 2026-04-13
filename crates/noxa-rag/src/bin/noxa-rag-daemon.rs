@@ -14,7 +14,6 @@ use noxa_rag::{
     config::{EmbedProviderConfig, SourceConfig},
     load_config,
     pipeline::Pipeline,
-    VectorStore,
 };
 
 #[derive(Parser)]

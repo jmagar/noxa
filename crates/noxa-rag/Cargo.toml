@@ -11,6 +11,12 @@ path = "src/bin/noxa-rag-daemon.rs"
 
 [dependencies]
 noxa-core = { workspace = true }
+noxa-pdf = { path = "../noxa-pdf" }
+
+# Multi-format ingestion
+zip = "2"                         # DOCX, ODT, PPTX (ZIP archives) — matches noxa-fetch version
+quick-xml = "0.37"                # XML/OPML/RSS and DOCX word/document.xml — matches noxa-fetch version
+strip-ansi-escapes = "0.2"        # .log file preprocessing
 
 # Async runtime
 tokio = { workspace = true }
@@ -63,3 +69,4 @@ tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = "3"
