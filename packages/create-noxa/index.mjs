@@ -13,10 +13,9 @@ import http from "http";
 // ── Constants ──
 
 const REPO = "jmagar/noxa";
-const BINARY_NAME = "noxa-mcp";
+const BINARY_NAME = platform() === "win32" ? "noxa.exe" : "noxa";
 const INSTALL_DIR = join(homedir(), ".noxa");
 const BINARY_PATH = join(INSTALL_DIR, BINARY_NAME);
-const VERSION = "latest";
 
 const COLORS = {
   reset: "\x1b[0m",
@@ -24,7 +23,6 @@ const COLORS = {
   dim: "\x1b[2m",
   green: "\x1b[32m",
   yellow: "\x1b[33m",
-  blue: "\x1b[34m",
   cyan: "\x1b[36m",
   red: "\x1b[31m",
 };
@@ -225,15 +223,15 @@ function getAssetName() {
   const a = arch();
 
   if (os === "darwin" && a === "arm64")
-    return `noxa-mcp-aarch64-apple-darwin.tar.gz`;
+    return `noxa-aarch64-apple-darwin.tar.gz`;
   if (os === "darwin" && a === "x64")
-    return `noxa-mcp-x86_64-apple-darwin.tar.gz`;
+    return `noxa-x86_64-apple-darwin.tar.gz`;
   if (os === "linux" && a === "x64")
-    return `noxa-mcp-x86_64-unknown-linux-gnu.tar.gz`;
+    return `noxa-x86_64-unknown-linux-gnu.tar.gz`;
   if (os === "linux" && a === "arm64")
-    return `noxa-mcp-aarch64-unknown-linux-gnu.tar.gz`;
+    return `noxa-aarch64-unknown-linux-gnu.tar.gz`;
   if (os === "win32" && a === "x64")
-    return `noxa-mcp-x86_64-pc-windows-msvc.zip`;
+    return `noxa-x86_64-pc-windows-msvc.zip`;
 
   return null;
 }
@@ -255,6 +253,7 @@ function writeJsonFile(path, data) {
 function buildMcpEntry(apiKey) {
   const entry = {
     command: BINARY_PATH,
+    args: ["mcp"],
   };
   if (apiKey) {
     entry.env = { NOXA_API_KEY: apiKey };
@@ -281,10 +280,7 @@ function addToClaudeCode(configPath, apiKey) {
 function addToCursor(configPath, apiKey) {
   const config = readJsonFile(configPath);
   if (!config.mcpServers) config.mcpServers = {};
-  config.mcpServers.noxa = {
-    command: BINARY_PATH,
-    ...(apiKey ? { env: { NOXA_API_KEY: apiKey } } : {}),
-  };
+  config.mcpServers.noxa = buildMcpEntry(apiKey);
   writeJsonFile(configPath, config);
 }
 
@@ -303,6 +299,7 @@ function addToVSCodeContinue(configPath, apiKey) {
   const entry = {
     name: "noxa",
     command: BINARY_PATH,
+    args: ["mcp"],
     ...(apiKey ? { env: { NOXA_API_KEY: apiKey } } : {}),
   };
   if (existing >= 0) {
@@ -318,7 +315,7 @@ function addToOpenCode(configPath, apiKey) {
   if (!config.mcp) config.mcp = {};
   config.mcp.noxa = {
     type: "local",
-    command: [BINARY_PATH],
+    command: [BINARY_PATH, "mcp"],
     enabled: true,
   };
   if (apiKey) {
@@ -352,7 +349,7 @@ function addToCodex(configPath, apiKey) {
     "",
   );
 
-  let section = `\n[mcp_servers.noxa]\ncommand = "${BINARY_PATH}"\nargs = []\nenabled = true\n`;
+  let section = `\n[mcp_servers.noxa]\ncommand = "${BINARY_PATH}"\nargs = ["mcp"]\nenabled = true\n`;
   if (apiKey) {
     section += `env = { NOXA_API_KEY = "${apiKey}" }\n`;
   }
@@ -411,9 +408,7 @@ async function main() {
     console.log(c("dim", "  Or use --manual to configure manually."));
     console.log();
 
-    if (process.argv.includes("--manual")) {
-      // Continue anyway for manual setup
-    } else {
+    if (!process.argv.includes("--manual")) {
       process.exit(0);
     }
   }
@@ -437,7 +432,7 @@ async function main() {
   console.log();
 
   // 3. Download binary
-  console.log(c("bold", "  Downloading noxa-mcp..."));
+  console.log(c("bold", "  Downloading noxa..."));
 
   const assetName = getAssetName();
   if (!assetName) {
@@ -445,7 +440,7 @@ async function main() {
     console.log(
       c(
         "dim",
-        "  Build from source: cargo install --git https://github.com/jmagar/noxa noxa-mcp",
+        "  Build from source: cargo install --git https://github.com/jmagar/noxa noxa-cli",
       ),
     );
     process.exit(1);
@@ -480,8 +475,8 @@ async function main() {
         });
       }
 
-      // Make executable
-      await chmod(BINARY_PATH, 0o755);
+      // Make executable (no-op on Windows)
+      if (platform() !== "win32") await chmod(BINARY_PATH, 0o755);
 
       // Cleanup archive
       try {
@@ -492,7 +487,7 @@ async function main() {
       downloaded = true;
     }
   } catch (e) {
-    // Release not available yet — expected before first release
+    console.log(c("yellow", `  Pre-built binary unavailable (${e.message}), falling back to cargo install...`));
   }
 
   if (!downloaded) {
@@ -502,7 +497,7 @@ async function main() {
     );
     try {
       execSync(
-        `cargo install --git https://github.com/${REPO} noxa-mcp --root "${INSTALL_DIR}"`,
+        `cargo install --git https://github.com/${REPO} noxa-cli --root "${INSTALL_DIR}"`,
         { stdio: "inherit" },
       );
       // cargo install puts binary in INSTALL_DIR/bin/
@@ -562,7 +557,7 @@ async function main() {
       }).trim();
       console.log(c("green", `  ✓ ${version}`));
     } catch {
-      console.log(c("green", `  ✓ noxa-mcp installed`));
+      console.log(c("green", `  ✓ noxa installed`));
     }
   }
 

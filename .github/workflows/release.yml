@@ -63,14 +63,12 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          staging="noxa-${tag}-${{ matrix.target }}"
-          mkdir "$staging"
-          cp target/${{ matrix.target }}/release/noxa "$staging/" 2>/dev/null || true
-          cp target/${{ matrix.target }}/release/noxa-mcp "$staging/" 2>/dev/null || true
-          cp README.md LICENSE "$staging/"
-          tar czf "$staging.tar.gz" "$staging"
-          echo "ASSET=$staging.tar.gz" >> $GITHUB_ENV
+          asset="noxa-${{ matrix.target }}"
+          mkdir "$asset"
+          cp target/${{ matrix.target }}/release/noxa "$asset/" 2>/dev/null || true
+          cp README.md LICENSE "$asset/"
+          tar czf "$asset.tar.gz" "$asset"
+          echo "ASSET=$asset.tar.gz" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -128,13 +126,11 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            dir="noxa-${tag}-${target}"
-            curl -sSL "https://github.com/0xMassi/noxa/releases/download/${tag}/${dir}.tar.gz" -o "${target}.tar.gz"
+            curl -sSL "https://github.com/jmagar/noxa/releases/download/${tag}/noxa-${target}.tar.gz" -o "${target}.tar.gz"
             tar xzf "${target}.tar.gz"
             mkdir -p "binaries-${target}"
-            cp "${dir}/noxa" "binaries-${target}/noxa"
-            cp "${dir}/noxa-mcp" "binaries-${target}/noxa-mcp"
-            chmod +x "binaries-${target}"/*
+            cp "noxa-${target}/noxa" "binaries-${target}/noxa"
+            chmod +x "binaries-${target}/noxa"
           done
           ls -laR binaries-*/
 
@@ -145,22 +141,22 @@ jobs:
 
           # amd64
           docker build -f Dockerfile.ci --build-arg BINARY_DIR=binaries-x86_64-unknown-linux-gnu \
-            --platform linux/amd64 -t ghcr.io/0xmassi/noxa:${tag}-amd64 --push .
+            --platform linux/amd64 -t ghcr.io/jmagar/noxa:${tag}-amd64 --push .
 
           # arm64
           docker build -f Dockerfile.ci --build-arg BINARY_DIR=binaries-aarch64-unknown-linux-gnu \
-            --platform linux/arm64 -t ghcr.io/0xmassi/noxa:${tag}-arm64 --push .
+            --platform linux/arm64 -t ghcr.io/jmagar/noxa:${tag}-arm64 --push .
 
           # Multi-arch manifest
-          docker manifest create ghcr.io/0xmassi/noxa:${tag} \
-            ghcr.io/0xmassi/noxa:${tag}-amd64 \
-            ghcr.io/0xmassi/noxa:${tag}-arm64
-          docker manifest push ghcr.io/0xmassi/noxa:${tag}
+          docker manifest create ghcr.io/jmagar/noxa:${tag} \
+            ghcr.io/jmagar/noxa:${tag}-amd64 \
+            ghcr.io/jmagar/noxa:${tag}-arm64
+          docker manifest push ghcr.io/jmagar/noxa:${tag}
 
-          docker manifest create ghcr.io/0xmassi/noxa:latest \
-            ghcr.io/0xmassi/noxa:${tag}-amd64 \
-            ghcr.io/0xmassi/noxa:${tag}-arm64
-          docker manifest push ghcr.io/0xmassi/noxa:latest
+          docker manifest create ghcr.io/jmagar/noxa:latest \
+            ghcr.io/jmagar/noxa:${tag}-amd64 \
+            ghcr.io/jmagar/noxa:${tag}-arm64
+          docker manifest push ghcr.io/jmagar/noxa:latest
 
   homebrew:
     name: Update Homebrew
@@ -172,11 +168,11 @@ jobs:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          base="https://github.com/0xMassi/noxa/releases/download/${tag}"
+          base="https://github.com/jmagar/noxa/releases/download/${tag}"
 
           # Download all 4 tarballs and compute SHAs
           for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
-            curl -sSL "${base}/noxa-${tag}-${target}.tar.gz" -o "${target}.tar.gz"
+            curl -sSL "${base}/noxa-${target}.tar.gz" -o "${target}.tar.gz"
           done
 
           SHA_MAC_ARM=$(sha256sum aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
@@ -199,27 +195,26 @@ jobs:
 
             on_macos do
               if Hardware::CPU.arm?
-                url "${base}/noxa-${tag}-aarch64-apple-darwin.tar.gz"
+                url "${base}/noxa-aarch64-apple-darwin.tar.gz"
                 sha256 "${SHA_MAC_ARM}"
               else
-                url "${base}/noxa-${tag}-x86_64-apple-darwin.tar.gz"
+                url "${base}/noxa-x86_64-apple-darwin.tar.gz"
                 sha256 "${SHA_MAC_X86}"
               end
             end
 
             on_linux do
               if Hardware::CPU.arm?
-                url "${base}/noxa-${tag}-aarch64-unknown-linux-gnu.tar.gz"
+                url "${base}/noxa-aarch64-unknown-linux-gnu.tar.gz"
                 sha256 "${SHA_LINUX_ARM}"
               else
-                url "${base}/noxa-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+                url "${base}/noxa-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "${SHA_LINUX_X86}"
               end
             end
 
             def install
               bin.install "noxa"
-              bin.install "noxa-mcp"
             end
 
             test do
