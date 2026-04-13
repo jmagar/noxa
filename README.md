@@ -412,6 +412,46 @@ echo "proxy1.com:8080:user:pass" > proxies.txt
 noxa https://example.com  # Automatically detects and uses proxies.txt
 ```
 
+### Web Search
+
+Search the web and scrape the top results in one command. Uses SearXNG for fully local, private search — or falls back to the cloud API.
+
+```bash
+# Search via self-hosted SearXNG (no API key needed)
+export SEARXNG_URL=https://your-searxng-instance.example.com
+noxa --search "rust async best practices"
+
+# Control result count (default: 10, max: 50)
+noxa --search "rust async" --num-results 5
+
+# Snippets only — skip scraping result URLs
+noxa --search "rust async" --no-scrape
+
+# Search via cloud API (no SearXNG required)
+noxa --search "rust async" --api-key $NOXA_API_KEY
+```
+
+Results include title, URL, and snippet for each hit. When scraping is enabled (the default), extracted content from each page is also shown. All scraped pages are auto-persisted to `~/.noxa/content/`.
+
+### Content Store
+
+Every extraction automatically persists to `~/.noxa/content/{domain}/{path}.{md,json}`. Works across all modes: scrape, batch, crawl, PDF, search, and MCP tools.
+
+```bash
+# Files are written automatically — no flags needed
+noxa https://example.com
+# → ~/.noxa/content/example_com/index.md
+# → ~/.noxa/content/example_com/index.json
+
+# Disable for a single run
+noxa --no-store https://example.com
+
+# Disable globally via env var
+export NOXA_NO_STORE=1
+```
+
+The JSON file contains the full `ExtractionResult` including metadata, structured data, and content. The MCP `diff` tool reads from the store automatically — no need to pass a previous snapshot manually after the first run.
+
 ### Real-World Recipes
 
 ```bash
@@ -472,10 +512,10 @@ Then in Claude: *"Scrape the top 5 results for 'web scraping tools' and compare 
 | `summarize` | Page summarization | No (needs Ollama) |
 | `diff` | Content change detection | No |
 | `brand` | Brand identity extraction | No |
-| `search` | Web search + scrape results | Yes |
+| `search` | Web search + scrape results | `SEARXNG_URL`: No, cloud: Yes |
 | `research` | Deep multi-source research | Yes |
 
-8 of 10 tools work locally — no account, no API key, fully private.
+9 of 10 tools work locally — no account, no API key, fully private.
 
 ---
 
@@ -519,6 +559,22 @@ noxa URL --extract-json '{"type":"object"}'   # Schema-enforced extraction
 ```bash
 noxa URL -f json > snap.json                  # Take snapshot
 noxa URL --diff-with snap.json                # Compare later
+```
+
+### Content store
+
+Every extraction auto-persists to `~/.noxa/content/`. Works across CLI and MCP.
+
+```bash
+noxa URL                                      # Writes ~/.noxa/content/...{.md,.json}
+noxa --no-store URL                           # Opt out for one run
+```
+
+### Web search
+
+```bash
+noxa --search "query"                         # SearXNG (SEARXNG_URL) or cloud
+noxa --search "query" --no-scrape             # Snippets only, skip scraping
 ```
 
 ### Brand extraction
@@ -665,6 +721,8 @@ These settings can also be controlled via command-line flags:
 | Variable | Description |
 |----------|-------------|
 | `NOXA_API_KEY` | Cloud API key (enables bot bypass, JS rendering, search, research) |
+| `SEARXNG_URL` | Self-hosted SearXNG base URL for local search (no API key required) |
+| `NOXA_NO_STORE` | Set to any non-empty value to disable automatic content persistence |
 | `NOXA_PROXY` | Single proxy URL |
 | `NOXA_PROXY_FILE` | Path to proxy pool file |
 | `NOXA_WEBHOOK_URL` | Webhook URL for notifications |
@@ -700,7 +758,11 @@ For bot-protected sites, JS rendering, and advanced features, noxa offers a host
 The CLI and MCP server work locally first. Cloud is used as a fallback when:
 - A site has bot protection (Cloudflare, DataDome, WAF)
 - A page requires JavaScript rendering
-- You use search or research tools
+- You use `research`
+- You use `search` without `SEARXNG_URL`
+
+If `SEARXNG_URL` is set, `search` runs entirely through your self-hosted SearXNG instance and does not require `NOXA_API_KEY`.
+`SEARXNG_URL` and `NOXA_WEBHOOK_URL` are operator-supplied endpoints, so they are validated for URL syntax and scheme but are allowed to point at localhost or private network addresses. Search result URLs are still filtered through the public-address SSRF validator before scraping.
 
 ```bash
 export NOXA_API_KEY=wc_your_key

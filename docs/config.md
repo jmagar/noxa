@@ -210,13 +210,17 @@ The directory tree is created automatically, so nested paths do not need to exis
 | Variable | Purpose | Notes |
 |---|---|---|
 | `NOXA_API_KEY` | Cloud API key | Used for cloud fallback and cloud-only features |
+| `SEARXNG_URL` | Self-hosted SearXNG base URL | Enables local search without `NOXA_API_KEY`; may be a localhost/private operator endpoint |
+| `NOXA_NO_STORE` | Disable ContentStore | Set to any non-empty value to skip auto-persistence to `~/.noxa/content/`; per-run opt-out via `--no-store` |
 | `NOXA_PROXY` | Single proxy URL | Takes priority over proxy file when set |
 | `NOXA_PROXY_FILE` | Proxy pool file path | One proxy per line |
-| `NOXA_WEBHOOK_URL` | Notification webhook | Used by watch/crawl/batch notifications |
+| `NOXA_WEBHOOK_URL` | Notification webhook | Used by watch/crawl/batch notifications; may be a localhost/private operator endpoint |
 | `NOXA_LLM_BASE_URL` | LLM endpoint URL | For Ollama or OpenAI-compatible endpoints |
 | `NOXA_LLM_PROVIDER` | Default LLM provider | Environment override for the provider name |
 | `NOXA_LLM_MODEL` | Default LLM model | Environment override for the model name |
 | `NOXA_CONFIG` | Config file path | Override `./config.json` or bypass with `/dev/null` |
+
+`SEARXNG_URL` and `NOXA_WEBHOOK_URL` are treated as operator-supplied endpoints. They must still be valid `http://` or `https://` URLs, but they are allowed to point to localhost or private network addresses. Fetched target URLs and scraped result URLs continue to use the stricter public-address SSRF validation.
 
 The following variables are not part of the `config.json` contract, but they still matter for LLM provider behavior:
 

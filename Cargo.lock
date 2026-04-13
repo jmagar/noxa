@@ -1749,6 +1749,7 @@ name = "noxa-cli"
 version = "0.4.0"
 dependencies = [
  "clap",
+ "dirs",
  "dotenvy",
  "noxa-core",
  "noxa-fetch",
@@ -1765,6 +1766,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wreq",
 ]
 
 [[package]]
@@ -1791,6 +1793,7 @@ version = "0.4.0"
 dependencies = [
  "bytes",
  "calamine",
+ "dirs",
  "http",
  "noxa-core",
  "noxa-pdf",
@@ -1840,6 +1843,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wreq",
 ]
 
 [[package]]

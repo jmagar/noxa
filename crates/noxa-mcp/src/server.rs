@@ -25,6 +25,7 @@ pub struct NoxaMcp {
     fetch_client: Arc<noxa_fetch::FetchClient>,
     llm_chain: Option<noxa_llm::ProviderChain>,
     cloud: Option<CloudClient>,
+    store: noxa_fetch::ContentStore,
 }
 
 /// Parse a browser string into a BrowserProfile.
@@ -162,6 +163,13 @@ impl NoxaMcp {
             config.proxy_pool = pool;
         }
 
+        // Create the content store first so we can clone it into FetchConfig.
+        let store = noxa_fetch::ContentStore::open();
+        info!("content store ready");
+
+        // Inject store into FetchConfig so FetchClient auto-persists all extractions.
+        config.store = Some(store.clone());
+
         let fetch_client = match noxa_fetch::FetchClient::new(config) {
             Ok(client) => client,
             Err(e) => {
@@ -194,6 +202,7 @@ impl NoxaMcp {
             fetch_client: Arc::new(fetch_client),
             llm_chain,
             cloud,
+            store,
         }
     }
 
@@ -242,6 +251,7 @@ impl NoxaMcp {
             let config = noxa_fetch::FetchConfig {
                 browser,
                 headers,
+                store: Some(self.store.clone()),
                 ..Default::default()
             };
             custom_client = noxa_fetch::FetchClient::new(config)
@@ -314,6 +324,10 @@ impl NoxaMcp {
             max_pages: params.max_pages.unwrap_or(50),
             concurrency,
             use_sitemap: params.use_sitemap.unwrap_or(false),
+            fetch: noxa_fetch::FetchConfig {
+                store: Some(self.store.clone()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -512,8 +526,77 @@ impl NoxaMcp {
     #[tool]
     async fn diff(&self, Parameters(params): Parameters<DiffParams>) -> Result<String, String> {
         validate_url(&params.url).await?;
-        let previous: noxa_core::ExtractionResult = serde_json::from_str(&params.previous_snapshot)
-            .map_err(|e| format!("Failed to parse previous_snapshot JSON: {e}"))?;
+
+        // Load the previous snapshot. IMPORTANT: this read must complete and bind
+        // to `previous` before any fetch for the same URL — otherwise the fetch
+        // auto-write would overwrite the snapshot we're about to read.
+        let previous: Option<noxa_core::ExtractionResult> = match params.previous_snapshot {
+            Some(ref json) => Some(
+                serde_json::from_str(json)
+                    .map_err(|e| format!("Failed to parse previous_snapshot JSON: {e}"))?,
+            ),
+            // Err from store.read (e.g. corrupt JSON) is treated as None — proceed
+            // to the first-fetch path rather than blocking the user.
+            None => self.store.read(&params.url).await.ok().flatten(),
+        };
+
+        let previous = match previous {
+            Some(p) => p,
+            None => {
+                // No stored snapshot: fetch the current page and explicitly
+                // write it as the baseline, then return an informative message.
+                // Only claim success if the store write actually succeeds.
+                info!(url = %params.url, "diff: no previous snapshot — fetching baseline");
+                let fetch_result = cloud::smart_fetch(
+                    &self.fetch_client,
+                    self.cloud.as_ref(),
+                    &params.url,
+                    &[],
+                    &[],
+                    false,
+                    &["markdown"],
+                )
+                .await;
+                match fetch_result {
+                    Err(e) => {
+                        return Err(format!(
+                            "No previous snapshot stored for {url}. Failed to fetch baseline: {e}",
+                            url = params.url
+                        ));
+                    }
+                    Ok(SmartFetchResult::Local(extraction)) => {
+                        match self.store.write(&params.url, &extraction).await {
+                            Ok(_) => {
+                                return Err(format!(
+                                    "No previous snapshot stored for {url}. The page has been \
+                                     fetched and stored as the baseline — run diff again to \
+                                     compare against this snapshot.",
+                                    url = params.url
+                                ));
+                            }
+                            Err(e) => {
+                                return Err(format!(
+                                    "No previous snapshot stored for {url}. Fetched the page \
+                                     but failed to store baseline: {e}. Ensure the content \
+                                     store is writable and retry.",
+                                    url = params.url
+                                ));
+                            }
+                        }
+                    }
+                    Ok(SmartFetchResult::Cloud(_)) => {
+                        // Cloud responses are not persisted locally as a baseline;
+                        // inform the caller to provide an explicit previous_snapshot.
+                        return Err(format!(
+                            "No previous snapshot stored for {url}. The page required cloud \
+                             fetching (bot protection) and cannot be auto-stored as a baseline. \
+                             Provide a previous_snapshot parameter explicitly.",
+                            url = params.url
+                        ));
+                    }
+                }
+            }
+        };
 
         let result = cloud::smart_fetch(
             &self.fetch_client,
@@ -711,44 +794,95 @@ impl NoxaMcp {
         ))
     }
 
-    /// Search the web for a query and return structured results. Requires NOXA_API_KEY.
+    /// Search using SearXNG (`SEARXNG_URL`) or cloud (`NOXA_API_KEY`).
     #[tool]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Result<String, String> {
-        let cloud = self
-            .cloud
-            .as_ref()
-            .ok_or("Search requires NOXA_API_KEY. Get a key at https://noxa.io")?;
+        if params.query.trim().is_empty() {
+            return Err("query must not be empty".into());
+        }
+        let num = params.num_results.unwrap_or(10).clamp(1, 50);
 
-        let mut body = json!({ "query": params.query });
-        if let Some(num) = params.num_results {
-            body["num_results"] = json!(num);
+        let searxng_url = std::env::var("SEARXNG_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if let Some(base_url) = searxng_url {
+            parse_http_url(&base_url)?;
+
+            let results =
+                noxa_fetch::searxng_search(&self.fetch_client, &base_url, &params.query, num)
+                    .await
+                    .map_err(|e| format!("SearXNG search failed: {e}"))?;
+
+            if results.is_empty() {
+                return Ok(format!("No results found for: {}", params.query));
+            }
+
+            let valid_results: Vec<&noxa_fetch::SearxngResult> = results
+                .iter()
+                .filter(|r| {
+                    if let Err(e) = validate_url(&r.url) {
+                        warn!("skipping result URL {}: {e}", r.url);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            let valid_urls: Vec<&str> = valid_results.iter().map(|r| r.url.as_str()).collect();
+            let scraped = self
+                .fetch_client
+                .fetch_and_extract_batch(&valid_urls, 4)
+                .await;
+
+            let mut out = String::with_capacity(results.len() * 256);
+            out.push_str(&format!("Found {} result(s):\n\n", valid_results.len()));
+
+            // Note: store writes are handled automatically by FetchClient.fetch_and_extract
+            // inside fetch_and_extract_batch above. Explicit writes here were removed to
+            // prevent double-writes. The "saved/updated/unchanged" label is intentionally
+            // absent — FetchClient writes are fire-and-forget.
+            for (idx, (r, scrape)) in valid_results.iter().zip(scraped.iter()).enumerate() {
+                out.push_str(&format!("{}. {}\n   {}\n", idx + 1, r.title, r.url));
+                if !r.content.is_empty() {
+                    out.push_str(&format!("   {}\n", r.content));
+                }
+                if let Err(ref e) = scrape.result {
+                    out.push_str(&format!("   Error: {e}\n"));
+                }
+                out.push('\n');
+            }
+
+            return Ok(out);
         }
 
+        let cloud = self.cloud.as_ref().ok_or(
+            "Search requires SEARXNG_URL (self-hosted SearXNG) or NOXA_API_KEY (cloud). \
+             Set SEARXNG_URL to your SearXNG instance URL.",
+        )?;
+        let body = json!({ "query": params.query, "num_results": num });
         let resp = cloud.post("search", body).await?;
 
-        // Format results for readability
         if let Some(results) = resp.get("results").and_then(|v| v.as_array()) {
-            let mut output = format!("Found {} results:\n\n", results.len());
-            for (i, result) in results.iter().enumerate() {
-                let title = result.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                let url = result.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let snippet = result
+            let mut out = String::with_capacity(results.len() * 256);
+            out.push_str(&format!("Found {} result(s):\n\n", results.len()));
+            for (i, r) in results.iter().enumerate() {
+                let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let snip = r
                     .get("snippet")
-                    .or_else(|| result.get("description"))
+                    .or_else(|| r.get("content"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-
-                output.push_str(&format!(
-                    "{}. {}\n   {}\n   {}\n\n",
-                    i + 1,
-                    title,
-                    url,
-                    snippet
-                ));
+                out.push_str(&format!("{}. {}\n   {}\n", i + 1, title, url));
+                if !snip.is_empty() {
+                    out.push_str(&format!("   {snip}\n"));
+                }
+                out.push('\n');
             }
-            Ok(output)
+            Ok(out)
         } else {
-            // Fallback: return raw JSON if unexpected shape
             Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
         }
     }
@@ -947,5 +1081,18 @@ mod tests {
         })
         .await;
         assert!(result.is_err(), "DNS failure should be rejected (fail-closed)");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_ipv6_link_local_and_ula() {
+        assert!(validate_url("http://[fe80::1]/").is_err());
+        assert!(validate_url("http://[fc00::1]/").is_err());
+    }
+
+    #[test]
+    fn test_num_results_clamp() {
+        assert_eq!(0_u32.clamp(1, 50), 1);
+        assert_eq!(100_u32.clamp(1, 50), 50);
+        assert_eq!(10_u32.clamp(1, 50), 10);
     }
 }

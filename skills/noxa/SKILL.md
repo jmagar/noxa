@@ -38,6 +38,7 @@ To choose the right mode, identify what the user wants from this URL:
 | Extract structured fields | LLM extraction |
 | Summarize a page | Summarize |
 | Deep research on a topic | Research (cloud) |
+| Search the web + scrape results | Search |
 | Track changes once | Diff |
 | Continuously watch for changes | Watch |
 | Get brand colors/fonts/logos | Brand |
@@ -191,16 +192,41 @@ noxa --llm-base-url http://my-server:8080 --llm-provider openai --summarize http
 
 ---
 
+## Web search
+
+```bash
+# Search via self-hosted SearXNG (fully local, no API key)
+export SEARXNG_URL=https://your-searxng-instance.example.com
+noxa --search "rust async runtimes compared"
+
+# Control result count (default: 10, max: 50)
+noxa --search "rust async" --num-results 5
+
+# Snippets only — skip scraping result pages
+noxa --search "rust async" --no-scrape
+
+# Search via cloud API (no SearXNG needed)
+noxa --search "rust async" --api-key $NOXA_API_KEY
+```
+
+Scraped result pages are auto-persisted to `~/.noxa/content/` via ContentStore.
+
+---
+
 ## Change detection (diff)
 
 ```bash
-# Step 1: snapshot
+# Step 1: snapshot (also auto-persisted to ~/.noxa/content/)
 noxa https://example.com -f json > snapshot.json
 
-# Step 2: compare later
+# Step 2: compare using a saved snapshot file
 noxa --diff-with snapshot.json https://example.com
 # Output: Status: Same | Changed, word delta, unified diff
 ```
+
+**MCP diff shortcut** — if the URL was previously scraped via any noxa tool, the MCP `diff` tool loads the snapshot from the ContentStore automatically:
+- Pass `previous_snapshot` (JSON string) to compare against a specific snapshot.
+- Omit `previous_snapshot` to use the stored snapshot. If none exists, noxa fetches and stores the page as the baseline and returns an error — run `diff` again to get the actual comparison.
 
 Good for: one-off comparisons, price monitoring, detecting updates.
 
@@ -314,6 +340,27 @@ noxa --cloud https://spa-site.com
 
 ---
 
+## Content store
+
+Every successful fetch auto-persists to `~/.noxa/content/{domain}/{path}.{md,json}`. Works for single URLs, batch, crawl, PDF, documents, and MCP tools. The `.json` file holds the full `ExtractionResult`; the `.md` file holds just the markdown.
+
+```bash
+# Happens automatically — no flags needed
+noxa https://example.com
+# → ~/.noxa/content/example_com/index.md
+# → ~/.noxa/content/example_com/index.json
+
+# Opt out for a single run
+noxa --no-store https://example.com
+
+# Opt out globally
+export NOXA_NO_STORE=1
+```
+
+`--file` and `--stdin` paths bypass the store (they call the extraction engine directly, not FetchClient).
+
+---
+
 ## Output to files
 
 ```bash
@@ -373,10 +420,12 @@ If a site returns 403, try `--browser firefox` or `--browser random`. If still b
 | Variable | Flag equivalent | Description |
 |----------|----------------|-------------|
 | `NOXA_API_KEY` | `--api-key` | Cloud API key |
+| `SEARXNG_URL` | — | Self-hosted SearXNG base URL; enables `--search` without `NOXA_API_KEY` |
+| `NOXA_NO_STORE` | `--no-store` | Set to any non-empty value to disable ContentStore auto-persistence globally |
 | `NOXA_PROXY` | `--proxy` | Single proxy URL |
 | `NOXA_PROXY_FILE` | `--proxy-file` | Proxy pool file path |
 | `NOXA_WEBHOOK_URL` | `--webhook` | Webhook URL for notifications |
-| `NOXA_LLM_PROVIDER` | `--llm-provider` | LLM provider (gemini/ollama/openai/anthropic) |
+| `NOXA_LLM_PROVIDER` | `--llm-provider` | LLM provider (gemini/openai/ollama/anthropic) |
 | `NOXA_LLM_MODEL` | `--llm-model` | LLM model name override |
 | `NOXA_LLM_BASE_URL` | `--llm-base-url` | LLM base URL (Ollama/OpenAI-compatible) |
 | `NOXA_CONFIG` | `--config` | Path to config.json |

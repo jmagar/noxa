@@ -308,6 +308,27 @@ struct Cli {
     #[arg(long)]
     deep: bool,
 
+    /// Search via SearXNG (SEARXNG_URL) or noxa cloud (NOXA_API_KEY).
+    #[arg(long)]
+    search: Option<String>,
+
+    /// Number of search results (1-50, default: 10).
+    #[arg(long, default_value = "10")]
+    num_results: u32,
+
+    /// Print snippets only; skip scraping result URLs.
+    #[arg(long)]
+    no_scrape: bool,
+
+    /// Disable automatic content store persistence (~/.noxa/content/).
+    /// Also respected via the NOXA_NO_STORE environment variable.
+    #[arg(long, env = "NOXA_NO_STORE")]
+    no_store: bool,
+
+    /// Concurrency for scraping search result URLs (default: 3).
+    #[arg(long, default_value = "3")]
+    num_scrape_concurrency: usize,
+
     /// Output directory: save each page to a separate file instead of stdout.
     /// Works with --crawl, batch (multiple URLs), and single URL mode.
     /// Filenames are derived from URL paths (e.g. /docs/api -> docs/api.md).
@@ -445,6 +466,12 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
         }
     }
 
+    let store = if cli.no_store {
+        None
+    } else {
+        Some(noxa_fetch::ContentStore::open())
+    };
+
     FetchConfig {
         browser: resolved.browser.clone().into(),
         proxy,
@@ -452,6 +479,7 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
         timeout: std::time::Duration::from_secs(resolved.timeout),
         pdf_mode: resolved.pdf_mode.clone().into(),
         headers,
+        store,
         ..Default::default()
     }
 }
@@ -703,6 +731,71 @@ fn write_to_file(dir: &Path, filename: &str, content: &str) -> Result<(), String
     Ok(())
 }
 
+
+fn parse_http_url(url: &str) -> Result<url::Url, String> {
+    if url.is_empty() {
+        return Err("Invalid URL: must not be empty".into());
+    }
+
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => {
+            return Err(format!(
+                "Invalid URL: scheme '{s}' not allowed, must start with http:// or https://"
+            ));
+        }
+    }
+    parsed.host_str().ok_or("Invalid URL: no host")?;
+    Ok(parsed)
+}
+
+/// Validate a URL provided by the operator (e.g. SEARXNG_URL). Only checks scheme and
+/// host presence; does NOT reject private/loopback addresses (operator-trusted config).
+fn validate_operator_url(url: &str) -> Result<(), String> {
+    parse_http_url(url).map(|_| ())
+}
+
+/// Synchronous URL safety check (no DNS resolution) used for filtering search results.
+/// Rejects private/loopback IP addresses but does not resolve hostnames.
+/// NOTE: For stronger SSRF protection with DNS resolution, use the async `validate_url`.
+fn validate_url_sync(url: &str) -> Result<(), String> {
+    let parsed = parse_http_url(url)?;
+    let host = parsed.host_str().ok_or("Invalid URL: no host")?;
+    if matches!(host, "localhost" | "ip6-localhost" | "ip6-loopback")
+        || host.ends_with(".localhost")
+    {
+        return Err(format!(
+            "Invalid URL: host '{host}' is not a routable public address"
+        ));
+    }
+
+    let private = match parsed.host() {
+        Some(url::Host::Ipv4(addr)) => {
+            let ip = std::net::IpAddr::V4(addr);
+            ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip)
+        }
+        Some(url::Host::Ipv6(addr)) => {
+            let ip = std::net::IpAddr::V6(addr);
+            ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip)
+        }
+        Some(url::Host::Domain(_)) => false, // DNS not checked in sync path; use async validate_url for full protection
+        None => true,
+    };
+    if private {
+        return Err(format!(
+            "Invalid URL: host '{host}' is not a routable public address"
+        ));
+    }
+
+    Ok(())
+}
+
+fn clamp_search_scrape_concurrency(concurrency: usize) -> usize {
+    concurrency.clamp(1, 20)
+}
+
+
 /// Get raw HTML from an extraction result, falling back to markdown if unavailable.
 fn raw_html_or_markdown(result: &ExtractionResult) -> &str {
     result
@@ -744,6 +837,13 @@ fn file_extension_for_format(format: &OutputFormat) -> &'static str {
         OutputFormat::Text => "txt",
         OutputFormat::Html => "html",
     }
+}
+
+fn default_search_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".noxa")
+        .join("search")
 }
 
 fn format_cloud_output(resp: &serde_json::Value, format: &OutputFormat) -> String {
@@ -2591,6 +2691,135 @@ async fn run_research(
     ))
 }
 
+async fn run_search(
+    cli: &Cli,
+    fetch_client: &Arc<noxa_fetch::FetchClient>,
+    query: &str,
+) -> Result<(), String> {
+    if query.trim().is_empty() {
+        return Err("Search query must not be empty or whitespace-only.".into());
+    }
+
+    let num = cli.num_results.clamp(1, 50);
+    let concurrency = clamp_search_scrape_concurrency(cli.num_scrape_concurrency);
+
+    let results: Vec<(String, String, String)> = {
+        let searxng_url = std::env::var("SEARXNG_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if let Some(base_url) = searxng_url {
+            validate_operator_url(&base_url).map_err(|e| format!("SEARXNG_URL is invalid: {e}"))?;
+            noxa_fetch::searxng_search(fetch_client, &base_url, query, num)
+                .await
+                .map_err(|e| format!("SearXNG search failed: {e}"))?
+                .into_iter()
+                .map(|r| (r.title, r.url, r.content))
+                .collect()
+        } else {
+            let api_key = cli
+                .api_key
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("NOXA_API_KEY").ok().filter(|s| !s.is_empty()))
+                .ok_or("--search requires SEARXNG_URL or NOXA_API_KEY")?;
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("http client error: {e}"))?;
+            let resp: serde_json::Value = client
+                .post("https://api.noxa.io/v1/search")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&serde_json::json!({ "query": query, "num_results": num }))
+                .send()
+                .await
+                .map_err(|e| format!("API error: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("parse error: {e}"))?;
+            resp.get("results")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|r| {
+                            (
+                                r.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                r.get("url")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                r.get("snippet")
+                                    .or_else(|| r.get("content"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    };
+
+    if results.is_empty() {
+        eprintln!("No results found for: {query}");
+        return Ok(());
+    }
+
+    println!("# Search: {query}");
+    println!("# {} result(s)\n", results.len());
+
+    if cli.no_scrape {
+        for (i, (title, url, snip)) in results.iter().enumerate() {
+            println!("{}. {title}\n   {url}", i + 1);
+            if !snip.is_empty() {
+                println!("   {snip}");
+            }
+            println!();
+        }
+        return Ok(());
+    }
+
+    let valid: Vec<(usize, String, String, String)> = results
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, (title, url, snip))| match validate_url_sync(&url) {
+            Ok(()) => Some((i + 1, title, url, snip)),
+            Err(e) => {
+                eprintln!("   skip {url}: {e}");
+                None
+            }
+        })
+        .collect();
+
+    let url_refs: Vec<&str> = valid.iter().map(|(_, _, u, _)| u.as_str()).collect();
+    let scraped = fetch_client
+        .fetch_and_extract_batch(&url_refs, concurrency)
+        .await;
+
+    for ((idx, title, url, snip), scrape) in valid.iter().zip(scraped.iter()) {
+        println!("{idx}. {title}\n   {url}");
+        if !snip.is_empty() {
+            println!("   {snip}");
+        }
+        // Store writes are handled automatically by FetchClient inside
+        // fetch_and_extract_batch. Explicit writes removed to prevent double-writes.
+        // Per-result saved:/updated:/unchanged: labels are intentionally absent —
+        // StoreResult is not propagated from FetchClient to callers.
+        // Users can verify stored files by checking ~/.noxa/content/ directly.
+        if let Err(e) = &scrape.result {
+            eprintln!("   scrape failed: {e}");
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -2678,6 +2907,20 @@ async fn main() {
     // --research: deep research via cloud API
     if let Some(ref query) = cli.research {
         if let Err(e) = run_research(&cli, &resolved, query).await {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+        return;
+    }
+
+    if let Some(ref query) = cli.search {
+        let fetch_client = Arc::new(
+            noxa_fetch::FetchClient::new(build_fetch_config(&cli, &resolved)).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }),
+        );
+        if let Err(e) = run_search(&cli, &fetch_client, query).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -2876,6 +3119,61 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("nested/deep/file.md")).unwrap();
         assert_eq!(content, "hello");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_to_file_rejects_traversal() {
+        let dir = std::env::temp_dir().join("noxa_sec_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(write_to_file(&dir, "../escaped.md", "x").is_err());
+        assert!(write_to_file(&dir, "/abs.md", "x").is_err());
+        assert!(write_to_file(&dir, "..\\windows.md", "x").is_err());
+        assert!(write_to_file(&dir, "null\0byte.md", "x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_to_file_allows_nested() {
+        let dir = std::env::temp_dir().join("noxa_sec_test2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(write_to_file(&dir, "sub/file.md", "hello").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_default_search_dir_under_noxa() {
+        let d = default_search_dir();
+        assert!(d.to_string_lossy().contains(".noxa"));
+        assert!(d.to_string_lossy().contains("search"));
+    }
+
+    #[test]
+    fn test_url_to_filename_flat_for_search() {
+        let raw = url_to_filename("https://example.com/blog/post", &OutputFormat::Markdown);
+        let flat = raw.replace('/', "_");
+        assert!(!flat.contains('/'));
+        assert!(flat.ends_with(".md"));
+    }
+
+    #[tokio::test]
+    async fn validate_public_url_rejects_ipv6_private_ranges() {
+        assert!(validate_url("http://[fe80::1]/").await.is_err());
+        assert!(validate_url("http://[fc00::1]/").await.is_err());
+    }
+
+    #[test]
+    fn validate_operator_url_allows_localhost() {
+        assert!(validate_operator_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_operator_url("https://localhost/search").is_ok());
+    }
+
+    #[test]
+    fn search_scrape_concurrency_is_clamped() {
+        assert_eq!(clamp_search_scrape_concurrency(0), 1);
+        assert_eq!(clamp_search_scrape_concurrency(50), 20);
+        assert_eq!(clamp_search_scrape_concurrency(4), 4);
     }
 }
 
