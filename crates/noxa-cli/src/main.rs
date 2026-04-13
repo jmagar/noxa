@@ -548,6 +548,20 @@ fn build_extraction_options(resolved: &config::ResolvedConfig) -> ExtractionOpti
     }
 }
 
+/// Returns the root path for the local content store.
+///
+/// When `output_dir` is `Some`, that directory is used directly.
+/// Otherwise falls back to `~/.noxa/content` (the canonical default).
+fn content_store_root(output_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    if let Some(dir) = output_dir {
+        return dir.to_path_buf();
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".noxa")
+        .join("content")
+}
+
 /// Normalize a URL: prepend `https://` if no scheme is present.
 fn normalize_url(url: &str) -> String {
     let trimmed = url.trim();
@@ -1916,6 +1930,7 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         exclude_patterns,
         progress_tx: Some(progress_tx),
         cancel_flag: Some(Arc::clone(&cancel_flag)),
+        extraction_options: build_extraction_options(resolved),
     };
 
     // Load resume state if --crawl-state file exists
@@ -3269,6 +3284,7 @@ fn grep_dir(
 async fn run_search(
     cli: &Cli,
     fetch_client: &Arc<noxa_fetch::FetchClient>,
+    resolved: &config::ResolvedConfig,
     query: &str,
 ) -> Result<(), String> {
     if query.trim().is_empty() {
@@ -3370,10 +3386,7 @@ async fn run_search(
         return Ok(());
     }
 
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+    let store_root = content_store_root(resolved.output_dir.as_deref());
 
     let valid: Vec<(usize, String, String, String)> = results
         .into_iter()
@@ -3388,8 +3401,9 @@ async fn run_search(
         .collect();
 
     let url_refs: Vec<&str> = valid.iter().map(|(_, _, u, _)| u.as_str()).collect();
+    let options = build_extraction_options(resolved);
     let scraped = fetch_client
-        .fetch_and_extract_batch(&url_refs, concurrency)
+        .fetch_and_extract_batch_with_options(&url_refs, concurrency, &options)
         .await;
 
     for ((idx, title, url, snip), scrape) in valid.iter().zip(scraped.iter()) {
@@ -3548,7 +3562,7 @@ async fn main() {
                 process::exit(1);
             }),
         );
-        if let Err(e) = run_search(&cli, &fetch_client, query).await {
+        if let Err(e) = run_search(&cli, &fetch_client, &resolved, query).await {
             eprintln!("error: {e}");
             process::exit(1);
         }

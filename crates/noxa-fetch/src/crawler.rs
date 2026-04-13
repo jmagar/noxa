@@ -50,6 +50,9 @@ pub struct CrawlConfig {
     /// When set to `true`, the crawler breaks out of the main loop early.
     /// Callers (e.g. a Ctrl+C handler) can flip this to request graceful cancellation.
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// CSS selector / extraction options forwarded to every page fetch.
+    /// Defaults to `ExtractionOptions::default()` (no filtering).
+    pub extraction_options: noxa_core::ExtractionOptions,
 }
 
 impl Default for CrawlConfig {
@@ -66,6 +69,7 @@ impl Default for CrawlConfig {
             exclude_patterns: Vec::new(),
             progress_tx: None,
             cancel_flag: None,
+            extraction_options: noxa_core::ExtractionOptions::default(),
         }
     }
 }
@@ -276,6 +280,7 @@ impl Crawler {
                 let url = url.clone();
                 let depth = *depth;
                 let delay = self.config.delay;
+                let extraction_options = self.config.extraction_options.clone();
 
                 handles.push(tokio::spawn(async move {
                     // Acquire permit — blocks if concurrency limit reached
@@ -283,7 +288,7 @@ impl Crawler {
                     tokio::time::sleep(delay).await;
 
                     let page_start = Instant::now();
-                    let result = client.fetch_and_extract(&url).await;
+                    let result = client.fetch_and_extract_with_options(&url, &extraction_options).await;
                     let elapsed = page_start.elapsed();
 
                     match result {
