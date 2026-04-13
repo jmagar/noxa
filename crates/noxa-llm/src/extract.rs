@@ -32,15 +32,44 @@ fn validate_schema_definition(schema: &serde_json::Value) -> Result<(), LlmError
         .map_err(|e| LlmError::InvalidJson(format!("invalid schema: {e}")))
 }
 
+/// Build a targeted correction prompt from a schema validation failure.
+///
+/// Extracts the instance path and the schema keyword that failed (e.g. "type",
+/// "required") and formats them into a short instruction under 200 chars.
+/// Raw model output and web content are intentionally excluded — the caller
+/// must NOT pass them here.
+fn build_schema_correction_prompt(value: &serde_json::Value, schema: &serde_json::Value) -> String {
+    let Ok(compiled) = jsonschema::validator_for(schema) else {
+        return "Return ONLY corrected JSON matching the schema.".to_string();
+    };
+
+    let correction = compiled.iter_errors(value).next().map(|e| {
+        let path = e.instance_path().to_string();
+        let keyword = e.kind().keyword();
+        if path.is_empty() || path == "/" {
+            format!("Field failed '{}' check. Return ONLY corrected JSON.", keyword)
+        } else {
+            format!("Field '{}' failed '{}' check. Return ONLY corrected JSON.", path, keyword)
+        }
+    }).unwrap_or_else(|| "Return ONLY corrected JSON matching the schema.".to_string());
+
+    // Hard cap at 200 chars — schema errors should never need more than this.
+    if correction.len() > 200 {
+        correction[..200].to_string()
+    } else {
+        correction
+    }
+}
+
 /// Extract structured JSON from content using a JSON schema.
 /// The schema tells the LLM exactly what fields to extract and their types.
 ///
 /// Retry policy:
-/// - If the response cannot be parsed as JSON: retry once with a correction prompt.
+/// - If the response cannot be parsed as JSON: retry once with a terse correction prompt.
 /// - If the response is valid JSON but fails schema validation: retry once with
-///   a tighter correction prompt that includes the specific validation error.
-/// - Both retry attempts add the previous failed response as an 'assistant' message
-///   and the correction instructions as a 'user' message to improve success.
+///   a correction prompt containing only the field path and keyword that failed.
+/// - The correction prompt is capped at 200 chars and never embeds raw model
+///   output or web content, preventing token overflow and schema leakage.
 pub async fn extract_json(
     content: &str,
     schema: &serde_json::Value,
@@ -79,30 +108,27 @@ pub async fn extract_json(
 
     match parse_and_validate(&response, schema) {
         Ok(value) => Ok(value),
-        Err(e) => {
-            // First attempt failed — retry once with a correction prompt.
-            // Construct a concise correction prompt based on the error type.
-            let correction_prompt = match &e {
-                LlmError::InvalidJson(msg) if msg.contains("schema validation failed") => {
-                    let error_msg = msg.replace("schema validation failed: ", "");
-                    format!("Correction required: {}. Return ONLY the corrected JSON.", error_msg)
+        Err(_) => {
+            // First attempt failed — retry once with a targeted correction prompt.
+            //
+            // IMPORTANT: Do NOT embed raw model output or web content here.
+            // For schema mismatches, extract path + keyword from the parsed value
+            // so the correction is precise. For parse failures, use a terse generic
+            // message. Both stay under 200 chars.
+            let correction_prompt = match parse_json_response(&response) {
+                Ok(parsed_value) => {
+                    // Valid JSON but schema mismatch — extract specific field info.
+                    build_schema_correction_prompt(&parsed_value, schema)
                 }
-                _ => {
-                    "Your response was not valid JSON. Please return ONLY valid JSON matching the schema.".to_string()
+                Err(_) => {
+                    // Unparseable JSON — terse generic correction.
+                    "Your response was not valid JSON. Return ONLY valid JSON matching the schema."
+                        .to_string()
                 }
             };
 
-            // Limit correction context to prevent token blowup on large hallucinated outputs.
-            let capped_response = if response.len() > 2000 {
-                format!("{}... [truncated]", &response[..2000])
-            } else {
-                response.clone()
-            };
-
-            messages.push(Message {
-                role: "assistant".into(),
-                content: capped_response,
-            });
+            // Push only the correction message — raw model output is excluded
+            // to prevent token overflow and avoid reinforcing wrong patterns.
             messages.push(Message {
                 role: "user".into(),
                 content: correction_prompt,
@@ -296,12 +322,13 @@ mod tests {
             }
         });
         // Model returns valid JSON but wrong type ("string" instead of number).
-        // Should NOT retry (schema mismatch ≠ parse failure) — returns InvalidJson immediately.
+        // Retry fires with a schema-aware correction prompt, but MockProvider returns
+        // the same bad JSON again — both attempts fail, so the result is InvalidJson.
         let mock = MockProvider::ok(r#"{"price": "not-a-number"}"#);
         let result = extract_json("content", &schema, &mock, None).await;
         assert!(
             matches!(result, Err(LlmError::InvalidJson(_))),
-            "expected InvalidJson for schema mismatch, got {result:?}"
+            "expected InvalidJson after both attempts return wrong type, got {result:?}"
         );
     }
 
@@ -386,5 +413,139 @@ mod tests {
 
         let result = extract_json("content", &schema, &mock, None).await.unwrap();
         assert_eq!(result["price"], 9.99);
+    }
+
+    // ── Correction prompt unit tests ───────────────────────────────────────────
+
+    /// Correction prompt for a type mismatch must include the field path and
+    /// the failing keyword, and must stay under 200 chars.
+    #[test]
+    fn correction_prompt_includes_field_path_and_keyword() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "price": { "type": "integer" }
+            }
+        });
+        // Provide a string where integer is expected.
+        let value = serde_json::json!({"price": "wrong"});
+        let prompt = build_schema_correction_prompt(&value, &schema);
+
+        // Must mention the failing field path.
+        assert!(
+            prompt.contains("price"),
+            "expected field path in correction prompt, got: {prompt:?}"
+        );
+        // Must mention the schema keyword.
+        assert!(
+            prompt.contains("type"),
+            "expected schema keyword in correction prompt, got: {prompt:?}"
+        );
+        // Must stay under 200 chars — hard cap enforced by the function.
+        assert!(
+            prompt.len() <= 200,
+            "correction prompt exceeded 200 chars: {} chars",
+            prompt.len()
+        );
+        // Must NOT contain raw model output or web content markers.
+        assert!(
+            !prompt.contains("wrong"),
+            "correction prompt must not embed the invalid value, got: {prompt:?}"
+        );
+    }
+
+    /// Correction prompt for a missing required field must mention the
+    /// 'required' keyword and stay under 200 chars.
+    #[test]
+    fn correction_prompt_for_missing_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["title"],
+            "properties": {
+                "title": { "type": "string" }
+            }
+        });
+        let value = serde_json::json!({"other": "data"});
+        let prompt = build_schema_correction_prompt(&value, &schema);
+
+        assert!(
+            prompt.len() <= 200,
+            "correction prompt exceeded 200 chars: {} chars",
+            prompt.len()
+        );
+        // 'required' keyword surfaced for missing required properties.
+        assert!(
+            prompt.contains("required"),
+            "expected 'required' keyword in prompt, got: {prompt:?}"
+        );
+    }
+
+    /// The retry message must not embed the raw model response.
+    /// We verify this by checking that a very long/distinctive model output
+    /// does not appear in any message sent during the retry call.
+    #[tokio::test]
+    async fn retry_prompt_does_not_embed_raw_model_output() {
+        use std::sync::{Arc, Mutex};
+        use async_trait::async_trait;
+        use crate::provider::{CompletionRequest, LlmProvider};
+
+        /// A mock that records every request it receives.
+        struct RecordingProvider {
+            responses: Vec<String>,
+            call_count: Arc<Mutex<usize>>,
+            recorded_messages: Arc<Mutex<Vec<Vec<crate::provider::Message>>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for RecordingProvider {
+            async fn complete(&self, request: &CompletionRequest) -> Result<String, LlmError> {
+                let mut count = self.call_count.lock().unwrap();
+                let idx = (*count).min(self.responses.len() - 1);
+                *count += 1;
+                self.recorded_messages
+                    .lock()
+                    .unwrap()
+                    .push(request.messages.clone());
+                Ok(self.responses[idx].clone())
+            }
+            async fn is_available(&self) -> bool { true }
+            fn name(&self) -> &str { "recording-mock" }
+        }
+
+        // A distinctive raw model output that must NOT appear in the retry prompt.
+        let raw_model_output = r#"{"price": "DISTINCTIVE_BAD_VALUE_DO_NOT_RELAY"}"#;
+
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<crate::provider::Message>>::new()));
+        let mock = RecordingProvider {
+            responses: vec![
+                raw_model_output.to_string(),
+                r#"{"price": 9.99}"#.to_string(),
+            ],
+            call_count: Arc::new(Mutex::new(0)),
+            recorded_messages: recorded.clone(),
+        };
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["price"],
+            "properties": { "price": { "type": "number" } }
+        });
+
+        let result = extract_json("some content", &schema, &mock, None).await.unwrap();
+        assert_eq!(result["price"], 9.99);
+
+        // Inspect the messages sent on the second (retry) call.
+        let all_calls = recorded.lock().unwrap();
+        assert_eq!(all_calls.len(), 2, "expected exactly 2 provider calls");
+
+        let retry_messages = &all_calls[1];
+        for msg in retry_messages {
+            assert!(
+                !msg.content.contains("DISTINCTIVE_BAD_VALUE_DO_NOT_RELAY"),
+                "raw model output leaked into retry message role={}: {:?}",
+                msg.role,
+                msg.content
+            );
+        }
     }
 }

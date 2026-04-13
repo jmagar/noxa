@@ -18,6 +18,7 @@ http = "1"
 bytes = "1"
 url = "2"
 rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
 quick-xml = { version = "0.37", features = ["serde"] }
 serde_json.workspace = true
 calamine = "0.34"

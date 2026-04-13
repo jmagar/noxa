@@ -12,6 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use noxa_pdf::PdfMode;
 use rand::seq::SliceRandom;
 use tokio::sync::Semaphore;
@@ -294,7 +295,8 @@ impl FetchClient {
         url: &str,
         options: &noxa_core::ExtractionOptions,
     ) -> Result<noxa_core::ExtractionResult, FetchError> {
-        let result = self.fetch_and_extract_inner(url, options).await?;
+        let mut result = self.fetch_and_extract_inner(url, options).await?;
+        result.metadata.fetched_at = Some(Utc::now().to_rfc3339());
 
         // Auto-persist to content store (best-effort — failure never fails the
         // extraction). Covers all four extraction branches: HTML, Reddit JSON,
@@ -309,7 +311,8 @@ impl FetchClient {
     }
 
     /// Inner extraction logic. All branches return a single `Ok(result)` which
-    /// is then handled by `fetch_and_extract_with_options` for store persistence.
+    /// is then handled by `fetch_and_extract_with_options` for `fetched_at`
+    /// stamping and store persistence.
     async fn fetch_and_extract_inner(
         &self,
         url: &str,
@@ -624,6 +627,16 @@ fn pdf_to_extraction_result(pdf: &noxa_pdf::PdfResult, url: &str) -> noxa_core::
             image: None,
             favicon: None,
             word_count,
+            content_hash: None,
+            source_type: Some("web".into()),
+            file_path: None,
+            last_modified: None,
+            is_truncated: None,
+            technologies: Vec::new(),
+            seed_url: None,
+            crawl_depth: None,
+            search_query: None,
+            fetched_at: None,
         },
         content: noxa_core::Content {
             markdown,
