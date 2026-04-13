@@ -412,6 +412,46 @@ echo "proxy1.com:8080:user:pass" > proxies.txt
 noxa https://example.com  # Automatically detects and uses proxies.txt
 ```
 
+### Web Search
+
+Search the web and scrape the top results in one command. Uses SearXNG for fully local, private search — or falls back to the cloud API.
+
+```bash
+# Search via self-hosted SearXNG (no API key needed)
+export SEARXNG_URL=https://your-searxng-instance.example.com
+noxa --search "rust async best practices"
+
+# Control result count (default: 10, max: 50)
+noxa --search "rust async" --num-results 5
+
+# Snippets only — skip scraping result URLs
+noxa --search "rust async" --no-scrape
+
+# Search via cloud API (no SearXNG required)
+noxa --search "rust async" --api-key $NOXA_API_KEY
+```
+
+Results include title, URL, snippet, and extracted content from each page. All scraped pages are auto-persisted to `~/.noxa/content/`.
+
+### Content Store
+
+Every extraction automatically persists to `~/.noxa/content/{domain}/{path}.{md,json}`. Works across all modes: scrape, batch, crawl, PDF, search, and MCP tools.
+
+```bash
+# Files are written automatically — no flags needed
+noxa https://example.com
+# → ~/.noxa/content/example_com/index.md
+# → ~/.noxa/content/example_com/index.json
+
+# Disable for a single run
+noxa --no-store https://example.com
+
+# Disable globally via env var
+export NOXA_NO_STORE=1
+```
+
+The JSON file contains the full `ExtractionResult` including metadata, structured data, and content. The MCP `diff` tool reads from the store automatically — no need to pass a previous snapshot manually after the first run.
+
 ### Real-World Recipes
 
 ```bash
@@ -519,6 +559,22 @@ noxa URL --extract-json '{"type":"object"}'   # Schema-enforced extraction
 ```bash
 noxa URL -f json > snap.json                  # Take snapshot
 noxa URL --diff-with snap.json                # Compare later
+```
+
+### Content store
+
+Every extraction auto-persists to `~/.noxa/content/`. Works across CLI and MCP.
+
+```bash
+noxa URL                                      # Writes ~/.noxa/content/...{.md,.json}
+noxa --no-store URL                           # Opt out for one run
+```
+
+### Web search
+
+```bash
+noxa --search "query"                         # SearXNG (SEARXNG_URL) or cloud
+noxa --search "query" --no-scrape             # Snippets only, skip scraping
 ```
 
 ### Brand extraction
@@ -666,6 +722,7 @@ These settings can also be controlled via command-line flags:
 |----------|-------------|
 | `NOXA_API_KEY` | Cloud API key (enables bot bypass, JS rendering, search, research) |
 | `SEARXNG_URL` | Self-hosted SearXNG base URL for local search (no API key required) |
+| `NOXA_NO_STORE` | Set to any non-empty value to disable automatic content persistence |
 | `NOXA_PROXY` | Single proxy URL |
 | `NOXA_PROXY_FILE` | Path to proxy pool file |
 | `NOXA_WEBHOOK_URL` | Webhook URL for notifications |

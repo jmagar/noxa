@@ -18,6 +18,8 @@ Priority order when the same setting appears in multiple places:
 - [LLM](#llm)
 - [Change Detection](#change-detection)
 - [Watch Mode](#watch-mode)
+- [Search](#search)
+- [Content Store](#content-store)
 - [Brand Extraction](#brand-extraction)
 - [PDF](#pdf)
 - [Cloud API](#cloud-api)
@@ -143,6 +145,33 @@ Provider setup:
 
 ---
 
+## Search
+
+Search the web and scrape result pages in one command. Requires `SEARXNG_URL` for local search or `NOXA_API_KEY` for cloud search.
+
+| Flag | Default | Env | Description |
+|------|---------|-----|-------------|
+| `--search <QUERY>` | — | — | Run a web search and scrape the top result pages. Uses `SEARXNG_URL` (self-hosted SearXNG) if set; otherwise requires `NOXA_API_KEY`. |
+| `--num-results <N>` | `10` | — | Number of search results to return (clamped to 1–50). |
+| `--no-scrape` | false | — | Print snippets only; skip scraping result page URLs. |
+| `--num-scrape-concurrency <N>` | `3` | — | Concurrent fetch workers for scraping result URLs. |
+
+Scraped result pages are auto-persisted to `~/.noxa/content/` via ContentStore. Use `--no-store` to suppress.
+
+---
+
+## Content Store
+
+Every successful `fetch_and_extract` call automatically persists the result to `~/.noxa/content/{domain}/{path}.{md,json}`. Covers all extraction paths: HTML, PDF, DOCX/XLSX/CSV, Reddit JSON, LinkedIn, batch, crawl, and MCP tools.
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--no-store` | `NOXA_NO_STORE` | false | Disable automatic content persistence for this run. Set `NOXA_NO_STORE` to any non-empty value to disable globally. |
+
+`--file` and `--stdin` paths call `noxa_core::extract()` directly and do not write to the store.
+
+---
+
 ## Brand Extraction
 
 | Flag | Description |
@@ -194,10 +223,12 @@ export NOXA_CONFIG=/etc/noxa/config.json
 | Variable | Flag equivalent | Description |
 |----------|----------------|-------------|
 | `NOXA_API_KEY` | `--api-key` | Cloud API key |
+| `SEARXNG_URL` | — | Self-hosted SearXNG base URL; enables local search without `NOXA_API_KEY` |
+| `NOXA_NO_STORE` | `--no-store` | Set to any non-empty value to disable ContentStore auto-persistence |
 | `NOXA_PROXY` | `--proxy` | Single proxy URL |
 | `NOXA_PROXY_FILE` | `--proxy-file` | Proxy pool file path |
 | `NOXA_WEBHOOK_URL` | `--webhook` | Webhook URL for notifications |
-| `NOXA_LLM_PROVIDER` | `--llm-provider` | LLM provider (`gemini`/`ollama`/`openai`/`anthropic`) |
+| `NOXA_LLM_PROVIDER` | `--llm-provider` | LLM provider (`gemini`/`openai`/`ollama`/`anthropic`) |
 | `NOXA_LLM_MODEL` | `--llm-model` | LLM model name override |
 | `NOXA_LLM_BASE_URL` | `--llm-base-url` | LLM base URL for Ollama or OpenAI-compatible endpoints |
 | `NOXA_CONFIG` | `--config` | Path to config.json |

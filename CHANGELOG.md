@@ -3,6 +3,25 @@
 All notable changes to noxa are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **Universal ContentStore**: every extraction automatically persists to `~/.noxa/content/{domain}/{path}.{md,json}`. Covers all output paths — HTML, PDF, DOCX/XLSX/CSV, Reddit JSON, LinkedIn JSON, crawl, batch, and MCP scrape/crawl/batch/extract/summarize/search.
+- **`--no-store` CLI flag / `NOXA_NO_STORE` env var**: opt out of automatic content persistence for a single run or globally.
+- **`store.read(url)`**: load a previously stored `ExtractionResult` by URL — used by the MCP diff tool's optional-snapshot path.
+- **`--search <QUERY>` CLI flag**: web search with result scraping. Uses SearXNG (`SEARXNG_URL`) for fully local, private search or falls back to the cloud API (`NOXA_API_KEY`). Flags: `--num-results` (1–50), `--no-scrape` (snippets only), `--num-scrape-concurrency`.
+- **MCP `diff` tool accepts optional `previous_snapshot`**: when omitted, the previous snapshot is loaded from the local ContentStore. If no stored snapshot exists, the current page is fetched and stored as the baseline and an informative error is returned — run `diff` again to get the actual comparison.
+
+### Changed
+- **ContentStore write is atomic**: uses write-to-tmp + `rename()` (POSIX-atomic on same filesystem) instead of two separate writes, eliminating the corruption window.
+- **ContentStore strips query params from `metadata.url`** before serializing to disk — prevents leaking auth tokens or API keys that appear in query strings.
+- **ContentStore change detection** uses direct string equality instead of Myers `O(n×m)` diff, saving 2–10ms per write.
+- **ContentStore skips documents larger than 2 MiB** (markdown + plain text combined) to prevent unbounded disk growth. Configurable via `ContentStore::max_content_bytes`.
+- **MCP search handler removes explicit store.write()** — FetchClient handles persistence, preventing double-writes.
+- **CLI run_search removes explicit store.write()** — FetchClient handles persistence. Per-result `saved:/updated:/unchanged:` labels removed from output (StoreResult is no longer available at that level).
+
+---
+
 ## [0.4.0] — 2026-04-12
 
 ### Added

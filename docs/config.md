@@ -211,6 +211,7 @@ The directory tree is created automatically, so nested paths do not need to exis
 |---|---|---|
 | `NOXA_API_KEY` | Cloud API key | Used for cloud fallback and cloud-only features |
 | `SEARXNG_URL` | Self-hosted SearXNG base URL | Enables local search without `NOXA_API_KEY`; may be a localhost/private operator endpoint |
+| `NOXA_NO_STORE` | Disable ContentStore | Set to any non-empty value to skip auto-persistence to `~/.noxa/content/`; per-run opt-out via `--no-store` |
 | `NOXA_PROXY` | Single proxy URL | Takes priority over proxy file when set |
 | `NOXA_PROXY_FILE` | Proxy pool file path | One proxy per line |
 | `NOXA_WEBHOOK_URL` | Notification webhook | Used by watch/crawl/batch notifications; may be a localhost/private operator endpoint |
