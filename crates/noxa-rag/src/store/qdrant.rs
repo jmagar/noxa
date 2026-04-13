@@ -146,9 +146,33 @@ impl QdrantStore {
             return Err(RagError::Store(format!("create_collection failed: {text}")));
         }
 
-        // Payload indexes for fast URL/domain filtering.
-        for (field, schema_type) in [("url", "keyword"), ("domain", "keyword")] {
-            let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
+        // Payload indexes for fast filtering.
+        //
+        // Only index fields with real query callers today — speculative indexes waste
+        // Qdrant disk and add index creation time on every startup.
+        //
+        // WARNING: Adding indexes to a populated collection is expensive (full
+        // sequential scan, 30-120s per index for 100k points). For production
+        // collections, prefer the shadow-collection migration strategy:
+        //   1. Create 'noxa-v2' with all desired indexes
+        //   2. Bulk-copy all points from old collection to noxa-v2
+        //   3. Verify point counts match
+        //   4. Update config to point at noxa-v2
+        //   5. Delete old collection
+        // For development / small collections (<10k points), direct creation is fine.
+        //
+        // PUT to /index is idempotent — Qdrant returns 200 if the index already exists,
+        // so this loop is safe to run on every startup against an existing collection.
+        let indexes: &[(&str, &str)] = &[
+            ("url", "keyword"),
+            ("domain", "keyword"),
+            ("source_type", "keyword"),
+            ("content_type", "keyword"),
+            ("language", "keyword"),
+            ("file_format", "keyword"),
+        ];
+        let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
+        for (field, schema_type) in indexes {
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {

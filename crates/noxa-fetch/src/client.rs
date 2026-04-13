@@ -589,6 +589,12 @@ fn pdf_to_extraction_result(pdf: &noxa_pdf::PdfResult, url: &str) -> noxa_core::
             image: None,
             favicon: None,
             word_count,
+            content_hash: None,
+            source_type: Some("web".into()),
+            file_path: None,
+            last_modified: None,
+            is_truncated: None,
+            technologies: Vec::new(),
         },
         content: noxa_core::Content {
             markdown,
