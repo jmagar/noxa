@@ -2,6 +2,7 @@ target/
 .DS_Store
 .env
 .env.bak
+config.json
 proxies.txt
 .claude/skills/
 .omc
