@@ -163,6 +163,13 @@ impl NoxaMcp {
             config.proxy_pool = pool;
         }
 
+        // Create the content store first so we can clone it into FetchConfig.
+        let store = noxa_fetch::ContentStore::open();
+        info!("content store ready");
+
+        // Inject store into FetchConfig so FetchClient auto-persists all extractions.
+        config.store = Some(store.clone());
+
         let fetch_client = match noxa_fetch::FetchClient::new(config) {
             Ok(client) => client,
             Err(e) => {
@@ -189,9 +196,6 @@ impl NoxaMcp {
                  Get a key at https://noxa.io"
             );
         }
-
-        let store = noxa_fetch::ContentStore::open();
-        info!("content store ready");
 
         Self {
             tool_router: Self::tool_router(),
@@ -247,6 +251,7 @@ impl NoxaMcp {
             let config = noxa_fetch::FetchConfig {
                 browser,
                 headers,
+                store: Some(self.store.clone()),
                 ..Default::default()
             };
             custom_client = noxa_fetch::FetchClient::new(config)
@@ -319,6 +324,10 @@ impl NoxaMcp {
             max_pages: params.max_pages.unwrap_or(50),
             concurrency,
             use_sitemap: params.use_sitemap.unwrap_or(false),
+            fetch: noxa_fetch::FetchConfig {
+                store: Some(self.store.clone()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -517,8 +526,43 @@ impl NoxaMcp {
     #[tool]
     async fn diff(&self, Parameters(params): Parameters<DiffParams>) -> Result<String, String> {
         validate_url(&params.url).await?;
-        let previous: noxa_core::ExtractionResult = serde_json::from_str(&params.previous_snapshot)
-            .map_err(|e| format!("Failed to parse previous_snapshot JSON: {e}"))?;
+
+        // Load the previous snapshot. IMPORTANT: this read must complete and bind
+        // to `previous` before any fetch for the same URL — otherwise the fetch
+        // auto-write would overwrite the snapshot we're about to read.
+        let previous: Option<noxa_core::ExtractionResult> = match params.previous_snapshot {
+            Some(ref json) => Some(
+                serde_json::from_str(json)
+                    .map_err(|e| format!("Failed to parse previous_snapshot JSON: {e}"))?,
+            ),
+            // Err from store.read (e.g. corrupt JSON) is treated as None — proceed
+            // to the first-fetch path rather than blocking the user.
+            None => self.store.read(&params.url).await.ok().flatten(),
+        };
+
+        let previous = match previous {
+            Some(p) => p,
+            None => {
+                // No stored snapshot: fetch-and-store the current page as the
+                // baseline, then return an informative error.
+                info!(url = %params.url, "diff: no previous snapshot — fetching baseline");
+                let _ = cloud::smart_fetch(
+                    &self.fetch_client,
+                    self.cloud.as_ref(),
+                    &params.url,
+                    &[],
+                    &[],
+                    false,
+                    &["markdown"],
+                )
+                .await;
+                return Err(format!(
+                    "No previous snapshot stored for {url}. The page has been fetched and \
+                     stored as the baseline — run diff again to compare against this snapshot.",
+                    url = params.url
+                ));
+            }
+        };
 
         let result = cloud::smart_fetch(
             &self.fetch_client,
@@ -761,25 +805,17 @@ impl NoxaMcp {
             let mut out = String::with_capacity(results.len() * 256);
             out.push_str(&format!("Found {} result(s):\n\n", valid_results.len()));
 
+            // Note: store writes are handled automatically by FetchClient.fetch_and_extract
+            // inside fetch_and_extract_batch above. Explicit writes here were removed to
+            // prevent double-writes. The "saved/updated/unchanged" label is intentionally
+            // absent — FetchClient writes are fire-and-forget.
             for (idx, (r, scrape)) in valid_results.iter().zip(scraped.iter()).enumerate() {
                 out.push_str(&format!("{}. {}\n   {}\n", idx + 1, r.title, r.url));
                 if !r.content.is_empty() {
                     out.push_str(&format!("   {}\n", r.content));
                 }
-                if let Ok(ref extraction) = scrape.result {
-                    match self.store.write(&r.url, extraction).await {
-                        Ok(sr) => {
-                            let label = if sr.is_new {
-                                "saved"
-                            } else if sr.changed {
-                                "updated"
-                            } else {
-                                "unchanged"
-                            };
-                            out.push_str(&format!("   {label}: {}\n", sr.md_path.display()));
-                        }
-                        Err(e) => warn!("content store write failed for {}: {e}", r.url),
-                    }
+                if let Err(ref e) = scrape.result {
+                    out.push_str(&format!("   Error: {e}\n"));
                 }
                 out.push('\n');
             }

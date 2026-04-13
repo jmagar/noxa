@@ -320,6 +320,11 @@ struct Cli {
     #[arg(long)]
     no_scrape: bool,
 
+    /// Disable automatic content store persistence (~/.noxa/content/).
+    /// Also respected via the NOXA_NO_STORE environment variable.
+    #[arg(long, env = "NOXA_NO_STORE")]
+    no_store: bool,
+
     /// Concurrency for scraping search result URLs (default: 3).
     #[arg(long, default_value = "3")]
     num_scrape_concurrency: usize,
@@ -461,6 +466,12 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
         }
     }
 
+    let store = if cli.no_store {
+        None
+    } else {
+        Some(noxa_fetch::ContentStore::open())
+    };
+
     FetchConfig {
         browser: resolved.browser.clone().into(),
         proxy,
@@ -468,6 +479,7 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
         timeout: std::time::Duration::from_secs(resolved.timeout),
         pdf_mode: resolved.pdf_mode.clone().into(),
         headers,
+        store,
         ..Default::default()
     }
 }
@@ -2681,7 +2693,6 @@ async fn run_research(
 async fn run_search(
     cli: &Cli,
     fetch_client: &Arc<noxa_fetch::FetchClient>,
-    store: &noxa_fetch::ContentStore,
     query: &str,
 ) -> Result<(), String> {
     let num = cli.num_results.clamp(1, 50);
@@ -2790,21 +2801,13 @@ async fn run_search(
         if !snip.is_empty() {
             println!("   {snip}");
         }
-        match &scrape.result {
-            Ok(extraction) => match store.write(url, extraction).await {
-                Ok(sr) => {
-                    let label = if sr.is_new {
-                        "saved"
-                    } else if sr.changed {
-                        "updated"
-                    } else {
-                        "unchanged"
-                    };
-                    println!("   {label}: {}", sr.md_path.display());
-                }
-                Err(e) => eprintln!("   store warning: {e}"),
-            },
-            Err(e) => eprintln!("   scrape failed: {e}"),
+        // Store writes are handled automatically by FetchClient inside
+        // fetch_and_extract_batch. Explicit writes removed to prevent double-writes.
+        // Per-result saved:/updated:/unchanged: labels are intentionally absent —
+        // StoreResult is not propagated from FetchClient to callers.
+        // Users can verify stored files by checking ~/.noxa/content/ directly.
+        if let Err(e) = &scrape.result {
+            eprintln!("   scrape failed: {e}");
         }
         println!();
     }
@@ -2906,14 +2909,13 @@ async fn main() {
     }
 
     if let Some(ref query) = cli.search {
-        let store = noxa_fetch::ContentStore::open();
         let fetch_client = Arc::new(
             noxa_fetch::FetchClient::new(build_fetch_config(&cli, &resolved)).unwrap_or_else(|e| {
                 eprintln!("error: {e}");
                 process::exit(1);
             }),
         );
-        if let Err(e) = run_search(&cli, &fetch_client, &store, query).await {
+        if let Err(e) = run_search(&cli, &fetch_client, query).await {
             eprintln!("error: {e}");
             process::exit(1);
         }

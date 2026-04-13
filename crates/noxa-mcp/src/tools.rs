@@ -76,8 +76,15 @@ pub struct SummarizeParams {
 pub struct DiffParams {
     /// URL to fetch current content from
     pub url: String,
-    /// Previous extraction snapshot as a JSON string (ExtractionResult)
-    pub previous_snapshot: String,
+    /// Optional. If provided, must be a JSON-serialized ExtractionResult from a
+    /// previous scrape call. If omitted, the previous snapshot is loaded from
+    /// the local ContentStore (~/.noxa/content/). Requires the URL to have been
+    /// scraped at least once. Returns an error if no stored snapshot exists, but
+    /// also fetches and stores the current content as the baseline for future diffs.
+    ///
+    /// NOTE: this field changed from required to optional — existing MCP clients
+    /// that pass previous_snapshot JSON continue to work unchanged (backward-compatible).
+    pub previous_snapshot: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

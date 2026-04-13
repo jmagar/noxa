@@ -36,6 +36,10 @@ pub struct FetchConfig {
     pub max_redirects: u32,
     pub headers: HashMap<String, String>,
     pub pdf_mode: PdfMode,
+    /// Optional content store. When set, every successful `fetch_and_extract`
+    /// call automatically persists the result to disk. `None` (the default)
+    /// disables persistence — existing call sites are unaffected.
+    pub store: Option<crate::store::ContentStore>,
 }
 
 impl Default for FetchConfig {
@@ -49,6 +53,7 @@ impl Default for FetchConfig {
             max_redirects: 10,
             headers: HashMap::from([("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())]),
             pdf_mode: PdfMode::default(),
+            store: None,
         }
     }
 }
@@ -153,6 +158,8 @@ enum ClientPool {
 pub struct FetchClient {
     pool: ClientPool,
     pdf_mode: PdfMode,
+    /// Optional content store for auto-persisting extraction results.
+    store: Option<crate::store::ContentStore>,
 }
 
 impl FetchClient {
@@ -160,6 +167,8 @@ impl FetchClient {
     pub fn new(config: FetchConfig) -> Result<Self, FetchError> {
         let variants = collect_variants(&config.browser);
         let pdf_mode = config.pdf_mode.clone();
+        // Extract store before config is consumed by pool construction.
+        let store = config.store.clone();
 
         let pool = if config.proxy_pool.is_empty() {
             let clients = variants
@@ -201,7 +210,7 @@ impl FetchClient {
             ClientPool::Rotating { clients }
         };
 
-        Ok(Self { pool, pdf_mode })
+        Ok(Self { pool, pdf_mode, store })
     }
 
     /// Fetch a URL and return the raw HTML + response metadata.
@@ -274,8 +283,34 @@ impl FetchClient {
     }
 
     /// Fetch a URL then extract structured content with custom extraction options.
+    ///
+    /// All extraction paths (HTML, Reddit JSON, PDF, document) converge through
+    /// this method. A successful result is auto-persisted to the content store
+    /// when `self.store` is set. Store failures are best-effort: they log a
+    /// warning and do not affect the returned `Ok(result)`.
     #[instrument(skip(self, options), fields(url = %url))]
     pub async fn fetch_and_extract_with_options(
+        &self,
+        url: &str,
+        options: &noxa_core::ExtractionOptions,
+    ) -> Result<noxa_core::ExtractionResult, FetchError> {
+        let result = self.fetch_and_extract_inner(url, options).await?;
+
+        // Auto-persist to content store (best-effort — failure never fails the
+        // extraction). Covers all four extraction branches: HTML, Reddit JSON,
+        // PDF, and document (DOCX/XLSX/CSV), since they all flow through here.
+        if let Some(ref store) = self.store {
+            if let Err(e) = store.write(url, &result).await {
+                warn!(url, error = %e, "content store write failed");
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Inner extraction logic. All branches return a single `Ok(result)` which
+    /// is then handled by `fetch_and_extract_with_options` for store persistence.
+    async fn fetch_and_extract_inner(
         &self,
         url: &str,
         options: &noxa_core::ExtractionOptions,
@@ -829,5 +864,42 @@ mod tests {
         let config = FetchConfig::default();
         assert!(config.proxy_pool.is_empty());
         assert!(config.proxy.is_none());
+    }
+
+    #[test]
+    fn test_default_config_store_is_none() {
+        let config = FetchConfig::default();
+        assert!(config.store.is_none());
+    }
+
+    #[test]
+    fn test_fetch_config_clone_preserves_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::ContentStore::new(dir.path());
+        let config = FetchConfig {
+            store: Some(store),
+            ..Default::default()
+        };
+        let cloned = config.clone();
+        assert!(cloned.store.is_some());
+    }
+
+    #[test]
+    fn test_fetch_client_new_extracts_store_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::ContentStore::new(dir.path());
+        let config = FetchConfig {
+            store: Some(store),
+            ..Default::default()
+        };
+        let client = FetchClient::new(config).unwrap();
+        assert!(client.store.is_some());
+    }
+
+    #[test]
+    fn test_fetch_client_new_without_store() {
+        let config = FetchConfig::default();
+        let client = FetchClient::new(config).unwrap();
+        assert!(client.store.is_none());
     }
 }

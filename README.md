@@ -472,10 +472,10 @@ Then in Claude: *"Scrape the top 5 results for 'web scraping tools' and compare 
 | `summarize` | Page summarization | No (needs Ollama) |
 | `diff` | Content change detection | No |
 | `brand` | Brand identity extraction | No |
-| `search` | Web search + scrape results | Yes |
+| `search` | Web search + scrape results | `SEARXNG_URL`: No, cloud: Yes |
 | `research` | Deep multi-source research | Yes |
 
-8 of 10 tools work locally — no account, no API key, fully private.
+9 of 10 tools work locally — no account, no API key, fully private.
 
 ---
 
@@ -665,6 +665,7 @@ These settings can also be controlled via command-line flags:
 | Variable | Description |
 |----------|-------------|
 | `NOXA_API_KEY` | Cloud API key (enables bot bypass, JS rendering, search, research) |
+| `SEARXNG_URL` | Self-hosted SearXNG base URL for local search (no API key required) |
 | `NOXA_PROXY` | Single proxy URL |
 | `NOXA_PROXY_FILE` | Path to proxy pool file |
 | `NOXA_WEBHOOK_URL` | Webhook URL for notifications |
@@ -700,7 +701,11 @@ For bot-protected sites, JS rendering, and advanced features, noxa offers a host
 The CLI and MCP server work locally first. Cloud is used as a fallback when:
 - A site has bot protection (Cloudflare, DataDome, WAF)
 - A page requires JavaScript rendering
-- You use search or research tools
+- You use `research`
+- You use `search` without `SEARXNG_URL`
+
+If `SEARXNG_URL` is set, `search` runs entirely through your self-hosted SearXNG instance and does not require `NOXA_API_KEY`.
+`SEARXNG_URL` and `NOXA_WEBHOOK_URL` are operator-supplied endpoints, so they are validated for URL syntax and scheme but are allowed to point at localhost or private network addresses. Search result URLs are still filtered through the public-address SSRF validator before scraping.
 
 ```bash
 export NOXA_API_KEY=wc_your_key
