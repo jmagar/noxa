@@ -536,9 +536,15 @@ async fn process_job(
 
     // ── 5. Embed ──────────────────────────────────────────────────────────────
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+    let total_tokens: u64 = chunks.iter().map(|c| c.token_estimate as u64).sum();
     let t2 = Instant::now();
     let vectors = embed.embed(&texts).await?;
     let embed_ms = t2.elapsed().as_millis() as u64;
+    let embed_tokens_per_sec = if embed_ms > 0 {
+        total_tokens * 1_000 / embed_ms
+    } else {
+        0
+    };
 
     if vectors.len() != chunks.len() {
         return Err(RagError::Embed {
@@ -633,6 +639,8 @@ async fn process_job(
                 format = "json",
                 chunks = upserted,
                 stale_deleted = stale,
+                embed_tokens = total_tokens,
+                embed_tokens_per_sec,
                 parse_ms,
                 chunk_ms,
                 embed_ms,
@@ -646,6 +654,8 @@ async fn process_job(
                 url = %url,
                 format = "json",
                 chunks = upserted,
+                embed_tokens = total_tokens,
+                embed_tokens_per_sec,
                 parse_ms,
                 chunk_ms,
                 embed_ms,
