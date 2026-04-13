@@ -150,7 +150,9 @@ impl Pipeline {
                                 .await
                                 {
                                     Ok(stats) => {
-                                        counters.files_indexed.fetch_add(1, Ordering::Relaxed);
+                                        if stats.chunks > 0 {
+                                            counters.files_indexed.fetch_add(1, Ordering::Relaxed);
+                                        }
                                         counters
                                             .total_chunks
                                             .fetch_add(stats.chunks, Ordering::Relaxed);
@@ -360,7 +362,20 @@ impl Pipeline {
                             "startup scan: already indexed, skipping"
                         );
                     }
-                    Ok(false) | Err(_) => {
+                    Ok(false) => {
+                        let span = tracing::info_span!("index_job", path = %path.display());
+                        tokio::select! {
+                            _ = scan_tx.send(IndexJob { path, span }) => {}
+                            _ = scan_shutdown.cancelled() => { break; }
+                        }
+                        queued += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "startup scan: delta check failed, re-enqueueing conservatively"
+                        );
                         let span = tracing::info_span!("index_job", path = %path.display());
                         tokio::select! {
                             _ = scan_tx.send(IndexJob { path, span }) => {}
@@ -849,7 +864,21 @@ fn parse_office_zip(
     }
 
     // For DOCX, delegate to the tested noxa-fetch extractor.
+    // Check each entry's decompressed size first — MAX_ENTRIES ran above but
+    // the per-entry size guard is inside the ODT/PPTX loop which is skipped
+    // for DOCX.  Guard here so a crafted DOCX zip bomb cannot cause OOM.
     if ext == "docx" {
+        for i in 0..archive.len() {
+            if let Ok(entry) = archive.by_index(i) {
+                if entry.size() > MAX_ENTRY_SIZE {
+                    return Err(RagError::Parse(format!(
+                        "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
+                        entry.name(),
+                        entry.size()
+                    )));
+                }
+            }
+        }
         let result = noxa_fetch::document::extract_document(bytes, noxa_fetch::document::DocType::Docx)
             .map_err(|e| RagError::Parse(format!("DOCX extract: {e}")))?;
         let mut r = result;
@@ -1234,29 +1263,38 @@ async fn process_job(
         .clone();
     let _guard = url_lock.lock().await;
 
-    // SAFETY NOTE: delete-before-upsert is destructive: if upsert fails after
-    // delete, the document is temporarily unindexed until the next file event
-    // triggers a re-index. This is acceptable given the current store API lacks
-    // a transactional delete-by-url-excluding-ids. UUIDs are deterministic (v5),
-    // so re-indexing is always idempotent.
+    // Two-phase replace: upsert new points first, then delete stale ones.
+    //
+    // This avoids the data-loss window of delete-before-upsert: if the upsert
+    // succeeds but the stale cleanup fails, the old points remain alongside the
+    // new ones (harmless duplicate chunks) until the next file event.  The
+    // reverse was dangerous — a transient store blip after delete but before
+    // upsert left the document completely unindexed.
+    //
+    // UUIDs are v5 deterministic (url + chunk_index), so re-indexing is always
+    // idempotent and duplicate chunks are deduplicated on the next pass.
     //
     // Capture the result instead of returning immediately so we can always run
     // the eviction logic below, even on error paths.
+    let new_ids: Vec<uuid::Uuid> = points.iter().map(|p| p.id).collect();
     let t3 = Instant::now();
     let store_result: Result<u64, RagError> = async {
-        let stale = store.delete_by_url(&url).await?;
-        let delete_ms = t3.elapsed().as_millis() as u64;
-
         let t4 = Instant::now();
         let upserted = store.upsert(points).await.map_err(|e| {
-            tracing::error!(
-                url = %url,
-                error = %e,
-                "upsert failed after delete — document temporarily unindexed until next file event"
-            );
+            tracing::error!(url = %url, error = %e, "upsert failed");
             e
         })?;
         let upsert_ms = t4.elapsed().as_millis() as u64;
+
+        let stale = store.delete_stale_by_url(&url, &new_ids).await.map_err(|e| {
+            tracing::warn!(
+                url = %url,
+                error = %e,
+                "stale cleanup failed after upsert — duplicate chunks until next file event"
+            );
+            e
+        })?;
+        let delete_ms = t3.elapsed().as_millis() as u64 - upsert_ms;
 
         if stale > 0 {
             tracing::info!(

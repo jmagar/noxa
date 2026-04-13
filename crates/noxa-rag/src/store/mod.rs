@@ -15,6 +15,16 @@ pub trait VectorStore: Send + Sync {
     async fn upsert(&self, points: Vec<Point>) -> Result<usize, RagError>;
     /// Delete all points for a given URL. Returns the number of points deleted.
     async fn delete_by_url(&self, url: &str) -> Result<u64, RagError>;
+    /// Delete all points for a given URL whose IDs are NOT in `keep_ids`.
+    ///
+    /// Used for two-phase replace: upsert new points first, then call this to
+    /// evict only the stale points, so a transient upsert failure never leaves
+    /// the collection empty.
+    async fn delete_stale_by_url(
+        &self,
+        url: &str,
+        keep_ids: &[uuid::Uuid],
+    ) -> Result<u64, RagError>;
     async fn search(&self, vector: &[f32], limit: usize) -> Result<Vec<SearchResult>, RagError>;
     /// Return the total number of indexed points in the collection.
     async fn collection_point_count(&self) -> Result<u64, RagError>;

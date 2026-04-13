@@ -169,7 +169,7 @@ impl TeiProvider {
 
             if should_retry(status_u16, attempt) {
                 let body = resp.text().await.unwrap_or_default();
-                let preview = &body[..body.len().min(512)];
+                let preview: String = body.chars().take(512).collect();
                 tracing::warn!(
                     batch = batch_idx + 1,
                     attempt = attempt + 1,
@@ -189,7 +189,7 @@ impl TeiProvider {
             }
 
             let body = resp.text().await.unwrap_or_default();
-            let preview = &body[..body.len().min(512)];
+            let preview: String = body.chars().take(512).collect();
             return Err(RagError::Embed {
                 message: format!("TEI /embed returned HTTP {status_u16}: {preview}"),
                 status: Some(status_u16),

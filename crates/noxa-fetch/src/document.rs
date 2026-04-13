@@ -111,7 +111,7 @@ pub fn extract_document(
             favicon: None,
             word_count,
             content_hash: None,
-            source_type: Some("file".into()),
+            source_type: Some("web".into()),
             file_path: None,
             last_modified: None,
             is_truncated: None,

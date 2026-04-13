@@ -144,7 +144,7 @@ impl QdrantStore {
         let resp = self.client.put(&url).json(&body).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let preview = &text[..text.len().min(512)];
+            let preview: String = text.chars().take(512).collect();
             return Err(RagError::Store(format!(
                 "create_collection failed: {preview}"
             )));
@@ -171,9 +171,7 @@ impl QdrantStore {
             ("url", "keyword"),
             ("domain", "keyword"),
             ("source_type", "keyword"),
-            ("content_type", "keyword"),
             ("language", "keyword"),
-            ("file_format", "keyword"),
         ];
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
         for (field, schema_type) in indexes {
@@ -181,7 +179,7 @@ impl QdrantStore {
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {
                 let text = r.text().await.unwrap_or_default();
-                let preview = &text[..text.len().min(512)];
+                let preview: String = text.chars().take(512).collect();
                 return Err(RagError::Store(format!(
                     "create_field_index({field}) failed: {preview}"
                 )));
@@ -200,7 +198,7 @@ impl QdrantStore {
         let resp = self.client.get(&endpoint).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let preview = &text[..text.len().min(512)];
+            let preview: String = text.chars().take(512).collect();
             return Err(RagError::Store(format!(
                 "collection_info failed: {preview}"
             )));
@@ -353,7 +351,7 @@ impl VectorStore for QdrantStore {
 
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let preview = &text[..text.len().min(512)];
+            let preview: String = text.chars().take(512).collect();
             return Err(RagError::Store(format!("upsert failed: {preview}")));
         }
 
@@ -407,8 +405,81 @@ impl VectorStore for QdrantStore {
         let resp = self.client.post(&endpoint).json(&body).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let preview = &text[..text.len().min(512)];
+            let preview: String = text.chars().take(512).collect();
             return Err(RagError::Store(format!("delete_by_url failed: {preview}")));
+        }
+
+        Ok(stale_count)
+    }
+
+    /// POST /collections/{name}/points/delete?wait=true — delete points for a URL
+    /// whose IDs are NOT in `keep_ids`.
+    ///
+    /// Used for two-phase replace so that a transient upsert failure never empties
+    /// the collection: new points are upserted first, then only stale points are
+    /// removed.  If `keep_ids` is empty all points for the URL are deleted (same as
+    /// `delete_by_url`).
+    async fn delete_stale_by_url(
+        &self,
+        url: &str,
+        keep_ids: &[uuid::Uuid],
+    ) -> Result<u64, RagError> {
+        let normalized = normalize_url(url);
+
+        // Build filter: url == normalized AND id NOT IN keep_ids.
+        let filter = if keep_ids.is_empty() {
+            json!({
+                "must": [{ "key": "url", "match": { "value": normalized } }]
+            })
+        } else {
+            let id_strs: Vec<String> = keep_ids.iter().map(|id| id.to_string()).collect();
+            json!({
+                "must": [{ "key": "url", "match": { "value": normalized } }],
+                "must_not": [{ "has_id": id_strs }]
+            })
+        };
+
+        // Count stale points before delete for logging.
+        let count_endpoint = format!(
+            "{}/collections/{}/points/count",
+            self.base_url, self.collection
+        );
+        let stale_count: u64 = match self
+            .client
+            .post(&count_endpoint)
+            .json(&json!({ "filter": filter, "exact": true }))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v["result"]["count"].as_u64())
+                .unwrap_or(0),
+            _ => 0,
+        };
+
+        if stale_count == 0 {
+            return Ok(0);
+        }
+
+        let endpoint = format!(
+            "{}/collections/{}/points/delete?wait=true",
+            self.base_url, self.collection
+        );
+        let resp = self
+            .client
+            .post(&endpoint)
+            .json(&DeleteByFilterRequest { filter })
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let preview: String = text.chars().take(512).collect();
+            return Err(RagError::Store(format!(
+                "delete_stale_by_url failed: {preview}"
+            )));
         }
 
         Ok(stale_count)
@@ -430,7 +501,7 @@ impl VectorStore for QdrantStore {
         let resp = self.client.post(&url).json(&body).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let preview = &text[..text.len().min(512)];
+            let preview: String = text.chars().take(512).collect();
             return Err(RagError::Store(format!("search failed: {preview}")));
         }
 
@@ -527,7 +598,7 @@ impl VectorStore for QdrantStore {
         let resp = self.client.get(&endpoint).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let preview = &text[..text.len().min(512)];
+            let preview: String = text.chars().take(512).collect();
             return Err(RagError::Store(format!(
                 "collection_point_count failed: {preview}"
             )));
@@ -575,7 +646,7 @@ impl VectorStore for QdrantStore {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            let preview = &text[..text.len().min(512)];
+            let preview: String = text.chars().take(512).collect();
             tracing::warn!(
                 status,
                 url = %normalized,
