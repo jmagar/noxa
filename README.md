@@ -431,7 +431,7 @@ noxa --search "rust async" --no-scrape
 noxa --search "rust async" --api-key $NOXA_API_KEY
 ```
 
-Results include title, URL, snippet, and extracted content from each page. All scraped pages are auto-persisted to `~/.noxa/content/`.
+Results include title, URL, and snippet for each hit. When scraping is enabled (the default), extracted content from each page is also shown. All scraped pages are auto-persisted to `~/.noxa/content/`.
 
 ### Content Store
 
