@@ -38,6 +38,15 @@ jobs:
             exit 1
           fi
 
+      - name: Check tag matches plugin.json version
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          plugin_version=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])")
+          if [[ "$tag" != "$plugin_version" ]]; then
+            echo "Tag v${tag} does not match .claude-plugin/plugin.json version ${plugin_version}"
+            exit 1
+          fi
+
       - name: Check noxa-cli crate exists
         run: |
           [[ -f "crates/noxa-cli/Cargo.toml" ]] || { echo "crates/noxa-cli/Cargo.toml not found"; exit 1; }
