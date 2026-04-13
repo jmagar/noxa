@@ -1,4 +1,14 @@
-//! Shared SearXNG JSON search support.
+//! SearXNG-specific JSON search support.
+//!
+//! This module provides a search integration that is **specifically for
+//! SearXNG** self-hosted search instances. It is not a generic search
+//! abstraction — if you need to target a different backend (e.g. Serper,
+//! Brave, DuckDuckGo), add a separate provider module and route calls
+//! through a `SearchProvider` enum/trait rather than calling this function
+//! directly.
+//!
+//! Callers should check `SEARXNG_URL` is configured and pass it explicitly;
+//! see [`searxng_search`] for the expected base URL format.
 use serde::Deserialize;
 
 use crate::FetchClient;
@@ -19,6 +29,13 @@ pub struct SearxngResponse {
     pub results: Vec<SearxngResult>,
 }
 
+/// Query a **SearXNG** instance and return up to `num_results` results.
+///
+/// `base_url` must be the root URL of a SearXNG deployment with JSON output
+/// enabled (`formats: [html, json]` in `settings.yml`).
+///
+/// This function is SearXNG-specific. Do **not** call it as a generic search
+/// interface — use the appropriate provider integration for other backends.
 pub async fn searxng_search(
     client: &FetchClient,
     base_url: &str,

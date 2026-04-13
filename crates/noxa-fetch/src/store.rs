@@ -107,6 +107,37 @@ impl ContentStore {
         if !base.starts_with(&self.root) {
             return Err(format!("store: computed path escapes root for url: {url}"));
         }
+
+        // Symlink protection: canonicalize the parent directory (which must
+        // already exist or be created) to resolve any symlinks, then verify
+        // that the final path still resides under the canonical root. We
+        // canonicalize the parent rather than the full path because the file
+        // itself may not exist yet at resolution time.
+        let canonical_root = std::fs::canonicalize(&self.root).map_err(|e| {
+            format!("store: cannot canonicalize root {}: {e}", self.root.display())
+        })?;
+        let parent = base.parent().unwrap_or(&base);
+        // The parent may not exist yet (first write for this host). Use
+        // the deepest ancestor that does exist to canonicalize, then
+        // reconstruct the suffix.
+        let mut existing_ancestor = parent.to_path_buf();
+        let mut suffix = PathBuf::new();
+        while !existing_ancestor.exists() {
+            if let Some(name) = existing_ancestor.file_name() {
+                suffix = PathBuf::from(name).join(&suffix);
+            }
+            match existing_ancestor.parent() {
+                Some(p) => existing_ancestor = p.to_path_buf(),
+                None => break,
+            }
+        }
+        let canonical_parent = std::fs::canonicalize(&existing_ancestor)
+            .map_err(|e| format!("store: cannot canonicalize path ancestor: {e}"))?;
+        let resolved = canonical_parent.join(&suffix);
+        if !resolved.starts_with(&canonical_root) {
+            return Err(format!("store: computed path escapes root for url: {url}"));
+        }
+
         Ok(base)
     }
 
@@ -152,8 +183,11 @@ impl ContentStore {
         }
 
         // Size guard — skip oversized documents rather than filling disk.
-        let estimated =
-            extraction.content.markdown.len() + extraction.content.plain_text.len();
+        // Include raw_html in the estimate because it is serialized into the
+        // stored JSON and can be substantially larger than markdown + plain_text.
+        let estimated = extraction.content.markdown.len()
+            + extraction.content.plain_text.len()
+            + extraction.content.raw_html.as_deref().map_or(0, |h| h.len());
         if let Some(max) = self.max_content_bytes {
             if estimated > max {
                 tracing::warn!(
@@ -218,8 +252,14 @@ impl ContentStore {
 
         // Atomic writes: write to .tmp then rename (POSIX rename is atomic on
         // same filesystem — eliminates the corruption window between two writes).
-        let tmp_md = md_path.with_extension("md.tmp");
-        let tmp_json = json_path.with_extension("json.tmp");
+        // Use a random suffix to avoid races between concurrent writes for the
+        // same URL (e.g. parallel search result processing).
+        let rand_suffix = {
+            use rand::Rng;
+            format!("{:016x}", rand::thread_rng().r#gen::<u64>())
+        };
+        let tmp_md = md_path.with_extension(format!("md.{rand_suffix}.tmp"));
+        let tmp_json = json_path.with_extension(format!("json.{rand_suffix}.tmp"));
 
         tokio::fs::write(&tmp_md, &markdown_bytes)
             .await

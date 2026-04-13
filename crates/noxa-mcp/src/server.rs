@@ -543,10 +543,11 @@ impl NoxaMcp {
         let previous = match previous {
             Some(p) => p,
             None => {
-                // No stored snapshot: fetch-and-store the current page as the
-                // baseline, then return an informative error.
+                // No stored snapshot: fetch the current page and explicitly
+                // write it as the baseline, then return an informative message.
+                // Only claim success if the store write actually succeeds.
                 info!(url = %params.url, "diff: no previous snapshot — fetching baseline");
-                let _ = cloud::smart_fetch(
+                let fetch_result = cloud::smart_fetch(
                     &self.fetch_client,
                     self.cloud.as_ref(),
                     &params.url,
@@ -556,11 +557,44 @@ impl NoxaMcp {
                     &["markdown"],
                 )
                 .await;
-                return Err(format!(
-                    "No previous snapshot stored for {url}. The page has been fetched and \
-                     stored as the baseline — run diff again to compare against this snapshot.",
-                    url = params.url
-                ));
+                match fetch_result {
+                    Err(e) => {
+                        return Err(format!(
+                            "No previous snapshot stored for {url}. Failed to fetch baseline: {e}",
+                            url = params.url
+                        ));
+                    }
+                    Ok(SmartFetchResult::Local(extraction)) => {
+                        match self.store.write(&params.url, &extraction).await {
+                            Ok(_) => {
+                                return Err(format!(
+                                    "No previous snapshot stored for {url}. The page has been \
+                                     fetched and stored as the baseline — run diff again to \
+                                     compare against this snapshot.",
+                                    url = params.url
+                                ));
+                            }
+                            Err(e) => {
+                                return Err(format!(
+                                    "No previous snapshot stored for {url}. Fetched the page \
+                                     but failed to store baseline: {e}. Ensure the content \
+                                     store is writable and retry.",
+                                    url = params.url
+                                ));
+                            }
+                        }
+                    }
+                    Ok(SmartFetchResult::Cloud(_)) => {
+                        // Cloud responses are not persisted locally as a baseline;
+                        // inform the caller to provide an explicit previous_snapshot.
+                        return Err(format!(
+                            "No previous snapshot stored for {url}. The page required cloud \
+                             fetching (bot protection) and cannot be auto-stored as a baseline. \
+                             Provide a previous_snapshot parameter explicitly.",
+                            url = params.url
+                        ));
+                    }
+                }
             }
         };
 

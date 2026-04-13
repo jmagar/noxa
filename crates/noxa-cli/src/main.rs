@@ -758,6 +758,7 @@ fn validate_operator_url(url: &str) -> Result<(), String> {
 
 /// Synchronous URL safety check (no DNS resolution) used for filtering search results.
 /// Rejects private/loopback IP addresses but does not resolve hostnames.
+/// NOTE: For stronger SSRF protection with DNS resolution, use the async `validate_url`.
 fn validate_url_sync(url: &str) -> Result<(), String> {
     let parsed = parse_http_url(url)?;
     let host = parsed.host_str().ok_or("Invalid URL: no host")?;
@@ -778,7 +779,7 @@ fn validate_url_sync(url: &str) -> Result<(), String> {
             let ip = std::net::IpAddr::V6(addr);
             ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip)
         }
-        Some(url::Host::Domain(_)) => false, // DNS not checked in sync path
+        Some(url::Host::Domain(_)) => false, // DNS not checked in sync path; use async validate_url for full protection
         None => true,
     };
     if private {
@@ -2695,6 +2696,10 @@ async fn run_search(
     fetch_client: &Arc<noxa_fetch::FetchClient>,
     query: &str,
 ) -> Result<(), String> {
+    if query.trim().is_empty() {
+        return Err("Search query must not be empty or whitespace-only.".into());
+    }
+
     let num = cli.num_results.clamp(1, 50);
     let concurrency = clamp_search_scrape_concurrency(cli.num_scrape_concurrency);
 
