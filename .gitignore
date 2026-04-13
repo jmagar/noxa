@@ -2,7 +2,6 @@ target/
 .DS_Store
 .env
 .env.bak
-config.json
 proxies.txt
 .claude/skills/
 .omc
@@ -14,7 +13,7 @@ docs/superpowers
 docs/reports
 docs/sessions
 benchmarks
-
+.claude/
 config.md
 .worktrees/
 
