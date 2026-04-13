@@ -110,10 +110,30 @@ impl NoxaConfig {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(&path_str);
-        eprintln!(
-            "noxa: config loaded from {display_name} \
-             (API keys and secrets belong in .env, not config.json)"
-        );
+
+        // Detect secret-looking keys in the raw JSON before parsing
+        let secret_keys = ["api_key", "proxy", "webhook", "llm_base_url", "password", "token", "secret"];
+        let has_secrets = secret_keys.iter().any(|k| {
+            content.contains(&format!("\"{k}\""))
+        });
+
+        let bold   = "\x1b[1m";
+        let green  = "\x1b[92m";  // bright green
+        let cyan   = "\x1b[96m";  // bright cyan
+        let yellow = "\x1b[93m";  // bright yellow
+        let dim    = "\x1b[2m";
+        let reset  = "\x1b[0m";
+
+        if has_secrets {
+            eprintln!(
+                "{dim}config:{reset} {cyan}{bold}{display_name}{reset}  \
+                 {yellow}⚠  secrets detected — api_key, proxy, webhook belong in .env{reset}"
+            );
+        } else {
+            eprintln!(
+                "{dim}config:{reset} {cyan}{bold}{display_name}{reset}  {green}✓{reset}"
+            );
+        }
         tracing::debug!("config path: {}", path.display());
 
         match serde_json::from_str(&content) {
