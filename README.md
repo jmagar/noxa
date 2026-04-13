@@ -513,6 +513,25 @@ noxa https://site-b.com --diff-with a.json
 
 ---
 
+## Claude Code Plugin
+
+noxa ships as a Claude Code plugin that adds a skill (auto-activates on scrape/crawl/search triggers) and wires up the MCP server in one step.
+
+```bash
+# Add the marketplace and install
+/plugin marketplace add jmagar/noxa
+/plugin install noxa
+/reload-plugins
+```
+
+The plugin provides:
+- **`noxa` skill** — auto-activates when you ask to scrape, crawl, extract, search, watch, or summarize URLs; covers all flag combinations and common recipes
+- **MCP server** — all 10 tools available directly to Claude (`scrape`, `crawl`, `map`, `batch`, `extract`, `summarize`, `diff`, `brand`, `search`, `research`)
+
+Requires `noxa` on PATH. Run `noxa setup` after installing to configure everything.
+
+---
+
 ## MCP Server — 10 tools for AI agents
 
 <a href="https://glama.ai/mcp/servers/jmagar/noxa"><img src="https://glama.ai/mcp/servers/jmagar/noxa/badge" alt="noxa MCP server" /></a>

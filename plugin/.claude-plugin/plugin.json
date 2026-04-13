@@ -1,0 +1,12 @@
+{
+  "name": "noxa",
+  "version": "0.5.0",
+  "description": "Web content extraction for AI agents — scrape, crawl, search, summarize, diff, and monitor URLs via the noxa CLI and MCP server",
+  "author": {
+    "name": "Jacob Magar",
+    "url": "https://github.com/jmagar/noxa"
+  },
+  "repository": "https://github.com/jmagar/noxa",
+  "license": "AGPL-3.0",
+  "keywords": ["web", "scraping", "extraction", "mcp", "llm", "crawl", "search", "noxa"]
+}

@@ -1,6 +1,6 @@
 ---
 name: noxa
-compatibility: Requires `noxa` binary on PATH. Install via `brew install noxa`, `cargo install --git https://github.com/jmagar/noxa.git noxa-cli --bin noxa`, or download from GitHub Releases.
+compatibility: Requires `noxa` binary on PATH. Install via `curl -fsSL https://raw.githubusercontent.com/jmagar/noxa/main/install.sh | bash`, `cargo install --git https://github.com/jmagar/noxa.git --bin noxa --bin noxa-mcp`, or download from GitHub Releases.
 description: >-
   This skill should be used when the user wants to scrape, extract, or fetch content from
   a URL using the noxa CLI, crawl a website, get the text of a web page, monitor or watch
