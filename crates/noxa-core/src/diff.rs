@@ -2,26 +2,26 @@
 /// Pure computation -- no I/O, WASM-safe.
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 
 use crate::types::{ExtractionResult, Link};
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ChangeStatus {
     Same,
     Changed,
     New,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataChange {
     pub field: String,
     pub old: Option<String>,
     pub new: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentDiff {
     pub status: ChangeStatus,
     pub text_diff: Option<String>,

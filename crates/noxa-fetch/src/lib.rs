@@ -23,4 +23,4 @@ pub use noxa_pdf::PdfMode;
 pub use proxy::{parse_proxy_file, parse_proxy_line};
 pub use search::{SearxngResult, searxng_search};
 pub use sitemap::SitemapEntry;
-pub use store::{ContentStore, StoreResult, url_to_store_path};
+pub use store::{ChangelogEntry, ContentStore, Sidecar, StoreResult, url_to_store_path};
