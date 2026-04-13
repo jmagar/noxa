@@ -96,7 +96,7 @@ docker run --rm ghcr.io/0xmassi/noxa https://example.com
 ### Docker Compose (with Ollama for LLM features)
 
 ```bash
-cp env.example .env
+cp config/.env.example .env
 docker compose up -d
 ```
 
@@ -666,7 +666,7 @@ Set `output_dir` in `config.json` if you want results written to files instead o
 Copy the example:
 
 ```bash
-cp config.example.json config.json
+cp config/config.example.json config.json
 ```
 
 **Precedence:** CLI flags > `config.json` > built-in defaults
@@ -678,7 +678,7 @@ Gemini -> OpenAI -> Ollama -> Anthropic fallback chain. Setting them in
 **Secrets and URLs** always go in `.env`, not `config.json`:
 
 ```bash
-cp env.example .env
+cp config/.env.example .env
 ```
 
 **Override config path** for a single run:
@@ -732,7 +732,7 @@ These settings can also be controlled via command-line flags:
 | `OLLAMA_HEALTH_TIMEOUT_MS` | Ollama availability check timeout in milliseconds |
 | `NOXA_CONFIG` | Path to `config.json` or `/dev/null` to bypass it |
 
-The `env.example` file covers the runtime noxa variables above.
+The `config/.env.example` file covers the runtime noxa variables above.
 
 If you use `setup.sh` or the Docker Compose stack, they also rely on these local deployment variables:
 

@@ -180,11 +180,11 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
 
           # amd64
-          docker build -f Dockerfile.ci --build-arg BINARY_DIR=binaries-x86_64-unknown-linux-gnu \
+          docker build -f config/docker/ci/Dockerfile --build-arg BINARY_DIR=binaries-x86_64-unknown-linux-gnu \
             --platform linux/amd64 -t ghcr.io/jmagar/noxa:${tag}-amd64 --push .
 
           # arm64
-          docker build -f Dockerfile.ci --build-arg BINARY_DIR=binaries-aarch64-unknown-linux-gnu \
+          docker build -f config/docker/ci/Dockerfile --build-arg BINARY_DIR=binaries-aarch64-unknown-linux-gnu \
             --platform linux/arm64 -t ghcr.io/jmagar/noxa:${tag}-arm64 --push .
 
           # Multi-arch manifest

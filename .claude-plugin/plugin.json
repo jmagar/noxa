@@ -9,6 +9,6 @@
   "repository": "https://github.com/jmagar/noxa",
   "license": "AGPL-3.0",
   "keywords": ["web", "extraction", "mcp", "ai"],
-  "skills": "./skills/",
-  "mcpServers": "./.mcp.json"
+  "skills": "./plugin/skills/",
+  "mcpServers": "./plugin/.mcp.json"
 }

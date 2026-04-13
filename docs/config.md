@@ -232,11 +232,11 @@ The following variables are not part of the `config.json` contract, but they sti
 
 ## Example
 
-`config.example.json` shows the recommended baseline:
+`config/config.example.json` shows the recommended baseline:
 
 ```json
 {
-  "$schema": "./config.schema.json",
+  "$schema": "./config/config.schema.json",
   "_doc": [
     "Copy to config.json and remove fields you don't need.",
     "Secrets (api_key, proxy, webhook, llm_base_url) go in .env — NOT here."
@@ -272,6 +272,6 @@ The following variables are not part of the `config.json` contract, but they sti
 
 ## Related Files
 
-- [`config.schema.json`](../config.schema.json)
-- [`config.example.json`](../config.example.json)
-- [`env.example`](../env.example)
+- [`config.schema.json`](../config/config.schema.json)
+- [`config.example.json`](../config/config.example.json)
+- [`env.example`](../config/.env.example)

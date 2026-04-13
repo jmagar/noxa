@@ -385,7 +385,7 @@ noxa --config ~/.noxa/config.json https://example.com
 export NOXA_CONFIG=/etc/noxa/config.json
 ```
 
-Config uses snake_case keys that match `config.example.json` and the Rust config struct. Useful for setting defaults like `llm_provider`, `browser`, `concurrency`, `timeout`.
+Config uses snake_case keys that match `config/config.example.json` and the Rust config struct. Useful for setting defaults like `llm_provider`, `browser`, `concurrency`, `timeout`.
 
 ---
 
