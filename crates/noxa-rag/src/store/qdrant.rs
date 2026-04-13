@@ -255,6 +255,52 @@ impl VectorStore for QdrantStore {
                 payload.insert("chunk_index".into(), json!(p.payload.chunk_index));
                 payload.insert("total_chunks".into(), json!(p.payload.total_chunks));
                 payload.insert("token_estimate".into(), json!(p.payload.token_estimate));
+                // Extended metadata — only insert when present so payload stays compact.
+                if let Some(v) = &p.payload.title {
+                    payload.insert("title".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.author {
+                    payload.insert("author".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.published_date {
+                    payload.insert("published_date".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.language {
+                    payload.insert("language".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.source_type {
+                    payload.insert("source_type".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.content_hash {
+                    payload.insert("content_hash".into(), json!(v));
+                }
+                if !p.payload.technologies.is_empty() {
+                    payload.insert("technologies".into(), json!(p.payload.technologies));
+                }
+                if let Some(v) = p.payload.is_truncated {
+                    payload.insert("is_truncated".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.file_path {
+                    payload.insert("file_path".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.last_modified {
+                    payload.insert("last_modified".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.external_id {
+                    payload.insert("external_id".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.platform_url {
+                    payload.insert("platform_url".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.seed_url {
+                    payload.insert("seed_url".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.search_query {
+                    payload.insert("search_query".into(), json!(v));
+                }
+                if let Some(v) = p.payload.crawl_depth {
+                    payload.insert("crawl_depth".into(), json!(v));
+                }
                 QdrantPoint {
                     id: p.id.to_string(),
                     vector: p.vector.clone(),

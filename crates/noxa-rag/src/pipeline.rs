@@ -11,6 +11,7 @@
 //   - notify-debouncer-mini 0.4.x uses a callback/sender API, not a receiver() method.
 //     We use std::sync::mpsc::Sender<DebounceEventResult> as the handler and bridge via spawn_blocking.
 
+use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -171,7 +172,7 @@ impl Pipeline {
 
         debouncer
             .watcher()
-            .watch(&watch_dir, RecursiveMode::NonRecursive)
+            .watch(&watch_dir, RecursiveMode::Recursive)
             .map_err(|e| {
                 RagError::Generic(format!(
                     "failed to watch directory {}: {e}",
@@ -179,7 +180,7 @@ impl Pipeline {
                 ))
             })?;
 
-        tracing::info!(path = %watch_dir.display(), "watching directory (non-recursive)");
+        tracing::info!(path = %watch_dir.display(), "watching directory recursively");
 
         // Bridge: wrap the blocking notify_rx.recv() in spawn_blocking so it
         // doesn't block the tokio reactor.  Send jobs to the tokio job queue.
@@ -199,30 +200,28 @@ impl Pipeline {
                             break;
                         }
                         for event in events {
-                            let path = event.path;
-                            if !is_indexable(&path) {
-                                continue;
-                            }
-                            let span = tracing::info_span!(
-                                "index_job",
-                                path = %path.display(),
-                            );
-                            let job = IndexJob { path, span };
-                            // Retry with a short sleep so shutdown can interrupt a full queue.
-                            let mut pending_job = job;
-                            loop {
-                                match tx_clone.try_send(pending_job) {
-                                    Ok(()) => break,
-                                    Err(tokio::sync::mpsc::error::TrySendError::Full(job)) => {
-                                        if shutdown_clone.is_cancelled() {
-                                            break;
+                            for path in collect_indexable_paths(&event.path) {
+                                let span = tracing::info_span!(
+                                    "index_job",
+                                    path = %path.display(),
+                                );
+                                let job = IndexJob { path, span };
+                                // Retry with a short sleep so shutdown can interrupt a full queue.
+                                let mut pending_job = job;
+                                loop {
+                                    match tx_clone.try_send(pending_job) {
+                                        Ok(()) => break,
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(job)) => {
+                                            if shutdown_clone.is_cancelled() {
+                                                break;
+                                            }
+                                            pending_job = job;
+                                            std::thread::sleep(Duration::from_millis(10));
                                         }
-                                        pending_job = job;
-                                        std::thread::sleep(Duration::from_millis(10));
-                                    }
-                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                        // Receiver dropped — workers are done; exit.
-                                        return;
+                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                            // Receiver dropped — workers are done; exit.
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -284,6 +283,36 @@ impl Pipeline {
 /// temp files that are gone by the time we process them.
 fn is_indexable(path: &Path) -> bool {
     path.extension().map(|e| e == "json").unwrap_or(false) && path.exists()
+}
+
+fn collect_indexable_paths(path: &Path) -> Vec<PathBuf> {
+    if is_indexable(path) {
+        return vec![path.to_path_buf()];
+    }
+
+    if !path.is_dir() {
+        return Vec::new();
+    }
+
+    let mut found = Vec::new();
+    collect_indexable_paths_recursive(path, &mut found);
+    found.sort();
+    found
+}
+
+fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if is_indexable(&entry_path) {
+            found.push(entry_path);
+        } else if entry_path.is_dir() {
+            collect_indexable_paths_recursive(&entry_path, found);
+        }
+    }
 }
 
 /// Returns true iff `host` resolves to a private/loopback/link-local address.
@@ -448,6 +477,22 @@ async fn process_job(
                     chunk_index: chunk.chunk_index,
                     total_chunks: chunk.total_chunks,
                     token_estimate: chunk.token_estimate,
+                    title: result.metadata.title.clone(),
+                    author: result.metadata.author.clone(),
+                    published_date: result.metadata.published_date.clone(),
+                    language: result.metadata.language.clone(),
+                    source_type: result.metadata.source_type.clone(),
+                    content_hash: result.metadata.content_hash.clone(),
+                    technologies: result.metadata.technologies.clone(),
+                    is_truncated: result.metadata.is_truncated,
+                    file_path: result.metadata.file_path.clone(),
+                    last_modified: result.metadata.last_modified.clone(),
+                    // IngestionContext provenance fields — populated in Wave 3 by MCP sources.
+                    external_id: None,
+                    platform_url: None,
+                    seed_url: None,
+                    search_query: None,
+                    crawl_depth: None,
                 },
             }
         })
@@ -494,4 +539,29 @@ async fn process_job(
     // ── 8. Done ───────────────────────────────────────────────────────────────
     tracing::info!(url = %url, chunks = texts.len(), "indexed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_indexable_paths;
+    use std::fs;
+
+    #[test]
+    fn collect_indexable_paths_finds_nested_json_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let nested = root.join("docs/get-started");
+        fs::create_dir_all(&nested).expect("create nested dirs");
+        fs::write(root.join("top.json"), "{}").expect("write top-level json");
+        fs::write(nested.join("guide.json"), "{}").expect("write nested json");
+        fs::write(nested.join("ignore.txt"), "nope").expect("write non-json");
+
+        let paths = collect_indexable_paths(root);
+        let rendered: Vec<String> = paths
+            .into_iter()
+            .map(|p| p.strip_prefix(root).unwrap().display().to_string())
+            .collect();
+
+        assert_eq!(rendered, vec!["docs/get-started/guide.json", "top.json"]);
+    }
 }
