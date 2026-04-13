@@ -63,6 +63,9 @@ pub struct PointPayload {
     /// ISO 8601 mtime for files, published_at for web content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_modified: Option<String>,
+    /// Git branch detected from .git/HEAD walk-up (file:// sources only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
     // ── Ingestion-provenance fields from IngestionContext ───────────────────
     /// Opaque platform id: 'linkding:42', 'memos:7' (Wave 3+).
     #[serde(default, skip_serializing_if = "Option::is_none")]

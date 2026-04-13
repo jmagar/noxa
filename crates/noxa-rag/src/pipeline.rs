@@ -360,11 +360,35 @@ impl Pipeline {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Returns true iff the path has a `.json` extension AND exists on disk.
-/// We check both because rename events (vim/emacs atomic saves) may fire for
+/// Returns true iff the path has a supported extension AND exists on disk.
+///
+/// We check existence because rename events (vim/emacs atomic saves) may fire for
 /// temp files that are gone by the time we process them.
+///
+/// Deferred (no confirmed use case, would add new crate deps): .epub, .eml, .mbox
 fn is_indexable(path: &Path) -> bool {
-    path.extension().map(|e| e == "json").unwrap_or(false) && path.exists()
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext,
+        // ExtractionResult JSON (primary watch-dir format)
+        "json"
+        // Plain text
+        | "md" | "txt" | "log" | "rst" | "org" | "yaml" | "yml" | "toml"
+        // HTML
+        | "html" | "htm"
+        // Notebook
+        | "ipynb"
+        // Binary document (via noxa-pdf / zip unpack)
+        | "pdf" | "docx" | "odt" | "pptx"
+        // Structured data
+        | "jsonl" | "xml" | "opml"
+        // Subtitle / transcript
+        | "vtt" | "srt"
+        // RSS / Atom
+        | "rss" | "atom"
+    ) && path.exists()
 }
 
 fn collect_indexable_paths(path: &Path) -> Vec<PathBuf> {
@@ -389,6 +413,11 @@ fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let entry_path = entry.path();
+        // Never follow symlinks — prevents watch_dir/root -> / traversal attacks.
+        if entry_path.is_symlink() {
+            tracing::debug!(path = %entry_path.display(), "skipping symlink");
+            continue;
+        }
         if is_indexable(&entry_path) {
             found.push(entry_path);
         } else if entry_path.is_dir() {
@@ -421,29 +450,59 @@ fn validate_url_scheme(url: &str) -> Result<(), RagError> {
         url::Url::parse(url).map_err(|e| RagError::Generic(format!("invalid URL {url:?}: {e}")))?;
 
     match parsed.scheme() {
-        "http" | "https" => {}
+        "http" | "https" => {
+            // Block private/loopback IP literals and localhost for remote schemes.
+            if let Some(host) = parsed.host_str() {
+                if is_private_ip(host) {
+                    return Err(RagError::Generic(format!(
+                        "URL {url:?} uses a private/loopback IP literal as its host — indexing blocked"
+                    )));
+                }
+                if host.eq_ignore_ascii_case("localhost") {
+                    return Err(RagError::Generic(
+                        "URL points to localhost — indexing blocked".to_string(),
+                    ));
+                }
+            }
+        }
+        "file" => {
+            // Local file:// only — no remote file://server/path references.
+            // RFC 8089 allows `file://localhost/path` as equivalent to `file:///path`.
+            match parsed.host_str() {
+                None | Some("") | Some("localhost") => {}
+                Some(host) => {
+                    return Err(RagError::Generic(format!(
+                        "file:// URL with remote host {host:?} is not allowed (only local paths)"
+                    )));
+                }
+            }
+        }
         other => {
             return Err(RagError::Generic(format!(
-                "URL scheme {other:?} is not allowed (only http/https)"
+                "URL scheme {other:?} is not allowed (only http/https/file)"
             )));
-        }
-    }
-
-    if let Some(host) = parsed.host_str() {
-        if is_private_ip(host) {
-            return Err(RagError::Generic(format!(
-                "URL {url:?} uses a private/loopback IP literal as its host — indexing blocked"
-            )));
-        }
-        // Also block bare "localhost" hostname.
-        if host.eq_ignore_ascii_case("localhost") {
-            return Err(RagError::Generic(
-                "URL points to localhost — indexing blocked".to_string(),
-            ));
         }
     }
 
     Ok(())
+}
+
+/// Walk up the directory tree from `file_path` to find a `.git/HEAD` file.
+///
+/// Reads the HEAD ref to extract the branch name: `ref: refs/heads/<branch>`.
+/// Returns `None` when not in a git repo, on detached HEAD, or on any I/O error.
+/// Uses only file reads — no subprocess, no git binary required.
+fn detect_git_branch(file_path: &Path) -> Option<String> {
+    let mut dir = file_path.parent()?;
+    loop {
+        let head = dir.join(".git").join("HEAD");
+        if head.exists() {
+            let content = std::fs::read_to_string(&head).ok()?;
+            // `ref: refs/heads/main\n` → `main`
+            return content.trim().strip_prefix("ref: refs/heads/").map(str::to_string);
+        }
+        dir = dir.parent()?;
+    }
 }
 
 /// Append a failed-job record to the configured log file (NDJSON format).
@@ -490,7 +549,30 @@ async fn process_job(
     // ── 1. Open file and check size from the same FD (TOCTOU fix) ────────────
     let t0 = Instant::now();
     let mut file = tokio::fs::File::open(&job.path).await?;
-    let size = file.metadata().await?.len();
+    let file_meta = file.metadata().await?;
+    let size = file_meta.len();
+
+    // Path confinement check — guard against TOCTOU rename/hardlink attacks.
+    // Canonicalize resolves any symlink components in the path itself.
+    let canonical = tokio::fs::canonicalize(&job.path).await.map_err(|e| {
+        RagError::Generic(format!(
+            "canonicalize failed for {}: {e}",
+            job.path.display()
+        ))
+    })?;
+    let watch_dir = match &config.source {
+        SourceConfig::FsWatcher { watch_dir, .. } => watch_dir.clone(),
+    };
+    let watch_canonical = tokio::fs::canonicalize(&watch_dir).await.map_err(|e| {
+        RagError::Generic(format!("canonicalize watch_dir failed: {e}"))
+    })?;
+    if !canonical.starts_with(&watch_canonical) {
+        tracing::warn!(
+            path = %job.path.display(),
+            "path outside watch_dir — skipping (potential TOCTOU attack)"
+        );
+        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
+    }
 
     const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
     if size > MAX_FILE_SIZE_BYTES {
@@ -506,17 +588,43 @@ async fn process_job(
     file.read_to_string(&mut content).await?;
     let parse_ms = t0.elapsed().as_millis() as u64;
 
-    // ── 2. Parse JSON ─────────────────────────────────────────────────────────
-    let result: ExtractionResult = match serde_json::from_str(&content) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(path = ?job.path, error = %e, "json parse failed, skipping");
-            append_failed_job(&job.path, &e, config).await;
+    // ── 2. Parse / ingest by file format ─────────────────────────────────────
+    let file_ext = job.path.extension().and_then(|e| e.to_str()).unwrap_or("json");
+    let mut result: ExtractionResult = match file_ext {
+        "json" => match serde_json::from_str(&content) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(path = ?job.path, error = %e, "json parse failed, skipping");
+                append_failed_job(&job.path, &e, config).await;
+                return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
+            }
+        },
+        ext => {
+            // Non-JSON formats require ingester.rs (noxa-iua — pending).
+            tracing::warn!(
+                path = ?job.path,
+                ext,
+                "non-JSON format not yet supported (ingester.rs pending noxa-iua)"
+            );
             return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
         }
     };
 
-    // ── 3. URL validation ─────────────────────────────────────────────────────
+    // ── 3a. Populate filesystem provenance (noxa-9ww) ─────────────────────────
+    // Set file_path and last_modified from job.path if not already populated
+    // by the source tool or ingester. git_branch is read from .git/HEAD walk-up.
+    if result.metadata.file_path.is_none() {
+        result.metadata.file_path = Some(job.path.to_string_lossy().into_owned());
+    }
+    if result.metadata.last_modified.is_none() {
+        if let Ok(mtime) = file_meta.modified() {
+            result.metadata.last_modified =
+                Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
+        }
+    }
+    let git_branch = detect_git_branch(&job.path);
+
+    // ── 3b. URL validation ────────────────────────────────────────────────────
     let raw_url = result.metadata.url.as_deref().unwrap_or("").to_string();
     if let Err(e) = validate_url_scheme(&raw_url) {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
@@ -525,7 +633,7 @@ async fn process_job(
     // Normalize so the mutex key and stored payload match what delete_by_url queries.
     let url = crate::store::qdrant::normalize_url(&raw_url);
 
-    // ── 4. Chunk ──────────────────────────────────────────────────────────────
+    // ── 4. Chunk ─────────────────────────────────────────────────────────────
     let t1 = Instant::now();
     let chunks = chunker::chunk(&result, &config.chunker, tokenizer);
     if chunks.is_empty() {
@@ -591,6 +699,7 @@ async fn process_job(
                     is_truncated: result.metadata.is_truncated,
                     file_path: result.metadata.file_path.clone(),
                     last_modified: result.metadata.last_modified.clone(),
+                    git_branch: git_branch.clone(),
                     // IngestionContext provenance fields — populated in Wave 3 by MCP sources.
                     external_id: None,
                     platform_url: None,
@@ -684,18 +793,19 @@ async fn process_job(
 
 #[cfg(test)]
 mod tests {
-    use super::collect_indexable_paths;
+    use super::{collect_indexable_paths, detect_git_branch, is_indexable};
     use std::fs;
 
     #[test]
-    fn collect_indexable_paths_finds_nested_json_files() {
+    fn collect_indexable_paths_finds_nested_supported_files() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         let nested = root.join("docs/get-started");
         fs::create_dir_all(&nested).expect("create nested dirs");
         fs::write(root.join("top.json"), "{}").expect("write top-level json");
         fs::write(nested.join("guide.json"), "{}").expect("write nested json");
-        fs::write(nested.join("ignore.txt"), "nope").expect("write non-json");
+        // .epub is explicitly deferred — should NOT be returned.
+        fs::write(nested.join("ignore.epub"), "nope").expect("write deferred extension");
 
         let paths = collect_indexable_paths(root);
         let rendered: Vec<String> = paths
@@ -704,5 +814,67 @@ mod tests {
             .collect();
 
         assert_eq!(rendered, vec!["docs/get-started/guide.json", "top.json"]);
+    }
+
+    #[test]
+    fn is_indexable_accepts_all_supported_extensions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for ext in &[
+            "json", "md", "txt", "log", "rst", "org", "yaml", "yml", "toml", "html", "htm",
+            "ipynb", "pdf", "docx", "odt", "pptx", "jsonl", "xml", "opml", "vtt", "srt", "rss",
+            "atom",
+        ] {
+            let path = root.join(format!("file.{ext}"));
+            fs::write(&path, "x").expect("write file");
+            assert!(is_indexable(&path), ".{ext} should be indexable");
+        }
+    }
+
+    #[test]
+    fn is_indexable_rejects_deferred_extensions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for ext in &["epub", "eml", "mbox"] {
+            let path = root.join(format!("file.{ext}"));
+            fs::write(&path, "x").expect("write file");
+            assert!(!is_indexable(&path), ".{ext} should NOT be indexable (deferred)");
+        }
+    }
+
+    #[test]
+    fn detect_git_branch_returns_none_outside_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("foo.txt");
+        fs::write(&file, "x").expect("write file");
+        assert_eq!(detect_git_branch(&file), None);
+    }
+
+    #[test]
+    fn detect_git_branch_reads_head_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let git_dir = tmp.path().join(".git");
+        fs::create_dir_all(&git_dir).expect("create .git");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/noxa-rag\n")
+            .expect("write HEAD");
+        let nested = tmp.path().join("src/foo.rs");
+        fs::create_dir_all(nested.parent().unwrap()).expect("create src");
+        fs::write(&nested, "x").expect("write file");
+        assert_eq!(
+            detect_git_branch(&nested),
+            Some("feature/noxa-rag".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_git_branch_returns_none_on_detached_head() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let git_dir = tmp.path().join(".git");
+        fs::create_dir_all(&git_dir).expect("create .git");
+        // Detached HEAD: just a commit SHA, no "ref: refs/heads/" prefix.
+        fs::write(git_dir.join("HEAD"), "abc123def456\n").expect("write HEAD");
+        let file = tmp.path().join("foo.txt");
+        fs::write(&file, "x").expect("write file");
+        assert_eq!(detect_git_branch(&file), None);
     }
 }
