@@ -541,6 +541,54 @@ impl VectorStore for QdrantStore {
             .unwrap_or(0))
     }
 
+    /// Check whether any point exists with both `url` == `url` AND `content_hash` == `hash`.
+    ///
+    /// Used by the startup delta scan so the daemon can skip re-indexing files whose
+    /// content has not changed since the last run.  Returns `false` when `hash` is empty
+    /// (no stored hash means we cannot skip).
+    async fn url_with_hash_exists(&self, url: &str, hash: &str) -> Result<bool, RagError> {
+        if hash.is_empty() {
+            return Ok(false);
+        }
+        let normalized = normalize_url(url);
+        let endpoint = format!(
+            "{}/collections/{}/points/count",
+            self.base_url, self.collection
+        );
+        let body = serde_json::json!({
+            "filter": {
+                "must": [
+                    { "key": "url", "match": { "value": normalized } },
+                    { "key": "content_hash", "match": { "value": hash } }
+                ]
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&endpoint)
+            .timeout(std::time::Duration::from_secs(5))
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let preview = &text[..text.len().min(512)];
+            tracing::warn!(
+                status,
+                url = %normalized,
+                body = preview,
+                "url_with_hash_exists count request failed — assuming not indexed"
+            );
+            return Ok(false);
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        Ok(json["result"]["count"].as_u64().unwrap_or(0) > 0)
+    }
+
     fn name(&self) -> &str {
         "qdrant"
     }

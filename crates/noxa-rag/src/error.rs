@@ -20,6 +20,8 @@ pub enum RagError {
     Http(#[from] reqwest::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("parse error: {0}")]
+    Parse(String),
     #[error("error: {0}")]
     Generic(String),
 }

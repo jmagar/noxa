@@ -18,6 +18,10 @@ pub trait VectorStore: Send + Sync {
     async fn search(&self, vector: &[f32], limit: usize) -> Result<Vec<SearchResult>, RagError>;
     /// Return the total number of indexed points in the collection.
     async fn collection_point_count(&self) -> Result<u64, RagError>;
+    /// Return true iff there is at least one point with both `url` and `content_hash`
+    /// matching the given values. Used by the startup delta scan to skip already-indexed
+    /// files whose content has not changed.
+    async fn url_with_hash_exists(&self, url: &str, hash: &str) -> Result<bool, RagError>;
     fn name(&self) -> &str;
 }
 

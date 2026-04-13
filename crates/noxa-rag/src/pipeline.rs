@@ -285,6 +285,95 @@ impl Pipeline {
             tracing::info!("fs watcher bridge exiting");
         });
 
+        // Startup scan: index files already present in watch_dir when the daemon starts.
+        //
+        // Runs concurrently with the watcher so new events are not missed during the scan.
+        // collect_indexable_paths uses std::fs (sync) — MUST run in spawn_blocking to avoid
+        // stalling the tokio executor on NFS/CIFS with thousands of files.
+        //
+        // Delta detection: before enqueuing a path, compute SHA-256 of its bytes and check
+        // Qdrant.  If a point with the same URL + content_hash already exists, the file has
+        // not changed and is skipped. This prevents re-indexing the entire watch_dir on
+        // every daemon restart.
+        let scan_tx = tx.clone();
+        let scan_store = self.store.clone();
+        let scan_shutdown = self.shutdown.clone();
+        let scan_watch_dir = watch_dir.clone();
+
+        let startup_handle = tokio::spawn(async move {
+            let paths = match tokio::task::spawn_blocking({
+                let dir = scan_watch_dir.clone();
+                move || collect_indexable_paths(&dir)
+            })
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(error = %e, "startup scan: collect_indexable_paths panicked");
+                    return;
+                }
+            };
+
+            let total = paths.len();
+            tracing::info!(count = total, "startup scan: checking files for delta");
+
+            let mut queued = 0usize;
+            let mut skipped = 0usize;
+
+            for path in paths {
+                if scan_shutdown.is_cancelled() {
+                    break;
+                }
+
+                // Read file + compute URL+hash in spawn_blocking (sync file I/O).
+                let path2 = path.clone();
+                let hash_and_url = tokio::task::spawn_blocking(move || {
+                    startup_scan_key(&path2)
+                })
+                .await
+                .ok()
+                .flatten();
+
+                let (hash, url) = match hash_and_url {
+                    Some(t) => t,
+                    None => {
+                        // Cannot determine URL/hash — enqueue conservatively.
+                        tracing::debug!(path = %path.display(), "startup scan: no url/hash, queuing");
+                        let span = tracing::info_span!("index_job", path = %path.display());
+                        tokio::select! {
+                            _ = scan_tx.send(IndexJob { path, span }) => {}
+                            _ = scan_shutdown.cancelled() => { break; }
+                        }
+                        queued += 1;
+                        continue;
+                    }
+                };
+
+                // Delta check — skip files already indexed with the same content.
+                // On Qdrant error: conservative (assume not indexed, re-enqueue).
+                match scan_store.url_with_hash_exists(&url, &hash).await {
+                    Ok(true) => {
+                        skipped += 1;
+                        tracing::debug!(
+                            path = %path.display(),
+                            url = %url,
+                            "startup scan: already indexed, skipping"
+                        );
+                    }
+                    Ok(false) | Err(_) => {
+                        let span = tracing::info_span!("index_job", path = %path.display());
+                        tokio::select! {
+                            _ = scan_tx.send(IndexJob { path, span }) => {}
+                            _ = scan_shutdown.cancelled() => { break; }
+                        }
+                        queued += 1;
+                    }
+                }
+            }
+
+            tracing::info!(total, queued, skipped, "startup scan complete");
+        });
+
         // Heartbeat: log pipeline health every 60s.
         let heartbeat_counters = self.counters.clone();
         let heartbeat_shutdown = self.shutdown.clone();
@@ -315,9 +404,10 @@ impl Pipeline {
         // Drop tx so workers drain their queues and exit.
         drop(tx);
 
-        // Wait for bridge and heartbeat to finish.
+        // Wait for bridge, heartbeat, and startup scan to finish.
         let _ = bridge_handle.await;
         let _ = heartbeat_handle.await;
+        let _ = startup_handle.await;
 
         // Wait for all workers to drain — 10s hard limit to prevent a stuck
         // job from blocking indefinite shutdown.
@@ -487,6 +577,440 @@ fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     Ok(())
 }
 
+// ─── Format dispatch ─────────────────────────────────────────────────────────
+
+/// Parse a local file into a normalised `ExtractionResult` for the RAG pipeline.
+///
+/// Dispatches to the right extractor based on file extension.  Heavy / CPU-bound
+/// formats (PDF, DOCX, ipynb) run inside `spawn_blocking` so the tokio executor
+/// is never stalled.  All formats set:
+///   - `metadata.url`         = file:// URI (percent-encoded, via url crate)
+///   - `metadata.domain`      = NOT set here — "local" sentinel set in process_job
+///   - `metadata.source_type` = "file"
+///   - `metadata.title`       = filename stem (unless the format provides a better one)
+///
+/// Returns `Err(RagError::Parse(...))` on unrecoverable format errors.
+async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, RagError> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("json");
+    let file_url = url::Url::from_file_path(path)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    let title = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    // Helper: bytes → UTF-8 String with replacement for invalid sequences.
+    let as_text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+
+    match ext {
+        // ── JSON ExtractionResult ──────────────────────────────────────────────
+        "json" => serde_json::from_slice::<ExtractionResult>(&bytes)
+            .map_err(|e| RagError::Parse(format!("JSON parse failed: {e}"))),
+
+        // ── Plain text group (.md .txt .log .rst .org .yaml .yml .toml) ───────
+        "md" | "rst" | "org" => {
+            let content = as_text(&bytes);
+            let word_count = content.split_whitespace().count();
+            Ok(make_text_result(content, String::new(), file_url, Some(title), "file", word_count))
+        }
+        "txt" | "yaml" | "yml" | "toml" => {
+            let content = as_text(&bytes);
+            let word_count = content.split_whitespace().count();
+            Ok(make_text_result(
+                content.clone(),
+                content,
+                file_url,
+                Some(title),
+                "file",
+                word_count,
+            ))
+        }
+        "log" => {
+            let raw = as_text(&bytes);
+            let stripped = strip_ansi_escapes::strip_str(&raw);
+            let word_count = stripped.split_whitespace().count();
+            Ok(make_text_result(
+                stripped.clone(),
+                stripped,
+                file_url,
+                Some(title),
+                "file",
+                word_count,
+            ))
+        }
+
+        // ── HTML ───────────────────────────────────────────────────────────────
+        "html" | "htm" => {
+            let html = as_text(&bytes);
+            let url_for_extract = file_url.clone();
+            tokio::task::spawn_blocking(move || -> Result<ExtractionResult, RagError> {
+                let mut r = noxa_core::extract(&html, Some(&url_for_extract))
+                    .map_err(|e| RagError::Parse(format!("HTML extract: {e}")))?;
+                r.metadata.url = Some(url_for_extract);
+                r.metadata.source_type = Some("file".to_string());
+                Ok(r)
+            })
+            .await
+            .map_err(|e| RagError::Parse(format!("HTML spawn_blocking: {e}")))?
+        }
+
+        // ── Jupyter Notebook ──────────────────────────────────────────────────
+        "ipynb" => {
+            tokio::task::spawn_blocking(move || parse_ipynb(&bytes, file_url, title))
+                .await
+                .map_err(|e| RagError::Parse(format!("ipynb spawn_blocking: {e}")))?
+        }
+
+        // ── PDF ────────────────────────────────────────────────────────────────
+        "pdf" => {
+            tokio::task::spawn_blocking(move || parse_pdf(&bytes, file_url, title))
+                .await
+                .map_err(|e| RagError::Parse(format!("PDF spawn_blocking: {e}")))?
+        }
+
+        // ── Office binary formats (ZIP-based) ─────────────────────────────────
+        "docx" => {
+            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "docx"))
+                .await
+                .map_err(|e| RagError::Parse(format!("DOCX spawn_blocking: {e}")))?
+        }
+        "odt" => {
+            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "odt"))
+                .await
+                .map_err(|e| RagError::Parse(format!("ODT spawn_blocking: {e}")))?
+        }
+        "pptx" => {
+            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "pptx"))
+                .await
+                .map_err(|e| RagError::Parse(format!("PPTX spawn_blocking: {e}")))?
+        }
+
+        // ── Structured text (.jsonl .xml .opml .rss .atom) ────────────────────
+        "jsonl" => {
+            let content = as_text(&bytes);
+            let text = content
+                .lines()
+                .filter_map(|line| {
+                    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+                    ["text", "content", "body", "message", "value"]
+                        .iter()
+                        .find_map(|k| v[k].as_str().map(str::to_string))
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let word_count = text.split_whitespace().count();
+            Ok(make_text_result(text.clone(), text, file_url, Some(title), "file", word_count))
+        }
+        "xml" | "opml" | "rss" | "atom" => {
+            let content = as_text(&bytes);
+            let text = extract_xml_text(&content);
+            let word_count = text.split_whitespace().count();
+            Ok(make_text_result(text.clone(), text, file_url, Some(title), "file", word_count))
+        }
+
+        // ── Subtitle / transcript (.vtt .srt) ─────────────────────────────────
+        "vtt" | "srt" => {
+            let content = as_text(&bytes);
+            let text = strip_subtitle_timestamps(&content);
+            let word_count = text.split_whitespace().count();
+            Ok(make_text_result(text.clone(), text, file_url, Some(title), "file", word_count))
+        }
+
+        // ── Unknown / unsupported ──────────────────────────────────────────────
+        other => Err(RagError::Parse(format!("unsupported file extension: .{other}"))),
+    }
+}
+
+/// Build a minimal ExtractionResult from pre-extracted text.
+fn make_text_result(
+    markdown: String,
+    plain_text: String,
+    url: String,
+    title: Option<String>,
+    source_type: &str,
+    word_count: usize,
+) -> ExtractionResult {
+    ExtractionResult {
+        metadata: noxa_core::Metadata {
+            title,
+            description: None,
+            author: None,
+            published_date: None,
+            language: None,
+            url: Some(url),
+            site_name: None,
+            image: None,
+            favicon: None,
+            word_count,
+            content_hash: None, // filled by process_job if needed
+            source_type: Some(source_type.to_string()),
+            file_path: None, // filled by process_job
+            last_modified: None, // filled by process_job
+            is_truncated: None,
+            technologies: Vec::new(),
+            seed_url: None,
+            crawl_depth: None,
+            search_query: None,
+            fetched_at: None,
+        },
+        content: noxa_core::Content {
+            markdown,
+            plain_text,
+            links: Vec::new(),
+            images: Vec::new(),
+            code_blocks: Vec::new(),
+            raw_html: None,
+        },
+        domain_data: None,
+        structured_data: Vec::new(),
+    }
+}
+
+/// Parse a Jupyter Notebook (.ipynb) — must run in spawn_blocking.
+///
+/// Extracts source from code + markdown cells only.
+/// **Strips cell outputs** to prevent indexing of stack traces, env dumps, or PII.
+fn parse_ipynb(bytes: &[u8], url: String, title: String) -> Result<ExtractionResult, RagError> {
+    let v: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| RagError::Parse(format!("ipynb JSON parse: {e}")))?;
+
+    let cells = v["cells"]
+        .as_array()
+        .ok_or_else(|| RagError::Parse("ipynb: missing 'cells' array".to_string()))?;
+
+    let mut parts: Vec<String> = Vec::new();
+    for cell in cells {
+        let cell_type = cell["cell_type"].as_str().unwrap_or("");
+        if !matches!(cell_type, "markdown" | "code") {
+            continue;
+        }
+        // source is either a string or an array of strings.
+        let source = match &cell["source"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(lines) => lines
+                .iter()
+                .filter_map(|l| l.as_str())
+                .collect::<String>(),
+            _ => continue,
+        };
+        // Skip empty cells.
+        let trimmed = source.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+        // Outputs are intentionally NOT indexed (may contain PII/env dumps).
+    }
+
+    let text = parts.join("\n\n");
+    let word_count = text.split_whitespace().count();
+    Ok(make_text_result(text.clone(), text, url, Some(title), "notebook", word_count))
+}
+
+/// Extract text from a PDF — must run in spawn_blocking.
+fn parse_pdf(bytes: &[u8], url: String, title: String) -> Result<ExtractionResult, RagError> {
+    let result = noxa_pdf::extract_pdf(
+        bytes,
+        noxa_pdf::PdfMode::Auto,
+    )
+    .map_err(|e| RagError::Parse(format!("PDF extract: {e}")))?;
+    let text = noxa_pdf::to_markdown(&result);
+    let word_count = text.split_whitespace().count();
+    Ok(make_text_result(text.clone(), text, url, Some(title), "file", word_count))
+}
+
+/// Shared ZIP-based office parser for DOCX, ODT, PPTX — must run in spawn_blocking.
+///
+/// Uses noxa-fetch's tested DOCX extractor for .docx.
+/// ODT and PPTX are extracted via ZIP text-node scan (sufficient for indexing).
+///
+/// **Decompressed-size guard**: entries > 100 MiB or archives > 1 000 entries
+/// are rejected to prevent zip-bomb DoS.
+fn parse_office_zip(
+    bytes: &[u8],
+    url: String,
+    title: String,
+    ext: &str,
+) -> Result<ExtractionResult, RagError> {
+    use std::io::Read;
+
+    const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024; // 100 MiB decompressed
+    const MAX_ENTRIES: usize = 1_000;
+
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| RagError::Parse(format!("{ext} ZIP open: {e}")))?;
+
+    if archive.len() > MAX_ENTRIES {
+        return Err(RagError::Parse(format!(
+            "{ext}: archive has {} entries (max {MAX_ENTRIES}) — possible zip bomb",
+            archive.len()
+        )));
+    }
+
+    // For DOCX, delegate to the tested noxa-fetch extractor.
+    if ext == "docx" {
+        let result = noxa_fetch::document::extract_document(bytes, noxa_fetch::document::DocType::Docx)
+            .map_err(|e| RagError::Parse(format!("DOCX extract: {e}")))?;
+        let mut r = result;
+        r.metadata.url = Some(url);
+        r.metadata.source_type = Some("file".to_string());
+        if r.metadata.title.is_none() {
+            r.metadata.title = Some(title);
+        }
+        return Ok(r);
+    }
+
+    // ODT and PPTX: scan all XML entries for text nodes.
+    // ODT: content.xml; PPTX: ppt/slides/slide*.xml
+    let target_prefix = match ext {
+        "odt" => "content",
+        "pptx" => "ppt/slides/slide",
+        _ => "",
+    };
+
+    let mut text_parts: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| RagError::Parse(format!("{ext} entry {i}: {e}")))?;
+
+        if entry.size() > MAX_ENTRY_SIZE {
+            return Err(RagError::Parse(format!(
+                "{ext}: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
+                entry.name(),
+                entry.size()
+            )));
+        }
+
+        let name = entry.name().to_string();
+        if !name.ends_with(".xml") {
+            continue;
+        }
+        if !target_prefix.is_empty() && !name.contains(target_prefix) {
+            continue;
+        }
+
+        let mut xml_buf = String::new();
+        entry
+            .read_to_string(&mut xml_buf)
+            .map_err(|e| RagError::Parse(format!("{ext} read '{name}': {e}")))?;
+
+        // Simple text-node extraction via quick-xml.
+        let fragment = extract_xml_text(&xml_buf);
+        if !fragment.trim().is_empty() {
+            text_parts.push(fragment);
+        }
+    }
+
+    let text = text_parts.join("\n\n");
+    let word_count = text.split_whitespace().count();
+    Ok(make_text_result(
+        text.clone(),
+        text,
+        url,
+        Some(title),
+        "file",
+        word_count,
+    ))
+}
+
+/// Extract plain text from XML/OPML/RSS/Atom by collecting all text nodes.
+/// Strips all tags; trims and deduplicates blank lines.
+fn extract_xml_text(xml: &str) -> String {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_str(xml);
+    let mut parts: Vec<String> = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Text(e)) => {
+                if let Ok(text) = e.unescape() {
+                    let t = text.trim().to_string();
+                    if !t.is_empty() {
+                        parts.push(t);
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+
+    parts.join("\n")
+}
+
+/// Strip timestamp / cue header lines from WebVTT and SRT subtitles.
+/// Keeps only the spoken text lines.
+fn strip_subtitle_timestamps(content: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Skip WEBVTT header, blank lines as separators, cue timecodes,
+        // numeric cue identifiers (SRT), and NOTE/STYLE/REGION blocks.
+        if trimmed.is_empty()
+            || trimmed.starts_with("WEBVTT")
+            || trimmed.starts_with("NOTE")
+            || trimmed.starts_with("STYLE")
+            || trimmed.starts_with("REGION")
+            || trimmed.contains("-->")
+            || trimmed.chars().all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        lines.push(trimmed);
+    }
+    lines.join(" ")
+}
+
+/// Compute the (content_hash, url) key used by the startup delta scan.
+///
+/// For `.json` ExtractionResult files: peeks at `metadata.url` and `metadata.content_hash`
+/// from inside the JSON (fast, avoids full deserialisation of large markdown content).
+/// Falls back to file:// URL + SHA-256 of file bytes if the JSON lacks a URL.
+///
+/// For all other formats: returns file:// URL + SHA-256 of file bytes.
+///
+/// Returns `None` when the file cannot be read or a file:// URL cannot be constructed.
+///
+/// **Must be called inside `spawn_blocking`** — this function reads from disk synchronously.
+fn startup_scan_key(path: &std::path::Path) -> Option<(String, String)> {
+    use sha2::Digest;
+
+    let bytes = std::fs::read(path).ok()?;
+
+    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        // Partial deserialisation: only decode the metadata header, not the full content.
+        #[derive(serde::Deserialize)]
+        struct Q {
+            metadata: QM,
+        }
+        #[derive(serde::Deserialize)]
+        struct QM {
+            url: Option<String>,
+            content_hash: Option<String>,
+        }
+        if let Ok(q) = serde_json::from_slice::<Q>(&bytes) {
+            let hash = q
+                .metadata
+                .content_hash
+                .unwrap_or_else(|| format!("{:x}", sha2::Sha256::digest(&bytes)));
+            if let Some(url) = q.metadata.url {
+                if !url.is_empty() {
+                    return Some((hash, url));
+                }
+            }
+        }
+    }
+
+    // Non-JSON or JSON without a stored URL: use file:// + SHA-256 of file bytes.
+    let hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let url = url::Url::from_file_path(path).ok()?.to_string();
+    Some((hash, url))
+}
+
 /// Walk up the directory tree from `file_path` to find a `.git/HEAD` file.
 ///
 /// Reads the HEAD ref to extract the branch name: `ref: refs/heads/<branch>`.
@@ -584,28 +1108,20 @@ async fn process_job(
         return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
     }
 
-    let mut content = String::with_capacity(size as usize);
-    file.read_to_string(&mut content).await?;
+    // Read as bytes so binary formats (PDF, DOCX, PPTX, ODT) are handled correctly.
+    // Text formats convert bytes → String inside parse_file with UTF-8 replacement.
+    let mut file_bytes: Vec<u8> = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut file_bytes).await?;
     let parse_ms = t0.elapsed().as_millis() as u64;
 
     // ── 2. Parse / ingest by file format ─────────────────────────────────────
-    let file_ext = job.path.extension().and_then(|e| e.to_str()).unwrap_or("json");
-    let mut result: ExtractionResult = match file_ext {
-        "json" => match serde_json::from_str(&content) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(path = ?job.path, error = %e, "json parse failed, skipping");
-                append_failed_job(&job.path, &e, config).await;
-                return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
-            }
-        },
-        ext => {
-            // Non-JSON formats require ingester.rs (noxa-iua — pending).
-            tracing::warn!(
-                path = ?job.path,
-                ext,
-                "non-JSON format not yet supported (ingester.rs pending noxa-iua)"
-            );
+    // parse_file() dispatches to the right extractor for each format and returns
+    // a normalized ExtractionResult.  Non-JSON formats run in spawn_blocking.
+    let mut result: ExtractionResult = match parse_file(&job.path, file_bytes).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(path = ?job.path, error = %e, "parse failed, skipping");
+            append_failed_job(&job.path, &e, config).await;
             return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
         }
     };

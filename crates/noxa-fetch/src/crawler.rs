@@ -319,13 +319,18 @@ impl Crawler {
             let mut next_frontier: Vec<(String, usize)> = Vec::new();
 
             for handle in handles {
-                let page = match handle.await {
+                let mut page = match handle.await {
                     Ok(page) => page,
                     Err(e) => {
                         warn!(error = %e, "crawl task panicked");
                         continue;
                     }
                 };
+                // Stamp provenance fields on each successfully extracted page.
+                if let Some(ref mut extraction) = page.extraction {
+                    extraction.metadata.seed_url = Some(start_url.to_string());
+                    extraction.metadata.crawl_depth = Some(page.depth as u32);
+                }
                 let depth = page.depth;
 
                 if depth < self.config.max_depth

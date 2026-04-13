@@ -12,6 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use noxa_pdf::PdfMode;
 use rand::seq::SliceRandom;
 use tokio::sync::Semaphore;
@@ -276,6 +277,18 @@ impl FetchClient {
     /// Fetch a URL then extract structured content with custom extraction options.
     #[instrument(skip(self, options), fields(url = %url))]
     pub async fn fetch_and_extract_with_options(
+        &self,
+        url: &str,
+        options: &noxa_core::ExtractionOptions,
+    ) -> Result<noxa_core::ExtractionResult, FetchError> {
+        let mut result = self.fetch_and_extract_inner(url, options).await?;
+        result.metadata.fetched_at = Some(Utc::now().to_rfc3339());
+        Ok(result)
+    }
+
+    /// Inner implementation — callers should use [`fetch_and_extract_with_options`] which
+    /// stamps `fetched_at` on the returned metadata.
+    async fn fetch_and_extract_inner(
         &self,
         url: &str,
         options: &noxa_core::ExtractionOptions,
@@ -595,6 +608,10 @@ fn pdf_to_extraction_result(pdf: &noxa_pdf::PdfResult, url: &str) -> noxa_core::
             last_modified: None,
             is_truncated: None,
             technologies: Vec::new(),
+            seed_url: None,
+            crawl_depth: None,
+            search_query: None,
+            fetched_at: None,
         },
         content: noxa_core::Content {
             markdown,

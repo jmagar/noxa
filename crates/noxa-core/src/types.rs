@@ -46,6 +46,18 @@ pub struct Metadata {
     /// Detected tech stack (e.g. ["React", "TypeScript", "Tailwind"]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub technologies: Vec<String>,
+    /// The root URL a crawl started from (populated by noxa-fetch crawler).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_url: Option<String>,
+    /// Number of hops from seed_url (0 = seed page itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crawl_depth: Option<u32>,
+    /// Query string if this page was fetched via a search operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_query: Option<String>,
+    /// ISO 8601 UTC timestamp of when this page was fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

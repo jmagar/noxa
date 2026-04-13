@@ -155,6 +155,7 @@ noxa-cli (writes .json) → watch_dir
 
 ## Notes
 
+- **Recursive watch**: The daemon watches `watch_dir` recursively, so crawl output saved under nested path-based directories is indexed automatically.
 - **Vim/Emacs compatibility**: The daemon watches all filesystem events (not just Create/Modify). Atomic saves via rename are detected correctly.
 - **Idempotent indexing**: Re-indexing the same URL deletes old chunks first (delete-before-upsert), so chunk count changes are handled correctly.
 - **Point IDs**: UUID v5 deterministic — same URL + chunk index always produces the same Qdrant point ID.

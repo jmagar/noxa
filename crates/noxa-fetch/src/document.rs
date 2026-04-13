@@ -116,6 +116,10 @@ pub fn extract_document(
             last_modified: None,
             is_truncated: None,
             technologies: Vec::new(),
+            seed_url: None,
+            crawl_depth: None,
+            search_query: None,
+            fetched_at: None,
         },
         content: noxa_core::Content {
             markdown,

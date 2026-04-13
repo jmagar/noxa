@@ -83,6 +83,10 @@ mod tests {
                 last_modified: None,
                 is_truncated: None,
                 technologies: Vec::new(),
+                seed_url: None,
+                crawl_depth: None,
+                search_query: None,
+                fetched_at: None,
             },
             content: Content {
                 markdown: markdown.into(),
@@ -387,6 +391,10 @@ mod tests {
                 last_modified: None,
                 is_truncated: None,
                 technologies: Vec::new(),
+                seed_url: None,
+                crawl_depth: None,
+                search_query: None,
+                fetched_at: None,
             },
             content: Content {
                 markdown: "Just content".into(),

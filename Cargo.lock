@@ -2260,6 +2260,7 @@ version = "0.4.0"
 dependencies = [
  "bytes",
  "calamine",
+ "chrono",
  "http",
  "noxa-core",
  "noxa-pdf",
@@ -2331,9 +2332,15 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "noxa-core",
+ "noxa-fetch",
+ "noxa-pdf",
+ "quick-xml 0.37.5",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "strip-ansi-escapes",
+ "tempfile",
  "text-splitter",
  "thiserror",
  "tokenizers",
@@ -2344,6 +2351,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -3378,6 +3386,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3489,6 +3508,15 @@ dependencies = [
  "phf_shared",
  "proc-macro2",
  "quote",
+]
+
+[[package]]
+name = "strip-ansi-escapes"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a8f8038e7e7969abb3f1b7c2a811225e9296da208539e0f79c5251d6cac0025"
+dependencies = [
+ "vte",
 ]
 
 [[package]]
@@ -4102,6 +4130,15 @@ name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
+
+[[package]]
+name = "vte"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "231fdcd7ef3037e8330d8e17e61011a2c244126acc0a982f4040ac3f9f0bc077"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "walkdir"

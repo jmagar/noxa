@@ -12,6 +12,8 @@ path = "src/bin/noxa-rag-daemon.rs"
 [dependencies]
 noxa-core = { workspace = true }
 noxa-pdf = { path = "../noxa-pdf" }
+# noxa-fetch provides extract_document() for DOCX/XLSX/CSV — reused rather than re-implemented.
+noxa-fetch = { workspace = true }
 
 # Multi-format ingestion
 zip = "2"                         # DOCX, ODT, PPTX (ZIP archives) — matches noxa-fetch version
@@ -47,6 +49,9 @@ tokenizers = "0.21"
 
 # UUID v5 for deterministic point IDs
 uuid = { version = "1", features = ["v5", "serde"] }
+
+# SHA-256 for startup scan delta detection (file content hashing)
+sha2 = "0.10"
 
 # Filesystem watcher
 notify = "6"
