@@ -14,8 +14,9 @@
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use notify::RecursiveMode;
@@ -33,6 +34,18 @@ use crate::embed::DynEmbedProvider;
 use crate::error::RagError;
 use crate::store::DynVectorStore;
 use crate::types::{Point, PointPayload};
+
+// ─── Session counters ─────────────────────────────────────────────────────────
+
+/// Shared session metrics updated by workers and read by the heartbeat/shutdown tasks.
+#[derive(Default)]
+struct SessionCounters {
+    files_indexed: AtomicUsize,
+    files_failed: AtomicUsize,
+    total_chunks: AtomicUsize,
+    total_embed_ms: AtomicU64,
+    total_upsert_ms: AtomicU64,
+}
 
 // ─── IndexJob ────────────────────────────────────────────────────────────────
 
@@ -54,6 +67,8 @@ pub struct Pipeline {
     pub shutdown: CancellationToken,
     /// Per-URL mutex: prevents concurrent delete-then-upsert races for the same URL.
     url_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Session-level metrics shared between workers, heartbeat, and shutdown tasks.
+    counters: Arc<SessionCounters>,
 }
 
 impl Pipeline {
@@ -71,6 +86,7 @@ impl Pipeline {
             tokenizer,
             shutdown,
             url_locks: Arc::new(DashMap::new()),
+            counters: Arc::new(SessionCounters::default()),
         }
     }
 
@@ -115,6 +131,7 @@ impl Pipeline {
             let tokenizer = self.tokenizer.clone();
             let config = self.config.clone();
             let url_locks = self.url_locks.clone();
+            let counters = self.counters.clone();
 
             let handle = tokio::spawn(async move {
                 tracing::debug!(worker_id, "index worker started");
@@ -127,12 +144,27 @@ impl Pipeline {
                         Some(job) => {
                             let span = job.span.clone();
                             async {
-                                if let Err(e) = process_job(
+                                match process_job(
                                     job, &embed, &store, &tokenizer, &config, &url_locks,
                                 )
                                 .await
                                 {
-                                    tracing::error!(error = %e, "index job failed");
+                                    Ok(stats) => {
+                                        counters.files_indexed.fetch_add(1, Ordering::Relaxed);
+                                        counters
+                                            .total_chunks
+                                            .fetch_add(stats.chunks, Ordering::Relaxed);
+                                        counters
+                                            .total_embed_ms
+                                            .fetch_add(stats.embed_ms, Ordering::Relaxed);
+                                        counters
+                                            .total_upsert_ms
+                                            .fetch_add(stats.upsert_ms, Ordering::Relaxed);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "index job failed");
+                                        counters.files_failed.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             }
                             .instrument(span)
@@ -208,12 +240,20 @@ impl Pipeline {
                                 let job = IndexJob { path, span };
                                 // Retry with a short sleep so shutdown can interrupt a full queue.
                                 let mut pending_job = job;
+                                let mut saturated_logged = false;
                                 loop {
                                     match tx_clone.try_send(pending_job) {
                                         Ok(()) => break,
                                         Err(tokio::sync::mpsc::error::TrySendError::Full(job)) => {
                                             if shutdown_clone.is_cancelled() {
                                                 break;
+                                            }
+                                            if !saturated_logged {
+                                                tracing::warn!(
+                                                    "job queue saturated (256/256), \
+                                                     backing off — embed/upsert catching up"
+                                                );
+                                                saturated_logged = true;
                                             }
                                             pending_job = job;
                                             std::thread::sleep(Duration::from_millis(10));
@@ -245,6 +285,29 @@ impl Pipeline {
             tracing::info!("fs watcher bridge exiting");
         });
 
+        // Heartbeat: log pipeline health every 60s.
+        let heartbeat_counters = self.counters.clone();
+        let heartbeat_shutdown = self.shutdown.clone();
+        let session_start = Instant::now();
+        let heartbeat_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // consume immediate first tick
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let uptime_m = session_start.elapsed().as_secs() / 60;
+                        tracing::info!(
+                            indexed = heartbeat_counters.files_indexed.load(Ordering::Relaxed),
+                            failed = heartbeat_counters.files_failed.load(Ordering::Relaxed),
+                            uptime_m,
+                            "pipeline alive"
+                        );
+                    }
+                    _ = heartbeat_shutdown.cancelled() => break,
+                }
+            }
+        });
+
         // Wait for cancellation signal.
         self.shutdown.cancelled().await;
         tracing::info!("shutdown signal received, draining pipeline");
@@ -252,8 +315,9 @@ impl Pipeline {
         // Drop tx so workers drain their queues and exit.
         drop(tx);
 
-        // Wait for bridge to finish.
+        // Wait for bridge and heartbeat to finish.
         let _ = bridge_handle.await;
+        let _ = heartbeat_handle.await;
 
         // Wait for all workers to drain — 10s hard limit to prevent a stuck
         // job from blocking indefinite shutdown.
@@ -271,6 +335,24 @@ impl Pipeline {
                 ));
             }
         }
+
+        // Shutdown session summary.
+        let indexed = self.counters.files_indexed.load(Ordering::Relaxed);
+        let failed = self.counters.files_failed.load(Ordering::Relaxed);
+        let chunks = self.counters.total_chunks.load(Ordering::Relaxed);
+        let embed_ms = self.counters.total_embed_ms.load(Ordering::Relaxed);
+        let upsert_ms = self.counters.total_upsert_ms.load(Ordering::Relaxed);
+        let avg_embed_ms = if indexed > 0 { embed_ms / indexed as u64 } else { 0 };
+        let avg_upsert_ms = if indexed > 0 { upsert_ms / indexed as u64 } else { 0 };
+        tracing::info!(
+            indexed,
+            failed,
+            chunks,
+            avg_embed_ms,
+            avg_upsert_ms,
+            duration_s = session_start.elapsed().as_secs(),
+            "session complete"
+        );
 
         Ok(())
     }
@@ -388,6 +470,13 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, config: 
 
 // ─── Core processing ─────────────────────────────────────────────────────────
 
+/// Per-job timing and volume stats reported back to the worker loop.
+struct JobStats {
+    chunks: usize,
+    embed_ms: u64,
+    upsert_ms: u64,
+}
+
 async fn process_job(
     job: IndexJob,
     embed: &DynEmbedProvider,
@@ -395,8 +484,11 @@ async fn process_job(
     tokenizer: &Arc<Tokenizer>,
     config: &RagConfig,
     url_locks: &Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-) -> Result<(), RagError> {
+) -> Result<JobStats, RagError> {
+    let job_start = Instant::now();
+
     // ── 1. Open file and check size from the same FD (TOCTOU fix) ────────────
+    let t0 = Instant::now();
     let mut file = tokio::fs::File::open(&job.path).await?;
     let size = file.metadata().await?.len();
 
@@ -407,11 +499,12 @@ async fn process_job(
             size,
             "file too large (>50MB), skipping"
         );
-        return Ok(());
+        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
     }
 
     let mut content = String::with_capacity(size as usize);
     file.read_to_string(&mut content).await?;
+    let parse_ms = t0.elapsed().as_millis() as u64;
 
     // ── 2. Parse JSON ─────────────────────────────────────────────────────────
     let result: ExtractionResult = match serde_json::from_str(&content) {
@@ -419,7 +512,7 @@ async fn process_job(
         Err(e) => {
             tracing::warn!(path = ?job.path, error = %e, "json parse failed, skipping");
             append_failed_job(&job.path, &e, config).await;
-            return Ok(());
+            return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
         }
     };
 
@@ -427,21 +520,25 @@ async fn process_job(
     let raw_url = result.metadata.url.as_deref().unwrap_or("").to_string();
     if let Err(e) = validate_url_scheme(&raw_url) {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
-        return Ok(());
+        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
     }
     // Normalize so the mutex key and stored payload match what delete_by_url queries.
     let url = crate::store::qdrant::normalize_url(&raw_url);
 
     // ── 4. Chunk ──────────────────────────────────────────────────────────────
+    let t1 = Instant::now();
     let chunks = chunker::chunk(&result, &config.chunker, tokenizer);
     if chunks.is_empty() {
         tracing::info!(url = %url, "no indexable content after chunking");
-        return Ok(());
+        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
     }
+    let chunk_ms = t1.elapsed().as_millis() as u64;
 
     // ── 5. Embed ──────────────────────────────────────────────────────────────
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+    let t2 = Instant::now();
     let vectors = embed.embed(&texts).await?;
+    let embed_ms = t2.elapsed().as_millis() as u64;
 
     if vectors.len() != chunks.len() {
         return Err(RagError::Embed {
@@ -458,6 +555,7 @@ async fn process_job(
     // Use the normalized URL for both the UUID seed and payload.url so that
     // delete_by_url (which also normalizes) matches the stored value for any
     // equivalent URL form (trailing slash, fragment, etc.).
+    let n_chunks = chunks.len();
     let points: Vec<Point> = chunks
         .iter()
         .zip(vectors.iter())
@@ -513,17 +611,52 @@ async fn process_job(
     //
     // Capture the result instead of returning immediately so we can always run
     // the eviction logic below, even on error paths.
-    let store_result = async {
-        store.delete_by_url(&url).await?;
-        if let Err(e) = store.upsert(points).await {
+    let t3 = Instant::now();
+    let store_result: Result<u64, RagError> = async {
+        let stale = store.delete_by_url(&url).await?;
+        let delete_ms = t3.elapsed().as_millis() as u64;
+
+        let t4 = Instant::now();
+        let upserted = store.upsert(points).await.map_err(|e| {
             tracing::error!(
                 url = %url,
                 error = %e,
                 "upsert failed after delete — document temporarily unindexed until next file event"
             );
-            return Err(e);
+            e
+        })?;
+        let upsert_ms = t4.elapsed().as_millis() as u64;
+
+        if stale > 0 {
+            tracing::info!(
+                url = %url,
+                format = "json",
+                chunks = upserted,
+                stale_deleted = stale,
+                parse_ms,
+                chunk_ms,
+                embed_ms,
+                delete_ms,
+                upsert_ms,
+                total_ms = job_start.elapsed().as_millis() as u64,
+                "reindexed"
+            );
+        } else {
+            tracing::info!(
+                url = %url,
+                format = "json",
+                chunks = upserted,
+                parse_ms,
+                chunk_ms,
+                embed_ms,
+                delete_ms,
+                upsert_ms,
+                total_ms = job_start.elapsed().as_millis() as u64,
+                "indexed"
+            );
         }
-        Ok(())
+
+        Ok(upsert_ms)
     }
     .await;
 
@@ -534,11 +667,9 @@ async fn process_job(
     drop(url_lock);
     url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
 
-    store_result?;
+    let upsert_ms = store_result?;
 
-    // ── 8. Done ───────────────────────────────────────────────────────────────
-    tracing::info!(url = %url, chunks = texts.len(), "indexed");
-    Ok(())
+    Ok(JobStats { chunks: n_chunks, embed_ms, upsert_ms })
 }
 
 #[cfg(test)]

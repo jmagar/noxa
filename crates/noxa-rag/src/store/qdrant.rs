@@ -39,6 +39,7 @@ struct CollectionNamedVectors {
     vectors: HashMap<String, CollectionVectors>,
 }
 
+
 #[derive(Serialize)]
 struct UpsertRequest {
     points: Vec<QdrantPoint>,
@@ -143,7 +144,10 @@ impl QdrantStore {
         let resp = self.client.put(&url).json(&body).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(RagError::Store(format!("create_collection failed: {text}")));
+            let preview = &text[..text.len().min(512)];
+            return Err(RagError::Store(format!(
+                "create_collection failed: {preview}"
+            )));
         }
 
         // Payload indexes for fast filtering.
@@ -177,8 +181,9 @@ impl QdrantStore {
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {
                 let text = r.text().await.unwrap_or_default();
+                let preview = &text[..text.len().min(512)];
                 return Err(RagError::Store(format!(
-                    "create_field_index({field}) failed: {text}"
+                    "create_field_index({field}) failed: {preview}"
                 )));
             }
         }
@@ -195,7 +200,10 @@ impl QdrantStore {
         let resp = self.client.get(&endpoint).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(RagError::Store(format!("collection_info failed: {text}")));
+            let preview = &text[..text.len().min(512)];
+            return Err(RagError::Store(format!(
+                "collection_info failed: {preview}"
+            )));
         }
         let info: CollectionInfoResponse = resp
             .json()
@@ -262,8 +270,9 @@ mod tests {
 
 #[async_trait]
 impl VectorStore for QdrantStore {
-    /// PUT /collections/{name}/points?wait=true in batches of 256.
-    async fn upsert(&self, points: Vec<Point>) -> Result<(), RagError> {
+    /// PUT /collections/{name}/points?wait=true. Returns the number of points written.
+    async fn upsert(&self, points: Vec<Point>) -> Result<usize, RagError> {
+        let n = points.len();
         let url = format!(
             "{}/collections/{}/points?wait=true",
             self.base_url, self.collection
@@ -344,15 +353,47 @@ impl VectorStore for QdrantStore {
 
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(RagError::Store(format!("upsert failed: {text}")));
+            let preview = &text[..text.len().min(512)];
+            return Err(RagError::Store(format!("upsert failed: {preview}")));
         }
 
-        Ok(())
+        Ok(n)
     }
 
     /// POST /collections/{name}/points/delete?wait=true filtered by url payload.
-    async fn delete_by_url(&self, url: &str) -> Result<(), RagError> {
+    ///
+    /// Queries the stale point count before deleting and returns it.
+    /// Qdrant's delete response does not include a deleted count, so we count first.
+    async fn delete_by_url(&self, url: &str) -> Result<u64, RagError> {
         let normalized = normalize_url(url);
+
+        // Count stale points before delete so callers can log reindex vs first-index.
+        let count_endpoint = format!(
+            "{}/collections/{}/points/count",
+            self.base_url, self.collection
+        );
+        let count_body = json!({
+            "filter": {
+                "must": [{ "key": "url", "match": { "value": normalized } }]
+            },
+            "exact": true
+        });
+        let stale_count: u64 = match self
+            .client
+            .post(&count_endpoint)
+            .json(&count_body)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v["result"]["count"].as_u64())
+                .unwrap_or(0),
+            _ => 0, // non-fatal: best-effort count
+        };
+
         let endpoint = format!(
             "{}/collections/{}/points/delete?wait=true",
             self.base_url, self.collection
@@ -366,10 +407,11 @@ impl VectorStore for QdrantStore {
         let resp = self.client.post(&endpoint).json(&body).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(RagError::Store(format!("delete_by_url failed: {text}")));
+            let preview = &text[..text.len().min(512)];
+            return Err(RagError::Store(format!("delete_by_url failed: {preview}")));
         }
 
-        Ok(())
+        Ok(stale_count)
     }
 
     /// POST /collections/{name}/points/search
@@ -388,7 +430,8 @@ impl VectorStore for QdrantStore {
         let resp = self.client.post(&url).json(&body).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(RagError::Store(format!("search failed: {text}")));
+            let preview = &text[..text.len().min(512)];
+            return Err(RagError::Store(format!("search failed: {preview}")));
         }
 
         let response: SearchResponse = resp.json().await?;
@@ -476,6 +519,26 @@ impl VectorStore for QdrantStore {
             .collect();
 
         Ok(results)
+    }
+
+    /// GET /collections/{name} → total vectors_count.
+    async fn collection_point_count(&self) -> Result<u64, RagError> {
+        let endpoint = format!("{}/collections/{}", self.base_url, self.collection);
+        let resp = self.client.get(&endpoint).send().await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let preview = &text[..text.len().min(512)];
+            return Err(RagError::Store(format!(
+                "collection_point_count failed: {preview}"
+            )));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RagError::Store(format!("collection_point_count parse failed: {e}")))?;
+        Ok(body["result"]["vectors_count"]
+            .as_u64()
+            .unwrap_or(0))
     }
 
     fn name(&self) -> &str {

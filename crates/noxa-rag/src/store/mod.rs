@@ -11,9 +11,13 @@ use crate::types::{Point, SearchResult};
 /// as concrete methods on each store struct, called during startup probes.
 #[async_trait]
 pub trait VectorStore: Send + Sync {
-    async fn upsert(&self, points: Vec<Point>) -> Result<(), RagError>;
-    async fn delete_by_url(&self, url: &str) -> Result<(), RagError>;
+    /// Upsert points into the store. Returns the number of points written.
+    async fn upsert(&self, points: Vec<Point>) -> Result<usize, RagError>;
+    /// Delete all points for a given URL. Returns the number of points deleted.
+    async fn delete_by_url(&self, url: &str) -> Result<u64, RagError>;
     async fn search(&self, vector: &[f32], limit: usize) -> Result<Vec<SearchResult>, RagError>;
+    /// Return the total number of indexed points in the collection.
+    async fn collection_point_count(&self) -> Result<u64, RagError>;
     fn name(&self) -> &str;
 }
 

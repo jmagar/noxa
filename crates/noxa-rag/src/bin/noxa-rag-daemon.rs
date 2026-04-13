@@ -14,6 +14,7 @@ use noxa_rag::{
     config::{EmbedProviderConfig, SourceConfig},
     load_config,
     pipeline::Pipeline,
+    VectorStore,
 };
 
 #[derive(Parser)]
@@ -104,6 +105,12 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let store = build_vector_store(&config, embed_dims)
         .await
         .map_err(|e| format!("vector store startup failed: {e}"))?;
+
+    // Log collection stats so we know if starting fresh or resuming.
+    match store.collection_point_count().await {
+        Ok(n) => tracing::info!(points = n, "collection ready"),
+        Err(e) => tracing::warn!(error = %e, "could not query collection point count"),
+    }
 
     // Load tokenizer.
     let tokenizer_model = match &config.embed_provider {
