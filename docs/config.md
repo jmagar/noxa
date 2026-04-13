@@ -104,9 +104,9 @@ If you need to turn one of those off temporarily, bypass the config file with `N
 | `format` | string | `markdown` | One of `markdown`, `json`, `text`, `llm`, `html` |
 | `metadata` | boolean | `false` | Include metadata in output |
 | `verbose` | boolean | `false` | Enable verbose logging |
-| `output_dir` | string or null | `null` | Write outputs to files in this directory instead of stdout |
+| `output_dir` | string or null | `null` | Write outputs under a `.noxa` subdirectory inside this base directory instead of stdout |
 
-When `output_dir` is set, noxa writes results to files instead of printing them for the modes that support file output:
+When `output_dir` is set, noxa writes results to files under `output_dir/.noxa` instead of printing them for the modes that support file output:
 
 - single URL extraction
 - multi-URL batch extraction
@@ -118,18 +118,18 @@ When `output_dir` is set, noxa writes results to files instead of printing them 
 - research reports
 - watch changes
 
-File names are derived from the URL or mode name, and the directory is created on demand.
+File names are derived from the URL or mode name, and the directory tree is created on demand.
 
 ### Output Directory Layout
 
-For URL-based output, noxa mirrors the URL path under `output_dir`:
+For URL-based output, noxa mirrors the URL path under `output_dir/.noxa`:
 
 | URL | Written file |
 |---|---|
-| `https://example.com/` | `output_dir/example_com/index.md` |
-| `https://example.com/docs/api` | `output_dir/docs/api.md` |
-| `https://example.com/docs/api/` | `output_dir/docs/api.md` |
-| `https://example.com/blog/post?id=123` | `output_dir/blog/post_id_123.md` |
+| `https://example.com/` | `output_dir/.noxa/example_com/index.md` |
+| `https://example.com/docs/api` | `output_dir/.noxa/docs/api.md` |
+| `https://example.com/docs/api/` | `output_dir/.noxa/docs/api.md` |
+| `https://example.com/blog/post?id=123` | `output_dir/.noxa/blog/post_id_123.md` |
 
 The extension comes from the selected output format:
 
@@ -153,11 +153,11 @@ https://example.com/blog/post
 Becomes:
 
 ```txt
-output_dir/api.md
-output_dir/blog/post.md
+output_dir/.noxa/api.md
+output_dir/.noxa/blog/post.md
 ```
 
-Mode-specific outputs use fixed filenames in the root of `output_dir`:
+Mode-specific outputs use fixed filenames in the root of `output_dir/.noxa`:
 
 | Mode | File |
 |---|---|

@@ -675,6 +675,11 @@ where
 }
 
 /// Write extraction output to a file inside `dir`, creating parent dirs as needed.
+fn effective_output_dir(dir: &Path) -> PathBuf {
+    dir.join(".noxa")
+}
+
+/// Write extraction output to a file inside `dir`, creating parent dirs as needed.
 fn write_to_file(dir: &Path, filename: &str, content: &str) -> Result<(), String> {
     // Reject path traversal and absolute paths before joining.
     if filename.split(['/', '\\']).any(|p| p == ".." || p == ".")
@@ -1659,16 +1664,17 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
     }
 
     if let Some(ref dir) = resolved.output_dir {
+        let output_dir = effective_output_dir(dir);
         let mut saved = 0usize;
         for page in &result.pages {
             if let Some(ref extraction) = page.extraction {
                 let filename = url_to_filename(&page.url, &resolved.format);
                 let content = format_output(extraction, &resolved.format, resolved.metadata);
-                write_to_file(dir, &filename, &content)?;
+                write_to_file(&output_dir, &filename, &content)?;
                 saved += 1;
             }
         }
-        eprintln!("Saved {saved} files to {}", dir.display());
+        eprintln!("Saved {saved} files to {}", output_dir.display());
     } else {
         print_crawl_output(&result, &resolved.format, resolved.metadata);
     }
@@ -1728,6 +1734,7 @@ async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
     }
 
     if let Some(ref dir) = resolved.output_dir {
+        let output_dir = effective_output_dir(dir);
         let content = format_map_output(&entries, &resolved.format);
         let filename = format!(
             "sitemap.{}",
@@ -1737,7 +1744,7 @@ async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
                 "txt"
             }
         );
-        write_to_file(dir, &filename, &content)?;
+        write_to_file(&output_dir, &filename, &content)?;
     } else {
         print_map_output(&entries, &resolved.format);
     }
@@ -1782,6 +1789,7 @@ async fn run_batch(
         .collect();
 
     if let Some(ref dir) = resolved.output_dir {
+        let output_dir = effective_output_dir(dir);
         let mut saved = 0usize;
         for r in &results {
             if let Ok(ref extraction) = r.result {
@@ -1790,11 +1798,11 @@ async fn run_batch(
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| url_to_filename(&r.url, &resolved.format));
                 let content = format_output(extraction, &resolved.format, resolved.metadata);
-                write_to_file(dir, &filename, &content)?;
+                write_to_file(&output_dir, &filename, &content)?;
                 saved += 1;
             }
         }
-        eprintln!("Saved {saved} files to {}", dir.display());
+        eprintln!("Saved {saved} files to {}", output_dir.display());
     } else {
         print_batch_output(&results, &resolved.format, resolved.metadata);
     }
@@ -2126,6 +2134,7 @@ async fn run_watch_multi(
             }
 
             if let Some(ref dir) = resolved.output_dir {
+                let output_dir = effective_output_dir(dir);
                 let payload = serde_json::json!({
                     "event": "watch_changes",
                     "check_number": check_number,
@@ -2136,7 +2145,7 @@ async fn run_watch_multi(
                 });
                 let filename = format!("watch-{}.json", ts.replace(':', "-"));
                 let content = serde_json::to_string_pretty(&payload).unwrap_or_default();
-                write_to_file(dir, &filename, &content)?;
+                write_to_file(&output_dir, &filename, &content)?;
             }
 
             // Fire --on-change once with all changes
@@ -2203,6 +2212,7 @@ async fn run_diff(
 
     let diff = noxa_core::diff::diff(&old, &new_result);
     if let Some(ref dir) = resolved.output_dir {
+        let output_dir = effective_output_dir(dir);
         let content = format_diff_output(&diff, &resolved.format);
         let filename = format!(
             "diff.{}",
@@ -2212,7 +2222,7 @@ async fn run_diff(
                 "txt"
             }
         );
-        write_to_file(dir, &filename, &content)?;
+        write_to_file(&output_dir, &filename, &content)?;
     } else {
         print_diff_output(&diff, &resolved.format);
     }
@@ -2229,7 +2239,8 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
     );
     let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
     if let Some(ref dir) = resolved.output_dir {
-        write_to_file(dir, "brand.json", &output)?;
+        let output_dir = effective_output_dir(dir);
+        write_to_file(&output_dir, "brand.json", &output)?;
     } else {
         println!("{output}");
     }
@@ -2365,13 +2376,14 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
 
     if let Some((output_str, file_format)) = file_output {
         if let Some(ref dir) = resolved.output_dir {
+            let output_dir = effective_output_dir(dir);
             let url = cli
                 .urls
                 .first()
                 .map(|u| normalize_url(u))
                 .unwrap_or_default();
             let filename = url_to_filename(&url, &file_format);
-            write_to_file(dir, &filename, &output_str)?;
+            write_to_file(&output_dir, &filename, &output_str)?;
         } else {
             println!("{output_str}");
         }
@@ -2488,6 +2500,7 @@ async fn run_batch_llm(
                 eprintln!("-> extracted {detail} ({:.1}s)", llm_elapsed.as_secs_f64());
 
                 if let Some(ref dir) = resolved.output_dir {
+                    let output_dir = effective_output_dir(dir);
                     let file_format = if cli.summarize.is_some() {
                         OutputFormat::Text
                     } else {
@@ -2497,7 +2510,7 @@ async fn run_batch_llm(
                         .get(url.as_str())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| url_to_filename(url, &file_format));
-                    write_to_file(dir, &filename, &output_str)?;
+                    write_to_file(&output_dir, &filename, &output_str)?;
                 } else {
                     println!("--- {url}");
                     println!("{output_str}");
@@ -2639,7 +2652,8 @@ async fn run_research(
 
                 let json = serde_json::to_string_pretty(&status_resp).unwrap_or_default();
                 if let Some(ref dir) = resolved.output_dir {
-                    write_to_file(dir, &filename, &json)?;
+                    let output_dir = effective_output_dir(dir);
+                    write_to_file(&output_dir, &filename, &json)?;
                 } else {
                     std::fs::write(&filename, &json)
                         .map_err(|e| format!("failed to write {filename}: {e}"))?;
@@ -2976,6 +2990,7 @@ async fn main() {
     match fetch_and_extract(&cli, &resolved).await {
         Ok(FetchOutput::Local(result)) => {
             if let Some(ref dir) = resolved.output_dir {
+                let output_dir = effective_output_dir(dir);
                 let url = cli
                     .urls
                     .first()
@@ -2985,7 +3000,7 @@ async fn main() {
                 let filename =
                     custom_name.unwrap_or_else(|| url_to_filename(&url, &resolved.format));
                 let content = format_output(&result, &resolved.format, resolved.metadata);
-                if let Err(e) = write_to_file(dir, &filename, &content) {
+                if let Err(e) = write_to_file(&output_dir, &filename, &content) {
                     eprintln!("error: {e}");
                     process::exit(1);
                 }
@@ -2995,6 +3010,7 @@ async fn main() {
         }
         Ok(FetchOutput::Cloud(resp)) => {
             if let Some(ref dir) = resolved.output_dir {
+                let output_dir = effective_output_dir(dir);
                 let url = cli
                     .urls
                     .first()
@@ -3004,7 +3020,7 @@ async fn main() {
                 let filename =
                     custom_name.unwrap_or_else(|| url_to_filename(&url, &resolved.format));
                 let content = format_cloud_output(&resp, &resolved.format);
-                if let Err(e) = write_to_file(dir, &filename, &content) {
+                if let Err(e) = write_to_file(&output_dir, &filename, &content) {
                     eprintln!("error: {e}");
                     process::exit(1);
                 }
@@ -3140,6 +3156,23 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(write_to_file(&dir, "sub/file.md", "hello").is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_effective_output_dir_nests_under_dot_noxa() {
+        let dir = std::path::PathBuf::from("out");
+        assert_eq!(effective_output_dir(&dir), dir.join(".noxa"));
+    }
+
+    #[test]
+    fn test_write_to_file_uses_effective_output_dir() {
+        let base = std::env::temp_dir().join("noxa_effective_output_dir_test");
+        let dir = effective_output_dir(&base);
+        let _ = std::fs::remove_dir_all(&base);
+        write_to_file(&dir, "nested/deep/file.md", "hello").unwrap();
+        let content = std::fs::read_to_string(base.join(".noxa/nested/deep/file.md")).unwrap();
+        assert_eq!(content, "hello");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

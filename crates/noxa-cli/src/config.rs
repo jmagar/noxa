@@ -383,6 +383,15 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_keeps_cli_output_dir_raw_base_path() {
+        let cli = crate::Cli::parse_from(["noxa", "--output-dir", "out"]);
+        let matches = crate::Cli::command().get_matches_from(["noxa", "--output-dir", "out"]);
+        let cfg = NoxaConfig::default();
+        let resolved = resolve(&cli, &matches, &cfg);
+        assert_eq!(resolved.output_dir, Some(PathBuf::from("out")));
+    }
+
+    #[test]
     fn test_resolve_prefers_config_llm_provider_over_env_default() {
         let resolved =
             resolve_optional_setting(false, None, Some("gemini".into()), Some("ollama".into()));

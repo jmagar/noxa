@@ -37,6 +37,27 @@ fn parse_browser(browser: Option<&str>) -> noxa_fetch::BrowserProfile {
     }
 }
 
+/// Validate an operator-supplied base URL (for example `SEARXNG_URL`).
+/// This only enforces non-empty `http`/`https` URLs with a host present.
+/// Unlike fetched target URLs, localhost/private addresses are allowed.
+fn parse_http_url(url: &str) -> Result<Url, String> {
+    if url.is_empty() {
+        return Err("Invalid URL: must not be empty".into());
+    }
+
+    let parsed = Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => {
+            return Err(format!(
+                "Invalid URL: scheme '{s}' not allowed, must start with http:// or https://"
+            ));
+        }
+    }
+    parsed.host_str().ok_or("Invalid URL: no host".to_string())?;
+    Ok(parsed)
+}
+
 /// Returns true if the IP address is loopback, private, link-local, or otherwise reserved.
 fn is_private_ip(ip: std::net::IpAddr) -> bool {
     match ip {
@@ -819,17 +840,14 @@ impl NoxaMcp {
                 return Ok(format!("No results found for: {}", params.query));
             }
 
-            let valid_results: Vec<&noxa_fetch::SearxngResult> = results
-                .iter()
-                .filter(|r| {
-                    if let Err(e) = validate_url(&r.url) {
-                        warn!("skipping result URL {}: {e}", r.url);
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .collect();
+            let mut valid_results: Vec<&noxa_fetch::SearxngResult> = Vec::new();
+            for result in &results {
+                if let Err(e) = validate_url(&result.url).await {
+                    warn!("skipping result URL {}: {e}", result.url);
+                } else {
+                    valid_results.push(result);
+                }
+            }
             let valid_urls: Vec<&str> = valid_results.iter().map(|r| r.url.as_str()).collect();
             let scraped = self
                 .fetch_client

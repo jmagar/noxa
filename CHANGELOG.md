@@ -5,12 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] — 2026-04-13
+
 ### Added
 - **Universal ContentStore**: every extraction automatically persists to `~/.noxa/content/{domain}/{path}.{md,json}`. Covers all output paths — HTML, PDF, DOCX/XLSX/CSV, Reddit JSON, LinkedIn JSON, crawl, batch, and MCP scrape/crawl/batch/extract/summarize/search.
 - **`--no-store` CLI flag / `NOXA_NO_STORE` env var**: opt out of automatic content persistence for a single run or globally.
 - **`store.read(url)`**: load a previously stored `ExtractionResult` by URL — used by the MCP diff tool's optional-snapshot path.
 - **`--search <QUERY>` CLI flag**: web search with result scraping. Uses SearXNG (`SEARXNG_URL`) for fully local, private search or falls back to the cloud API (`NOXA_API_KEY`). Flags: `--num-results` (1–50), `--no-scrape` (snippets only), `--num-scrape-concurrency`.
 - **MCP `diff` tool accepts optional `previous_snapshot`**: when omitted, the previous snapshot is loaded from the local ContentStore. If no stored snapshot exists, the current page is fetched and stored as the baseline and an informative error is returned — run `diff` again to get the actual comparison.
+- **`--output-dir` nests files under `.noxa/`**: files written via `--output-dir` are now placed in `<dir>/.noxa/` (e.g. `out/.noxa/`). Applies consistently to all output modes: crawl, map, batch, diff, brand, scrape, and watch.
+- **`parse_http_url` validator in MCP server**: operator-supplied base URLs (e.g. `SEARXNG_URL`) are now validated for non-empty `http`/`https` scheme and host presence before use. Localhost and private addresses are explicitly allowed.
 
 ### Changed
 - **ContentStore write is atomic**: uses write-to-tmp + `rename()` (POSIX-atomic on same filesystem) instead of two separate writes, eliminating the corruption window.
@@ -19,6 +25,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **ContentStore skips documents larger than 2 MiB** (markdown + plain text combined) to prevent unbounded disk growth. Configurable via `ContentStore::max_content_bytes`.
 - **MCP search handler removes explicit store.write()** — FetchClient handles persistence, preventing double-writes.
 - **CLI run_search removes explicit store.write()** — FetchClient handles persistence. Per-result `saved:/updated:/unchanged:` labels removed from output (StoreResult is no longer available at that level).
+- **MCP search URL validation is async**: `validate_url` now awaits DNS resolution for result URLs before scraping, consistent with other network validation paths.
+- **`config.example.json` reformatted**: switched to 4-space indentation, arrays are now pretty-printed, and `output_dir: null` is shown explicitly as a documented option.
 
 ---
 
