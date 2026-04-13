@@ -453,24 +453,20 @@ fn setup_mcp(theme: &ColorfulTheme, dir: &Path) {
 
 fn print_summary(dir: &Path) {
     let noxa = dir.join("noxa");
-    let server = dir.join("noxa-server");
-
-    // Read NOXA_PORT from .env if present
-    let port = read_env_var("NOXA_PORT").unwrap_or_else(|| "3000".into());
+    let mcp = dir.join("noxa-mcp");
 
     println!("\x1b[1;32m  Setup Complete\x1b[0m");
     println!();
     println!("  \x1b[1mCLI:\x1b[0m");
     println!("    {} https://example.com --format llm", noxa.display());
-    println!();
-    println!("  \x1b[1mREST API:\x1b[0m");
-    println!("    {}", server.display());
-    println!("    curl http://localhost:{port}/health");
+    println!("    {} https://example.com --search \"rust async\"", noxa.display());
     println!();
     println!("  \x1b[1mMCP Server:\x1b[0m");
+    println!("    {}", mcp.display());
     println!("    Configured in Claude Desktop (restart to activate)");
     println!();
     println!("  \x1b[1mConfig:\x1b[0m  {}/.env", dir.display());
+    println!("  \x1b[1mDocs:\x1b[0m    https://github.com/jmagar/noxa#readme");
     println!();
     println!("\x1b[2m  Tip: Add to PATH for convenience:\x1b[0m");
     println!("    export PATH=\"{}:$PATH\"", dir.display());

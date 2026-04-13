@@ -1,9 +1,3 @@
-<p align="center">
-  <a href="https://noxa.io">
-    <img src=".github/banner.png" alt="noxa" width="700" />
-  </a>
-</p>
-
 <h3 align="center">
   The fastest web scraper for AI agents.<br/>
   <sub>67% fewer tokens. Sub-millisecond extraction. Zero browser overhead.</sub>
@@ -13,12 +7,6 @@
   <a href="https://github.com/jmagar/noxa/stargazers"><img src="https://img.shields.io/github/stars/jmagar/noxa?style=for-the-badge&logo=github&logoColor=white&label=Stars&color=181717" alt="Stars" /></a>
   <a href="https://github.com/jmagar/noxa/releases"><img src="https://img.shields.io/github/v/release/jmagar/noxa?style=for-the-badge&logo=rust&logoColor=white&label=Version&color=B7410E" alt="Version" /></a>
   <a href="https://github.com/jmagar/noxa/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-10B981?style=for-the-badge" alt="License" /></a>
-  <a href="https://www.npmjs.com/package/create-noxa"><img src="https://img.shields.io/npm/dt/create-noxa?style=for-the-badge&logo=npm&logoColor=white&label=Installs&color=CB3837" alt="npm installs" /></a>
-</p>
-<p align="center">
-  <a href="https://x.com/noxa_io"><img src="https://img.shields.io/badge/Follow-@noxa__io-000000?style=for-the-badge&logo=x&logoColor=white" alt="X / Twitter" /></a>
-  <a href="https://noxa.io"><img src="https://img.shields.io/badge/Website-noxa.io-0A0A0A?style=for-the-badge&logo=safari&logoColor=white" alt="Website" /></a>
-  <a href="https://noxa.io/docs"><img src="https://img.shields.io/badge/Docs-Read-3B82F6?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs" /></a>
   <a href="docs/config.md"><img src="https://img.shields.io/badge/Config-Guide-10B981?style=for-the-badge&logo=json&logoColor=white" alt="Config guide" /></a>
 </p>
 
@@ -58,6 +46,14 @@ It extracts clean, structured content from any URL using Chrome-level TLS finger
 
 Need config details? See [`docs/config.md`](docs/config.md) for how `config.json` and `.env` work together.
 
+### One-liner install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jmagar/noxa/main/install.sh | bash
+```
+
+Installs Rust if needed, builds both binaries, and launches `noxa setup` — an interactive wizard that configures `.env`, optionally installs Ollama, and wires up Claude Desktop.
+
 ### For AI agents (Claude, Cursor, Windsurf, VS Code)
 
 ```bash
@@ -66,38 +62,27 @@ npx create-noxa
 
 Auto-detects your AI tools, downloads the MCP server, and configures everything. One command.
 
-### Homebrew (macOS/Linux)
-
-```bash
-brew tap jmagar/noxa
-brew install noxa
-```
-
 ### Prebuilt binaries
 
 Download from [GitHub Releases](https://github.com/jmagar/noxa/releases) for macOS (arm64, x86_64) and Linux (x86_64, aarch64).
 
-### Cargo (from source)
+### Cargo
 
 ```bash
-cargo install --git https://github.com/jmagar/noxa.git noxa-cli --bin noxa
+cargo install --git https://github.com/jmagar/noxa.git --bin noxa --bin noxa-mcp
 ```
 
-After installing the CLI, run the embedded MCP entrypoint with `noxa mcp`.
-If you still need the standalone server binary for legacy setups, `noxa-mcp`
-remains available as a separate package.
-
-### Docker
+Then run the interactive setup wizard:
 
 ```bash
-docker run --rm ghcr.io/0xmassi/noxa https://example.com
+noxa setup
 ```
 
-### Docker Compose (with Ollama for LLM features)
+### From source (clone + build)
 
 ```bash
-cp config/.env.example .env
-docker compose up -d
+git clone https://github.com/jmagar/noxa.git && cd noxa
+./setup.sh    # builds (first run) then delegates to noxa setup
 ```
 
 ---
@@ -265,6 +250,22 @@ noxa --diff-with snapshot.json https://example.com
 #   @@ -1,3 +1,3 @@
 #   -Old content here
 #   +New content here
+```
+
+### Change Monitoring (Watch)
+
+```bash
+# Poll a URL for changes every 5 minutes (default interval)
+noxa --watch https://example.com
+
+# Custom check interval (seconds)
+noxa --watch --watch-interval 60 https://example.com
+
+# Run a command on change — diff JSON is piped to stdin
+noxa --watch --on-change "jq '.summary' >> changes.log" https://example.com
+
+# Combine with a webhook — POST diff payload on each change
+noxa --watch --webhook https://hooks.example.com/notify https://example.com
 ```
 
 ### PDF Extraction
@@ -452,6 +453,43 @@ export NOXA_NO_STORE=1
 
 The JSON file contains the full `ExtractionResult` including metadata, structured data, and content. The MCP `diff` tool reads from the store automatically — no need to pass a previous snapshot manually after the first run.
 
+### Content Store — Search & Retrieve
+
+```bash
+# Full-text search across all stored docs (uses ripgrep if available)
+noxa --grep "authentication"
+noxa --grep "rate limit" --format json
+
+# List all stored domains
+noxa --list
+
+# List all docs for a specific domain
+noxa --list docs.rust-lang.org
+
+# Retrieve a cached doc by exact URL
+noxa --retrieve https://docs.rust-lang.org/book/
+
+# Retrieve by fuzzy query
+noxa --retrieve "rust async book"
+
+# Check background crawl status
+noxa --status docs.rust-lang.org
+```
+
+### Save to Files
+
+```bash
+# Save each page to a separate file instead of stdout
+noxa --crawl --output-dir ./docs https://docs.rust-lang.org
+
+# Works with batch mode too
+noxa --urls-file urls.txt --output-dir ./output
+
+# Single URL to file
+noxa https://example.com --output-dir ./pages
+# → ./pages/index.md
+```
+
 ### Real-World Recipes
 
 ```bash
@@ -508,8 +546,8 @@ Then in Claude: *"Scrape the top 5 results for 'web scraping tools' and compare 
 | `crawl` | Recursive site crawl | No |
 | `map` | Discover URLs from sitemaps | No |
 | `batch` | Parallel multi-URL extraction | No |
-| `extract` | LLM-powered structured extraction | No (needs Ollama) |
-| `summarize` | Page summarization | No (needs Ollama) |
+| `extract` | LLM-powered structured extraction | No (needs local LLM or `NOXA_API_KEY`) |
+| `summarize` | Page summarization | No (needs local LLM or `NOXA_API_KEY`) |
 | `diff` | Content change detection | No |
 | `brand` | Brand identity extraction | No |
 | `search` | Web search + scrape results | `SEARXNG_URL`: No, cloud: Yes |
@@ -650,8 +688,9 @@ noxa/
     noxa-fetch    HTTP client + TLS fingerprinting (wreq/BoringSSL). Crawler. Batch ops.
     noxa-llm      LLM provider chain (Gemini CLI -> OpenAI -> Ollama -> Anthropic)
     noxa-pdf      PDF text extraction
-    noxa-mcp      MCP server (10 tools for AI agents)
-    noxa      CLI binary
+    noxa-mcp      MCP server (10 tools for AI agents)  → binary: noxa-mcp
+    noxa-rag      RAG pipeline (TEI embeddings + Qdrant vector store)  → binary: noxa-rag-daemon
+    noxa-cli      CLI binary  → binary: noxa
 ```
 
 `noxa-core` takes raw HTML as a `&str` and returns structured output. No I/O, no network, no allocator tricks. Can compile to WASM.
@@ -725,29 +764,41 @@ These settings can also be controlled via command-line flags:
 | `NOXA_NO_STORE` | Set to any non-empty value to disable automatic content persistence |
 | `NOXA_PROXY` | Single proxy URL |
 | `NOXA_PROXY_FILE` | Path to proxy pool file |
-| `NOXA_WEBHOOK_URL` | Webhook URL for notifications |
+| `NOXA_WEBHOOK_URL` | Webhook URL for notifications (also accepted by `--webhook`) |
 | `NOXA_LLM_BASE_URL` | LLM base URL for Ollama or OpenAI-compatible endpoints |
-| `NOXA_LLM_PROVIDER` | Default LLM provider |
-| `NOXA_LLM_MODEL` | Default LLM model |
+| `NOXA_LLM_PROVIDER` | Default LLM provider (`gemini`, `openai`, `ollama`, `anthropic`) |
+| `NOXA_LLM_MODEL` | Default LLM model name |
 | `OLLAMA_HEALTH_TIMEOUT_MS` | Ollama availability check timeout in milliseconds |
 | `NOXA_CONFIG` | Path to `config.json` or `/dev/null` to bypass it |
+| `NOXA_CLOUD_PROVIDER` | Cloud provider (`gcp`, `aws`) |
+| `NOXA_CLOUD_PROJECT` | Cloud project ID |
+| `NOXA_CLOUD_ZONE` | Cloud zone or region |
+| `NOXA_CLOUD_CLUSTER` | Cloud cluster name |
+| `NOXA_CLOUD_SERVICE_ACCOUNT_KEY` | Path to cloud service account key file |
 
 The `config/.env.example` file covers the runtime noxa variables above.
 
-If you use `setup.sh` or the Docker Compose stack, they also rely on these local deployment variables:
+`noxa setup` (or `./setup.sh` for repo clones) generates a `.env` interactively and can configure these for you.
 
-- `NOXA_PORT`
-- `NOXA_HOST`
-- `NOXA_AUTH_KEY`
-- `NOXA_LOG`
-- `OLLAMA_HOST`
-- `OLLAMA_MODEL`
+Local deployment and Ollama variables — used by `noxa setup`:
 
-LLM provider backends may also use these environment variables:
+| Variable | Description |
+|----------|-------------|
+| `NOXA_PORT` | REST API listen port (default: `3000`) |
+| `NOXA_HOST` | REST API bind address (default: `0.0.0.0`) |
+| `NOXA_AUTH_KEY` | REST API authentication key |
+| `NOXA_LOG` | Log level (default: `info`) |
+| `OLLAMA_HOST` | Ollama base URL (default: `http://localhost:11434`) |
+| `OLLAMA_MODEL` | Default Ollama model (default: `qwen3:8b`) |
 
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `GEMINI_MODEL`
+LLM provider API keys:
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | OpenAI API key |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `GEMINI_MODEL` | Gemini model override (default: `gemini-2.5-pro`) |
+| `OPENAI_BASE_URL` | Override OpenAI base URL (alternative to `NOXA_LLM_BASE_URL`) |
 
 ---
 
