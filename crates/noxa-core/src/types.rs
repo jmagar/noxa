@@ -27,6 +27,25 @@ pub struct Metadata {
     pub image: Option<String>,
     pub favicon: Option<String>,
     pub word_count: usize,
+    // RAG-pipeline fields (all Option<T> for backward compat with existing web extraction callers)
+    /// SHA-256 hex digest of the raw source bytes. Used as a dedup key by noxa-rag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// Source classification: 'web' | 'file' | 'mcp' | 'notebook' | 'email'
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// Absolute filesystem path — populated for file:// sources only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    /// ISO 8601 timestamp: fs mtime for files, published_at for web content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    /// True when the document hit the max_chunks_per_page limit and was cut short.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_truncated: Option<bool>,
+    /// Detected tech stack (e.g. ["React", "TypeScript", "Tailwind"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub technologies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

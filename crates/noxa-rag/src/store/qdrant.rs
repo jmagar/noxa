@@ -346,12 +346,52 @@ impl VectorStore for QdrantStore {
                             .get("token_estimate")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as usize;
+                        let title = payload
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let author = payload
+                            .get("author")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let published_date = payload
+                            .get("published_date")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let language = payload
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let source_type = payload
+                            .get("source_type")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let content_hash = payload
+                            .get("content_hash")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let technologies = payload
+                            .get("technologies")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|t| t.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         Some(SearchResult {
                             text,
                             url,
                             score: hit.score,
                             chunk_index,
                             token_estimate,
+                            title,
+                            author,
+                            published_date,
+                            language,
+                            source_type,
+                            content_hash,
+                            technologies,
                         })
                     }
                     _ => {

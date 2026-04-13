@@ -52,6 +52,12 @@ pub fn extract(doc: &Html, url: Option<&str>) -> Metadata {
         image,
         favicon,
         word_count: 0, // filled later by the extractor
+        content_hash: None,
+        source_type: None,
+        file_path: None,
+        last_modified: None,
+        is_truncated: None,
+        technologies: Vec::new(),
     }
 }
 
