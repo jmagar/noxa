@@ -15,6 +15,10 @@ const BATCH_TIMEOUT_SECS: u64 = 60;
 /// Max retries on 429/503.
 const MAX_RETRIES: u32 = 3;
 
+fn should_retry(status: u16, attempt: u32) -> bool {
+    (status == 429 || status == 503) && attempt < MAX_RETRIES
+}
+
 #[derive(serde::Serialize)]
 struct EmbedRequest<'a> {
     inputs: &'a [String],
@@ -104,8 +108,15 @@ impl TeiProvider {
     }
 
     /// Send one batch to POST /embed.  Handles 429/503 with exponential back-off.
-    /// Returns Err(RagError::Embed) on HTTP 413 — caller should halve the batch.
-    async fn embed_batch(&self, batch: &[String]) -> Result<Vec<Vec<f32>>, RagError> {
+    /// Returns Err(RagError::Embed { status: Some(413) }) — caller should halve the batch.
+    ///
+    /// `batch_idx` and `total_batches` are passed in from the caller for structured log context.
+    async fn embed_batch(
+        &self,
+        batch: &[String],
+        batch_idx: usize,
+        total_batches: usize,
+    ) -> Result<Vec<Vec<f32>>, RagError> {
         let url = format!("{}/embed", self.url);
         let req_body = EmbedRequest {
             inputs: batch,
@@ -114,7 +125,15 @@ impl TeiProvider {
         };
 
         let mut delay_ms: u64 = 200;
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..=MAX_RETRIES {
+            tracing::debug!(
+                batch = batch_idx + 1,
+                total_batches,
+                chunks = batch.len(),
+                attempt = attempt + 1,
+                "embedding batch"
+            );
+
             let resp = self
                 .client
                 .post(&url)
@@ -124,35 +143,56 @@ impl TeiProvider {
                 .await?;
 
             let status = resp.status();
+            let status_u16 = status.as_u16();
 
             if status.is_success() {
                 let vecs: Vec<Vec<f32>> = resp.json().await?;
                 return Ok(vecs);
             }
 
-            if status.as_u16() == 413 {
+            if status_u16 == 413 {
                 // Caller must halve the batch; no point retrying at this size.
+                tracing::warn!(
+                    batch = batch_idx + 1,
+                    chunks = batch.len(),
+                    reduced_to = batch.len() / 2,
+                    "TEI 413: payload too large, halving batch"
+                );
                 return Err(RagError::Embed {
                     message: format!(
                         "TEI returned 413 (payload too large) for batch of {}",
                         batch.len()
                     ),
-                    status: Some(status.as_u16()),
+                    status: Some(status_u16),
                 });
             }
 
-            if status.as_u16() == 429 || status.as_u16() == 503 {
-                if attempt + 1 == MAX_RETRIES {
-                    break;
-                }
+            if should_retry(status_u16, attempt) {
+                let body = resp.text().await.unwrap_or_default();
+                let preview = &body[..body.len().min(512)];
+                tracing::warn!(
+                    batch = batch_idx + 1,
+                    attempt = attempt + 1,
+                    max_attempts = MAX_RETRIES + 1,
+                    status = status_u16,
+                    delay_ms,
+                    body = preview,
+                    "TEI retry"
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 delay_ms = (delay_ms * 2).min(2_000);
                 continue;
             }
 
+            if status_u16 == 429 || status_u16 == 503 {
+                break;
+            }
+
+            let body = resp.text().await.unwrap_or_default();
+            let preview = &body[..body.len().min(512)];
             return Err(RagError::Embed {
-                message: format!("TEI /embed returned HTTP {}", status),
-                status: Some(status.as_u16()),
+                message: format!("TEI /embed returned HTTP {status_u16}: {preview}"),
+                status: Some(status_u16),
             });
         }
 
@@ -170,18 +210,28 @@ impl EmbedProvider for TeiProvider {
             return Ok(vec![]);
         }
 
+        let total_batches = (texts.len() + BATCH_SIZE - 1) / BATCH_SIZE;
         let mut results: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
-        for chunk in texts.chunks(BATCH_SIZE) {
-            match self.embed_batch(chunk).await {
+        for (batch_idx, chunk) in texts.chunks(BATCH_SIZE).enumerate() {
+            match self.embed_batch(chunk, batch_idx, total_batches).await {
                 Ok(vecs) => results.extend(vecs),
                 Err(RagError::Embed {
                     status: Some(413), ..
                 }) => {
-                    // Halve batch size and retry once. Propagate real errors directly.
+                    // Halve batch size and retry. Propagate real errors directly.
+                    let sub_total = (chunk.len() + BATCH_SIZE_REDUCED - 1) / BATCH_SIZE_REDUCED;
                     let mut chunk_results: Vec<Vec<f32>> = Vec::with_capacity(chunk.len());
-                    for sub_chunk in chunk.chunks(BATCH_SIZE_REDUCED) {
-                        let vecs = self.embed_batch(sub_chunk).await?;
+                    for (sub_idx, sub_chunk) in chunk.chunks(BATCH_SIZE_REDUCED).enumerate() {
+                        tracing::debug!(
+                            sub_batch = sub_idx + 1,
+                            sub_total,
+                            chunks = sub_chunk.len(),
+                            "embedding reduced sub-batch after 413"
+                        );
+                        let vecs = self
+                            .embed_batch(sub_chunk, batch_idx, total_batches)
+                            .await?;
                         chunk_results.extend(vecs);
                     }
                     results.extend(chunk_results);
@@ -191,5 +241,18 @@ impl EmbedProvider for TeiProvider {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_RETRIES, should_retry};
+
+    #[test]
+    fn retry_limit_counts_retries_not_total_attempts() {
+        assert!(should_retry(429, 0));
+        assert!(should_retry(503, MAX_RETRIES - 1));
+        assert!(!should_retry(429, MAX_RETRIES));
+        assert!(!should_retry(500, 0));
     }
 }
