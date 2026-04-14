@@ -113,7 +113,6 @@ impl FilesystemContentStore {
         let _ = self.canonical_root.set(cr.clone());
         Ok(cr)
     }
-
     fn resolve_path(&self, url: &str) -> Result<PathBuf, StoreError> {
         let rel = url_to_store_path(url);
         if rel
@@ -129,7 +128,6 @@ impl FilesystemContentStore {
 
         // Use the cached canonical root instead of calling canonicalize per-request.
         let canonical_root = self.get_canonical_root()?;
-
         // Symlink protection: walk up to find the nearest existing ancestor,
         // canonicalize it, then verify the resolved path stays under the root.
         let parent = base.parent().unwrap_or(&base);
@@ -200,9 +198,10 @@ impl FilesystemContentStore {
                     .and_then(|m| m.modified().ok())
                     .map(DateTime::<Utc>::from)
                     .unwrap_or_else(Utc::now);
-                let result =
-                    tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime))
-                        .await??;
+                let result = tokio::task::spawn_blocking(move || {
+                    parse_sidecar_or_migrate(&contents, mtime)
+                })
+                .await??;
                 Ok(Some(result))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -233,11 +232,7 @@ impl FilesystemContentStore {
         // Size guard — skip oversized documents rather than filling disk.
         let estimated = extraction.content.markdown.len()
             + extraction.content.plain_text.len()
-            + extraction
-                .content
-                .raw_html
-                .as_deref()
-                .map_or(0, |h| h.len());
+            + extraction.content.raw_html.as_deref().map_or(0, |h| h.len());
         if let Some(max) = self.max_content_bytes
             && estimated > max
         {
@@ -260,22 +255,25 @@ impl FilesystemContentStore {
         // ---- Read and optionally migrate existing sidecar -------------------
         let now = Utc::now();
 
-        let existing_sidecar: Option<Sidecar> = match tokio::fs::read_to_string(&json_path).await {
-            Ok(contents) => {
-                // Need mtime for legacy migration.
-                let mtime = tokio::fs::metadata(&json_path)
-                    .await
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(DateTime::<Utc>::from)
-                    .unwrap_or(now);
-                tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime).ok())
+        let existing_sidecar: Option<Sidecar> =
+            match tokio::fs::read_to_string(&json_path).await {
+                Ok(contents) => {
+                    // Need mtime for legacy migration.
+                    let mtime = tokio::fs::metadata(&json_path)
+                        .await
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(DateTime::<Utc>::from)
+                        .unwrap_or(now);
+                    tokio::task::spawn_blocking(move || {
+                        parse_sidecar_or_migrate(&contents, mtime).ok()
+                    })
                     .await
                     .unwrap_or(None)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            };
 
         // ---- Strip query params from metadata.url before persisting --------
         let mut to_store = extraction.clone();
@@ -624,7 +622,6 @@ mod tests {
 
     #[test]
     fn test_url_hash_matches_fnv1a() {
-        use crate::paths::url_to_store_path as _; // ensure url_hash is accessible via paths
         // Test via url_to_store_path behavior: URL with query gets a hash suffix.
         let p = url_to_store_path("https://example.com/page?q=test");
         assert!(p.to_string_lossy().contains('_'));
