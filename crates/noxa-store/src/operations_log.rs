@@ -1,11 +1,13 @@
 //! Domain-level operations log in NDJSON format (`.operations.ndjson`).
 //!
 //! One JSON object per line. O(1) appends via `OpenOptions::append(true)`.
-//! No mutex needed — POSIX append is atomic for writes ≤ PIPE_BUF (4096 bytes).
+//! No mutex needed — concurrent appends from the same process are serialized
+//! via `spawn_blocking`; cross-process atomicity relies on `O_APPEND`
+//! kernel-level inode locking.
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::types::OperationEntry;
+use crate::types::{OperationEntry, StoreError};
 
 /// Maximum serialized size of `output` before it is truncated.
 const OUTPUT_SIZE_LIMIT: usize = 1024 * 1024; // 1 MiB
@@ -24,19 +26,17 @@ impl FilesystemOperationsLog {
     }
 
     /// Append one operation entry to the domain log.
-    pub async fn append(&self, domain: &str, entry: &OperationEntry) -> Result<(), String> {
+    pub async fn append(&self, domain: &str, entry: &OperationEntry) -> Result<(), StoreError> {
         let path = self.root.join(domain).join(".operations.ndjson");
 
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("ops log: create_dir: {e}"))?;
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         let line = build_line(entry)?;
         let path_clone = path.clone();
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
             // Set directory permissions on first creation.
             #[cfg(unix)]
             if let Some(parent) = path_clone.parent() {
@@ -47,32 +47,27 @@ impl FilesystemOperationsLog {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&path_clone)
-                .map_err(|e| format!("ops log: open {}: {e}", path_clone.display()))?;
+                .open(&path_clone)?;
 
             #[cfg(unix)]
             set_file_permissions_if_new(&path_clone)?;
 
-            file.write_all(line.as_bytes())
-                .map_err(|e| format!("ops log: write: {e}"))?;
+            file.write_all(line.as_bytes())?;
 
             // flush() on a regular file is a no-op but documents intent.
-            file.flush()
-                .map_err(|e| format!("ops log: flush: {e}"))?;
+            file.flush()?;
 
-            Ok::<(), String>(())
+            Ok(())
         })
-        .await
-        .map_err(|e| format!("ops log: join: {e}"))??;
+        .await??;
 
         Ok(())
     }
 }
 
 /// Build the NDJSON line for one entry, truncating `output` if it exceeds 1 MiB.
-fn build_line(entry: &OperationEntry) -> Result<String, String> {
-    let output_bytes = serde_json::to_vec(&entry.output)
-        .map_err(|e| format!("ops log: serialize output: {e}"))?;
+fn build_line(entry: &OperationEntry) -> Result<String, StoreError> {
+    let output_bytes = serde_json::to_vec(&entry.output)?;
 
     let mut line = if output_bytes.len() > OUTPUT_SIZE_LIMIT {
         let mut patched = entry.clone();
@@ -83,33 +78,30 @@ fn build_line(entry: &OperationEntry) -> Result<String, String> {
         serde_json::to_string(&patched)
     } else {
         serde_json::to_string(entry)
-    }
-    .map_err(|e| format!("ops log: serialize entry: {e}"))?;
+    }?;
 
     line.push('\n');
     Ok(line)
 }
 
 #[cfg(unix)]
-fn set_dir_permissions(path: &std::path::Path) -> Result<(), String> {
+fn set_dir_permissions(path: &std::path::Path) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.permissions().mode() & 0o777 != 0o700 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("ops log: chmod dir {}: {e}", path.display()))?;
-        }
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.permissions().mode() & 0o777 != 0o700
+    {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn set_file_permissions_if_new(path: &std::path::Path) -> Result<(), String> {
+fn set_file_permissions_if_new(path: &std::path::Path) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.permissions().mode() & 0o777 != 0o600 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("ops log: chmod file {}: {e}", path.display()))?;
-        }
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.permissions().mode() & 0o777 != 0o600
+    {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

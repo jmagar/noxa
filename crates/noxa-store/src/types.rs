@@ -2,12 +2,37 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Errors produced by the noxa-store crate.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    /// Filesystem I/O failure.
+    #[error("store I/O: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// JSON (de)serialization failure.
+    #[error("store serialization: {0}")]
+    Serialize(#[from] serde_json::Error),
+
+    /// A computed store path would escape the root directory.
+    #[error("store: path escapes root for url: {0}")]
+    PathEscape(String),
+
+    /// `$HOME` is not set; cannot determine the default store root.
+    #[error("cannot determine home directory: $HOME is unset")]
+    HomeDirUnavailable,
+
+    /// A background task (`spawn_blocking`) failed to join.
+    #[error("store task join: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
+}
+
 /// Result of a [`FilesystemContentStore::write`] call.
 ///
 /// Marked `#[non_exhaustive]` so that future additive fields do not constitute
 /// a semver-breaking change for downstream crates that pattern-match or
 /// construct this struct.
 #[non_exhaustive]
+#[derive(Debug)]
 pub struct StoreResult {
     pub md_path: PathBuf,
     pub json_path: PathBuf,

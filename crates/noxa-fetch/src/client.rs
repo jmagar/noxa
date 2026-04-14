@@ -343,10 +343,10 @@ impl FetchClient {
         // Auto-persist to content store (best-effort — failure never fails the
         // extraction). Covers all four extraction branches: HTML, Reddit JSON,
         // PDF, and document (DOCX/XLSX/CSV), since they all flow through here.
-        if let Some(ref store) = self.store {
-            if let Err(e) = store.write(url, &result).await {
-                warn!(url, error = %e, "content store write failed");
-            }
+        if let Some(ref store) = self.store
+            && let Err(e) = store.write(url, &result).await
+        {
+            warn!(url, error = %e, "content store write failed");
         }
 
         Ok(result)

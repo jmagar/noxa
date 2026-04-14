@@ -189,6 +189,13 @@ impl NoxaMcp {
             error!("content store init failed: {e}");
             std::process::exit(1);
         });
+        // Ensure the root directory exists so that resolve_path can canonicalize it.
+        // A fresh install would otherwise fail because std::fs::canonicalize errors
+        // on non-existent paths.
+        if let Err(e) = std::fs::create_dir_all(store.root()) {
+            error!("failed to create content store directory: {e}");
+            std::process::exit(1);
+        }
         info!("content store ready");
 
         // Inject store into FetchConfig so FetchClient auto-persists all extractions.
