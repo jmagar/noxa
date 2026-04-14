@@ -23,7 +23,7 @@ use noxa_fetch::{
     BatchExtractResult, BrowserProfile, CrawlConfig, CrawlResult, Crawler, FetchClient,
     FetchConfig, FetchResult, PageResult, SitemapEntry,
 };
-use noxa_store::{FilesystemContentStore, url_to_store_path};
+use noxa_store::{FilesystemContentStore, FilesystemOperationsLog, Op, OperationEntry, domain_from_url, url_to_store_path};
 use noxa_llm::LlmProvider;
 use noxa_mcp;
 use noxa_pdf::PdfMode;
@@ -435,6 +435,20 @@ fn init_mcp_logging() {
         .ok();
 }
 
+/// Build an operations log from CLI flags.
+///
+/// Returns `None` when `--no-store` or `NOXA_NO_OPERATIONS_LOG` / `NOXA_NO_STORE` is set.
+fn build_ops_log(cli: &Cli, resolved: &config::ResolvedConfig) -> Option<Arc<FilesystemOperationsLog>> {
+    if cli.no_store
+        || std::env::var("NOXA_NO_OPERATIONS_LOG").is_ok()
+        || std::env::var("NOXA_NO_STORE").is_ok()
+    {
+        return None;
+    }
+    let root = content_store_root(resolved.output_dir.as_deref());
+    Some(Arc::new(FilesystemOperationsLog::new(root)))
+}
+
 /// Build FetchConfig from CLI flags.
 ///
 /// `--proxy` sets a single static proxy (no rotation).
@@ -505,6 +519,8 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
         Some(FilesystemContentStore::new(content_store_root(resolved.output_dir.as_deref())))
     };
 
+    let ops_log = build_ops_log(cli, resolved);
+
     FetchConfig {
         browser: resolved.browser.clone().into(),
         proxy,
@@ -513,6 +529,7 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
         pdf_mode: resolved.pdf_mode.clone().into(),
         headers,
         store,
+        ops_log,
         ..Default::default()
     }
 }
@@ -2158,9 +2175,8 @@ async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
     let client = FetchClient::new(build_fetch_config(cli, resolved))
         .map_err(|e| format!("client error: {e}"))?;
 
-    let entries = noxa_fetch::sitemap::discover(&client, url)
-        .await
-        .map_err(|e| format!("sitemap discovery failed: {e}"))?;
+    // map_site() calls sitemap::discover() and appends an Op::Map entry to ops_log.
+    let entries = client.map_site(url).await?;
 
     if entries.is_empty() {
         eprintln!("no sitemap URLs found for {url}");
@@ -2168,21 +2184,7 @@ async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         eprintln!("discovered {} URLs", entries.len());
     }
 
-    if let Some(ref dir) = resolved.output_dir {
-        let output_dir = dir.clone();
-        let content = format_map_output(&entries, &resolved.format);
-        let filename = format!(
-            "sitemap.{}",
-            if matches!(resolved.format, OutputFormat::Json) {
-                "json"
-            } else {
-                "txt"
-            }
-        );
-        write_to_file(&output_dir, &filename, &content)?;
-    } else {
-        print_map_output(&entries, &resolved.format);
-    }
+    print_map_output(&entries, &resolved.format);
     Ok(())
 }
 
@@ -2366,15 +2368,46 @@ async fn run_watch_single(
     url: &str,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let mut previous = client
-        .fetch_and_extract_with_options(url, options)
-        .await
-        .map_err(|e| format!("initial fetch failed: {e}"))?;
+    // Watch restart continuity: try to restore the last stored snapshot as the
+    // baseline instead of always doing a fresh fetch on startup.
+    let store = if cli.no_store {
+        None
+    } else {
+        Some(FilesystemContentStore::new(content_store_root(resolved.output_dir.as_deref())))
+    };
 
-    eprintln!(
-        "[watch] Initial snapshot: {url} ({} words)",
-        previous.metadata.word_count
-    );
+    let (mut previous, mut is_initial_baseline) = if let Some(ref s) = store {
+        match s.read(url).await {
+            Ok(Some(stored)) => {
+                eprintln!(
+                    "[watch] Restored baseline from store: {url} ({} words)",
+                    stored.metadata.word_count
+                );
+                (stored, false)
+            }
+            _ => {
+                let fetched = client
+                    .fetch_and_extract_with_options(url, options)
+                    .await
+                    .map_err(|e| format!("initial fetch failed: {e}"))?;
+                eprintln!(
+                    "[watch] Initial snapshot: {url} ({} words)",
+                    fetched.metadata.word_count
+                );
+                (fetched, true)
+            }
+        }
+    } else {
+        let fetched = client
+            .fetch_and_extract_with_options(url, options)
+            .await
+            .map_err(|e| format!("initial fetch failed: {e}"))?;
+        eprintln!(
+            "[watch] Initial snapshot: {url} ({} words)",
+            fetched.metadata.word_count
+        );
+        (fetched, false)
+    };
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(cli.watch_interval)).await;
@@ -2396,44 +2429,68 @@ async fn run_watch_single(
 
         if diff.status == ChangeStatus::Same {
             eprintln!("[watch] No changes ({})", timestamp());
+            is_initial_baseline = false;
         } else {
             print_diff_output(&diff, &resolved.format);
             eprintln!("[watch] Changes detected! ({})", timestamp());
 
-            if let Some(ref cmd) = cli.on_change {
-                let diff_json = serde_json::to_string(&diff).unwrap_or_default();
-                eprintln!("[watch] Running: {cmd}");
-                match tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        if let Some(mut stdin) = child.stdin.take() {
-                            use tokio::io::AsyncWriteExt;
-                            let _ = stdin.write_all(diff_json.as_bytes()).await;
-                        }
-                    }
-                    Err(e) => eprintln!("[watch] Failed to run command: {e}"),
+            // Append change to ops log.
+            if let Some(ref log) = client.ops_log() {
+                let domain = domain_from_url(url);
+                let entry = OperationEntry {
+                    op: Op::Diff,
+                    at: chrono::Utc::now(),
+                    url: url.to_string(),
+                    input: serde_json::json!({
+                        "source": "watch",
+                        "interval_secs": cli.watch_interval
+                    }),
+                    output: serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
+                };
+                if let Err(e) = log.append(&domain, &entry).await {
+                    tracing::warn!("ops log append failed for watch: {e}");
                 }
             }
 
-            if let Some(ref webhook_url) = cli.webhook {
-                fire_webhook(
-                    webhook_url,
-                    &serde_json::json!({
-                        "event": "watch_change",
-                        "url": url,
-                        "status": format!("{:?}", diff.status),
-                        "word_count_delta": diff.word_count_delta,
-                        "metadata_changes": diff.metadata_changes.len(),
-                        "links_added": diff.links_added.len(),
-                        "links_removed": diff.links_removed.len(),
-                    }),
-                );
+            // is_initial_baseline suppresses --on-change on the first reconciliation
+            // write when there was no stored snapshot (avoids spurious triggers on startup).
+            if !is_initial_baseline {
+                if let Some(ref cmd) = cli.on_change {
+                    let diff_json = serde_json::to_string(&diff).unwrap_or_default();
+                    eprintln!("[watch] Running: {cmd}");
+                    match tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(cmd)
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                    {
+                        Ok(mut child) => {
+                            if let Some(mut stdin) = child.stdin.take() {
+                                use tokio::io::AsyncWriteExt;
+                                let _ = stdin.write_all(diff_json.as_bytes()).await;
+                            }
+                        }
+                        Err(e) => eprintln!("[watch] Failed to run command: {e}"),
+                    }
+                }
+
+                if let Some(ref webhook_url) = cli.webhook {
+                    fire_webhook(
+                        webhook_url,
+                        &serde_json::json!({
+                            "event": "watch_change",
+                            "url": url,
+                            "status": format!("{:?}", diff.status),
+                            "word_count_delta": diff.word_count_delta,
+                            "metadata_changes": diff.metadata_changes.len(),
+                            "links_added": diff.links_added.len(),
+                            "links_removed": diff.links_removed.len(),
+                        }),
+                    );
+                }
             }
 
+            is_initial_baseline = false;
             previous = current;
         }
     }
@@ -2550,19 +2607,27 @@ async fn run_watch_multi(
                 eprintln!("  -> {url} (word delta: {delta:+})");
             }
 
-            if let Some(ref dir) = resolved.output_dir {
-                let output_dir = dir.clone();
-                let payload = serde_json::json!({
-                    "event": "watch_changes",
-                    "check_number": check_number,
-                    "total_urls": urls.len(),
-                    "changed": changed.len(),
-                    "same": same_count,
-                    "changes": changed,
-                });
-                let filename = format!("watch-{}.json", ts.replace(':', "-"));
-                let content = serde_json::to_string_pretty(&payload).unwrap_or_default();
-                write_to_file(&output_dir, &filename, &content)?;
+            // Append each changed URL to ops log.
+            if let Some(ref log) = client.ops_log() {
+                for entry in &changed {
+                    if let Some(url) = entry["url"].as_str() {
+                        let domain = domain_from_url(url);
+                        let log_entry = OperationEntry {
+                            op: Op::Diff,
+                            at: chrono::Utc::now(),
+                            url: url.to_string(),
+                            input: serde_json::json!({
+                                "source": "watch",
+                                "interval_secs": cli.watch_interval,
+                                "check_number": check_number
+                            }),
+                            output: entry.clone(),
+                        };
+                        if let Err(e) = log.append(&domain, &log_entry).await {
+                            tracing::warn!("ops log append failed for watch-multi: {e}");
+                        }
+                    }
+                }
             }
 
             // Fire --on-change once with all changes
@@ -2628,22 +2693,24 @@ async fn run_diff(
     let new_result = fetch_and_extract(cli, resolved).await?.into_extraction()?;
 
     let diff = noxa_core::diff::diff(&old, &new_result);
-    if let Some(ref dir) = resolved.output_dir {
-        let output_dir = dir.clone();
-        let content = format_diff_output(&diff, &resolved.format);
-        let filename = format!(
-            "diff.{}",
-            if matches!(resolved.format, OutputFormat::Json) {
-                "json"
-            } else {
-                "txt"
-            }
-        );
-        write_to_file(&output_dir, &filename, &content)?;
-    } else {
-        print_diff_output(&diff, &resolved.format);
+
+    // Append diff result to ops log.
+    if let Some(ops_log) = build_ops_log(cli, resolved) {
+        let url = cli.urls.first().map(|u| normalize_url(u)).unwrap_or_default();
+        let domain = domain_from_url(&url);
+        let entry = OperationEntry {
+            op: Op::Diff,
+            at: chrono::Utc::now(),
+            url: url.clone(),
+            input: serde_json::json!({ "source": "file", "snapshot": snapshot_path }),
+            output: serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
+        };
+        if let Err(e) = ops_log.append(&domain, &entry).await {
+            tracing::warn!("ops log append failed for diff: {e}");
+        }
     }
 
+    print_diff_output(&diff, &resolved.format);
     Ok(())
 }
 
@@ -2654,13 +2721,23 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         &enriched,
         Some(result.url.as_str()).filter(|s| !s.is_empty()),
     );
-    let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
-    if let Some(ref dir) = resolved.output_dir {
-        let output_dir = dir.clone();
-        write_to_file(&output_dir, "brand.json", &output)?;
-    } else {
-        println!("{output}");
+
+    if let Some(ops_log) = build_ops_log(cli, resolved) {
+        let domain = domain_from_url(&result.url);
+        let entry = OperationEntry {
+            op: Op::Brand,
+            at: chrono::Utc::now(),
+            url: result.url.clone(),
+            input: serde_json::json!({}),
+            output: serde_json::to_value(&brand).unwrap_or(serde_json::Value::Null),
+        };
+        if let Err(e) = ops_log.append(&domain, &entry).await {
+            tracing::warn!("ops log append failed for brand: {e}");
+        }
     }
+
+    let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
+    println!("{output}");
     Ok(())
 }
 
@@ -2729,11 +2806,13 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
     // Extract content from source first (handles PDF detection for URLs)
     let result = fetch_and_extract(cli, resolved).await?.into_extraction()?;
 
+    let url = cli.urls.first().map(|u| normalize_url(u)).unwrap_or_default();
     let provider = build_llm_provider(cli, resolved).await?;
     let model = resolved.llm_model.as_deref();
-    let mut file_output: Option<(String, OutputFormat)> = None;
+    let ops_log = build_ops_log(cli, resolved);
+    let domain = domain_from_url(&url);
 
-    if let Some(ref schema_input) = cli.extract_json {
+    let output_str: Option<String> = if let Some(ref schema_input) = cli.extract_json {
         // Support @file syntax for loading schema from file
         let schema_str = if let Some(path) = schema_input.strip_prefix('@') {
             std::fs::read_to_string(path)
@@ -2756,10 +2835,25 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM extraction failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        file_output = Some((
-            serde_json::to_string_pretty(&extracted).expect("serialization failed"),
-            OutputFormat::Json,
-        ));
+        if let Some(ref log) = ops_log {
+            let entry = OperationEntry {
+                op: Op::Extract,
+                at: chrono::Utc::now(),
+                url: url.clone(),
+                input: serde_json::json!({
+                    "kind": "json",
+                    "schema": schema,
+                    "provider": provider.name(),
+                    "model": model
+                }),
+                output: extracted.clone(),
+            };
+            if let Err(e) = log.append(&domain, &entry).await {
+                tracing::warn!("ops log append failed for extract-json: {e}");
+            }
+        }
+
+        Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(ref prompt) = cli.extract_prompt {
         let t = std::time::Instant::now();
         let extracted = noxa_llm::extract::extract_with_prompt(
@@ -2772,10 +2866,25 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM extraction failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        file_output = Some((
-            serde_json::to_string_pretty(&extracted).expect("serialization failed"),
-            OutputFormat::Json,
-        ));
+        if let Some(ref log) = ops_log {
+            let entry = OperationEntry {
+                op: Op::Extract,
+                at: chrono::Utc::now(),
+                url: url.clone(),
+                input: serde_json::json!({
+                    "kind": "prompt",
+                    "prompt": prompt,
+                    "provider": provider.name(),
+                    "model": model
+                }),
+                output: extracted.clone(),
+            };
+            if let Err(e) = log.append(&domain, &entry).await {
+                tracing::warn!("ops log append failed for extract-prompt: {e}");
+            }
+        }
+
+        Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(sentences) = cli.summarize {
         let t = std::time::Instant::now();
         let summary = noxa_llm::summarize::summarize(
@@ -2788,22 +2897,30 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM summarization failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        file_output = Some((summary, OutputFormat::Text));
-    }
-
-    if let Some((output_str, file_format)) = file_output {
-        if let Some(ref dir) = resolved.output_dir {
-            let output_dir = dir.clone();
-            let url = cli
-                .urls
-                .first()
-                .map(|u| normalize_url(u))
-                .unwrap_or_default();
-            let filename = url_to_filename(&url, &file_format);
-            write_to_file(&output_dir, &filename, &output_str)?;
-        } else {
-            println!("{output_str}");
+        if let Some(ref log) = ops_log {
+            let entry = OperationEntry {
+                op: Op::Summarize,
+                at: chrono::Utc::now(),
+                url: url.clone(),
+                input: serde_json::json!({
+                    "sentences": sentences,
+                    "provider": provider.name(),
+                    "model": model
+                }),
+                output: serde_json::Value::String(summary.clone()),
+            };
+            if let Err(e) = log.append(&domain, &entry).await {
+                tracing::warn!("ops log append failed for summarize: {e}");
+            }
         }
+
+        Some(summary)
+    } else {
+        None
+    };
+
+    if let Some(s) = output_str {
+        println!("{s}");
     }
 
     Ok(())
@@ -2821,6 +2938,7 @@ async fn run_batch_llm(
     let options = build_extraction_options(resolved);
     let provider = build_llm_provider(cli, resolved).await?;
     let model = resolved.llm_model.as_deref();
+    let ops_log = client.ops_log().cloned();
 
     // Pre-parse schema once if --extract-json is used
     let schema = if let Some(ref schema_input) = cli.extract_json {
@@ -2837,12 +2955,6 @@ async fn run_batch_llm(
     } else {
         None
     };
-
-    // Build custom filename lookup from entries
-    let custom_names: std::collections::HashMap<&str, &str> = entries
-        .iter()
-        .filter_map(|(url, name)| name.as_deref().map(|n| (url.as_str(), n)))
-        .collect();
 
     let total = entries.len();
     let mut ok = 0usize;
@@ -2916,23 +3028,38 @@ async fn run_batch_llm(
                 };
                 eprintln!("-> extracted {detail} ({:.1}s)", llm_elapsed.as_secs_f64());
 
-                if let Some(ref dir) = resolved.output_dir {
-                    let output_dir = dir.clone();
-                    let file_format = if cli.summarize.is_some() {
-                        OutputFormat::Text
+                // Append to ops log.
+                if let Some(ref log) = ops_log {
+                    let domain = domain_from_url(url);
+                    let (op, log_input, log_output) = if let Some(ref schema) = schema {
+                        (Op::Extract,
+                         serde_json::json!({ "kind": "json", "schema": schema, "provider": provider.name(), "model": model }),
+                         match &output { LlmOutput::Json(v) => v.clone(), LlmOutput::Text(s) => serde_json::Value::String(s.clone()) })
+                    } else if let Some(ref prompt) = cli.extract_prompt {
+                        (Op::Extract,
+                         serde_json::json!({ "kind": "prompt", "prompt": prompt, "provider": provider.name(), "model": model }),
+                         match &output { LlmOutput::Json(v) => v.clone(), LlmOutput::Text(s) => serde_json::Value::String(s.clone()) })
                     } else {
-                        OutputFormat::Json
+                        let sentences = cli.summarize.unwrap_or(3);
+                        (Op::Summarize,
+                         serde_json::json!({ "sentences": sentences, "provider": provider.name(), "model": model }),
+                         match &output { LlmOutput::Text(s) => serde_json::Value::String(s.clone()), LlmOutput::Json(v) => v.clone() })
                     };
-                    let filename = custom_names
-                        .get(url.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| url_to_filename(url, &file_format));
-                    write_to_file(&output_dir, &filename, &output_str)?;
-                } else {
-                    println!("--- {url}");
-                    println!("{output_str}");
-                    println!();
+                    let log_entry = OperationEntry {
+                        op,
+                        at: chrono::Utc::now(),
+                        url: url.clone(),
+                        input: log_input,
+                        output: log_output,
+                    };
+                    if let Err(e) = log.append(&domain, &log_entry).await {
+                        tracing::warn!("ops log append failed for batch-llm: {e}");
+                    }
                 }
+
+                println!("--- {url}");
+                println!("{output_str}");
+                println!();
 
                 all_results.push(result_json);
             }

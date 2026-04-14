@@ -13,6 +13,7 @@ const OUTPUT_SIZE_LIMIT: usize = 1024 * 1024; // 1 MiB
 /// Filesystem-backed operations log.
 ///
 /// Appends one NDJSON line per operation to `<root>/<domain>/.operations.ndjson`.
+#[derive(Debug)]
 pub struct FilesystemOperationsLog {
     root: PathBuf,
 }

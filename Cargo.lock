@@ -2231,6 +2231,7 @@ dependencies = [
 name = "noxa-cli"
 version = "0.5.0"
 dependencies = [
+ "chrono",
  "clap",
  "dialoguer",
  "dirs",

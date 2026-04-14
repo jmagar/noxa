@@ -22,16 +22,18 @@
 | Sidecar changelog cap (N entries max) | ⏸ Deferred — implement before unbounded growth is observed |
 | `.index.ndjson` for `--list`/`--retrieve` | ⏸ Deferred — implement before >1k pages |
 | Directory hash sharding | ⏸ Deferred — implement before >5k files per domain |
-| Create `crates/noxa-store/` — move store.rs + add new types | 🔲 Pending |
-| `FilesystemOperationsLog` (NDJSON) | 🔲 Pending |
-| Move `content_store_root()` from `noxa-cli` to `noxa-store` | 🔲 Pending |
-| Wire map/brand → `OperationsLog` in `noxa-fetch` | 🔲 Pending |
-| Wire diff/watch → `OperationsLog` in CLI (inline `append()`) | 🔲 Pending |
-| Wire summarize/extract → `OperationsLog` in `noxa-llm` | 🔲 Pending |
-| Watch restart continuity + `is_initial_baseline` guard | 🔲 Pending |
-| Security stripping in `ContentStore::write` | 🔲 Pending |
-| File permission enforcement (`0o700`/`0o600`) | 🔲 Pending |
-| Delete `write_to_file` loose-file calls in `noxa-cli` | 🔲 Pending |
+| Create `crates/noxa-store/` — move store.rs + add new types | ✅ Implemented |
+| `FilesystemOperationsLog` (NDJSON) | ✅ Implemented |
+| Move `content_store_root()` from `noxa-cli` to `noxa-store` | ✅ Implemented |
+| Wire map → `OperationsLog` via `FetchClient::map_site()` in `noxa-fetch` | ✅ Implemented |
+| Wire brand → `OperationsLog` inline in CLI `run_brand` | ✅ Implemented |
+| Wire diff → `OperationsLog` inline in CLI `run_diff` | ✅ Implemented |
+| Wire watch → `OperationsLog` inline in CLI `run_watch_single`/`run_watch_multi` | ✅ Implemented |
+| Wire summarize/extract → `OperationsLog` inline in CLI `run_llm`/`run_batch_llm` | ✅ Implemented |
+| Watch restart continuity + `is_initial_baseline` guard | ✅ Implemented |
+| Security stripping in `ContentStore::write` | ✅ Implemented |
+| File permission enforcement (`0o700`/`0o600`) | ✅ Implemented |
+| Delete `write_to_file` calls for derived outputs in `noxa-cli` | ✅ Implemented |
 
 ---
 
