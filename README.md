@@ -707,7 +707,7 @@ noxa/
     noxa-fetch    HTTP client + TLS fingerprinting (wreq/BoringSSL). Crawler. Batch ops.
     noxa-llm      LLM provider chain (Gemini CLI -> OpenAI -> Ollama -> Anthropic)
     noxa-pdf      PDF text extraction
-    noxa-mcp      MCP server (10 tools for AI agents)  → binary: noxa-mcp
+    noxa-mcp      MCP server (10 tools for AI agents)  → run via: noxa mcp
     noxa-rag      RAG pipeline (TEI embeddings + Qdrant vector store)  → binary: noxa-rag-daemon
     noxa-cli      CLI binary  → binary: noxa
 ```

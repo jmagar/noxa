@@ -15,7 +15,6 @@ docs/reports
 docs/sessions
 benchmarks
 .claude/
-config.md
 .worktrees/
 
 # Beads / Dolt files (added by bd init)
