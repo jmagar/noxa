@@ -306,8 +306,14 @@ impl FilesystemContentStore {
         // ---- Build the updated sidecar and decide what changed -------------
         let (sidecar, is_new, changed, word_count_delta, diff_result) =
             if let Some(mut existing) = existing_sidecar {
-                // Compare against previous current content.
-                let content_diff = noxa_core::diff::diff(&existing.current, &to_store);
+                // Offload CPU-bound diff to spawn_blocking to avoid blocking the executor.
+                let prev = existing.current.clone();
+                let curr = to_store.clone();
+                let content_diff = tokio::task::spawn_blocking(move || {
+                    noxa_core::diff::diff(&prev, &curr)
+                })
+                .await
+                .map_err(|e| format!("store: diff join: {e}"))?;
                 let changed = content_diff.status == noxa_core::ChangeStatus::Changed;
                 let wc_delta =
                     to_store.metadata.word_count as i64 - existing.current.metadata.word_count as i64;
