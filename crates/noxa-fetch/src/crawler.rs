@@ -209,7 +209,10 @@ impl Crawler {
             }
         };
 
-        let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
+        // Clamp concurrency to at least 1 — Semaphore::new(0) would cause every
+        // task to await permits forever, hanging the crawl indefinitely.
+        let concurrency = self.config.concurrency.max(1);
+        let semaphore = Arc::new(Semaphore::new(concurrency));
         let mut visited: HashSet<String>;
         let mut pages: Vec<PageResult> = Vec::new();
         let mut frontier: Vec<(String, usize)>;

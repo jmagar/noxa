@@ -3,12 +3,19 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Result of a [`FilesystemContentStore::write`] call.
+///
+/// Marked `#[non_exhaustive]` so that future additive fields do not constitute
+/// a semver-breaking change for downstream crates that pattern-match or
+/// construct this struct.
+#[non_exhaustive]
 pub struct StoreResult {
     pub md_path: PathBuf,
     pub json_path: PathBuf,
     pub is_new: bool,
     pub changed: bool,
     pub word_count_delta: i64,
+    /// The diff computed against the previous version, if any.
+    pub diff: Option<noxa_core::ContentDiff>,
 }
 
 /// Operation variant recorded in `.operations.ndjson`.

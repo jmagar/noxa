@@ -10,7 +10,7 @@ pub mod operations_log;
 pub mod paths;
 pub mod types;
 
-pub use content_store::FilesystemContentStore;
+pub use content_store::{ChangelogEntry, FilesystemContentStore, Sidecar};
 pub use operations_log::FilesystemOperationsLog;
 pub use paths::{content_store_root, domain_from_url, url_to_store_path};
 pub use types::{Op, OperationEntry, StoreResult};
