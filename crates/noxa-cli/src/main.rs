@@ -572,19 +572,7 @@ fn build_extraction_options(resolved: &config::ResolvedConfig) -> ExtractionOpti
     }
 }
 
-/// Returns the root path for the local content store.
-///
-/// When `output_dir` is `Some`, that directory is used directly.
-/// Otherwise falls back to `~/.noxa/content` (the canonical default).
-fn content_store_root(output_dir: Option<&std::path::Path>) -> std::path::PathBuf {
-    if let Some(dir) = output_dir {
-        return dir.to_path_buf();
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content")
-}
+// content_store_root is defined below (delegates to noxa_store::content_store_root).
 
 /// Normalize a URL: prepend `https://` if no scheme is present.
 fn normalize_url(url: &str) -> String {
@@ -4201,7 +4189,10 @@ mod enum_deserialize_tests {
     #[test]
     fn content_store_root_uses_explicit_output_dir() {
         let path = std::path::PathBuf::from("custom-output");
-        assert_eq!(content_store_root(Some(path.as_path())), path);
+        assert_eq!(
+            content_store_root(Some(path.as_path())),
+            path.join(".noxa/content")
+        );
     }
 
     #[test]
