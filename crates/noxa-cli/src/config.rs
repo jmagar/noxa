@@ -112,10 +112,18 @@ impl NoxaConfig {
             .unwrap_or(&path_str);
 
         // Detect secret-looking keys in the raw JSON before parsing
-        let secret_keys = ["api_key", "proxy", "webhook", "llm_base_url", "password", "token", "secret"];
-        let has_secrets = secret_keys.iter().any(|k| {
-            content.contains(&format!("\"{k}\""))
-        });
+        let secret_keys = [
+            "api_key",
+            "proxy",
+            "webhook",
+            "llm_base_url",
+            "password",
+            "token",
+            "secret",
+        ];
+        let has_secrets = secret_keys
+            .iter()
+            .any(|k| content.contains(&format!("\"{k}\"")));
 
         use crate::theme::*;
 
@@ -125,9 +133,7 @@ impl NoxaConfig {
                  {yellow}⚠  secrets detected — api_key, proxy, webhook belong in .env{reset}"
             );
         } else {
-            eprintln!(
-                "{dim}config:{reset} {cyan}{bold}{display_name}{reset}  {green}✓{reset}"
-            );
+            eprintln!("{dim}config:{reset} {cyan}{bold}{display_name}{reset}  {green}✓{reset}");
         }
         tracing::debug!("config path: {}", path.display());
 

@@ -39,7 +39,6 @@ struct CollectionNamedVectors {
     vectors: HashMap<String, CollectionVectors>,
 }
 
-
 #[derive(Serialize)]
 struct UpsertRequest {
     points: Vec<QdrantPoint>,
@@ -607,9 +606,7 @@ impl VectorStore for QdrantStore {
             .json()
             .await
             .map_err(|e| RagError::Store(format!("collection_point_count parse failed: {e}")))?;
-        Ok(body["result"]["vectors_count"]
-            .as_u64()
-            .unwrap_or(0))
+        Ok(body["result"]["vectors_count"].as_u64().unwrap_or(0))
     }
 
     /// Check whether any point exists with both `url` == `url` AND `content_hash` == `hash`.

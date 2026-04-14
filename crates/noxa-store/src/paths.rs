@@ -161,7 +161,13 @@ mod tests {
 
     #[test]
     fn test_domain_from_url() {
-        assert_eq!(domain_from_url("https://docs.example.com/api"), "docs_example_com");
-        assert_eq!(domain_from_url("https://www.rust-lang.org/"), "rust-lang_org");
+        assert_eq!(
+            domain_from_url("https://docs.example.com/api"),
+            "docs_example_com"
+        );
+        assert_eq!(
+            domain_from_url("https://www.rust-lang.org/"),
+            "rust-lang_org"
+        );
     }
 }

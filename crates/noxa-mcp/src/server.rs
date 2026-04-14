@@ -54,7 +54,9 @@ fn parse_http_url(url: &str) -> Result<Url, String> {
             ));
         }
     }
-    parsed.host_str().ok_or("Invalid URL: no host".to_string())?;
+    parsed
+        .host_str()
+        .ok_or("Invalid URL: no host".to_string())?;
     Ok(parsed)
 }
 
@@ -81,7 +83,7 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
                 || v6.is_unspecified()               // ::
                 || v6.is_multicast()                 // ff00::/8
                 || (seg0 & 0xffc0) == 0xfe80         // fe80::/10 link-local
-                || (seg0 & 0xfe00) == 0xfc00         // fc00::/7  unique-local (ULA)
+                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7  unique-local (ULA)
         }
     }
 }
@@ -110,7 +112,8 @@ where
     if url.is_empty() {
         return Err("Invalid URL: must not be empty".into());
     }
-    let parsed = Url::parse(url).map_err(|e| format!("Invalid URL: {e}. Must start with http:// or https://"))?;
+    let parsed = Url::parse(url)
+        .map_err(|e| format!("Invalid URL: {e}. Must start with http:// or https://"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(format!(
             "Invalid URL: scheme '{}' not allowed, must start with http:// or https://",
@@ -147,9 +150,7 @@ where
                 }
             }
             Err(e) => {
-                return Err(format!(
-                    "Invalid URL: could not resolve host '{host}': {e}"
-                ));
+                return Err(format!("Invalid URL: could not resolve host '{host}': {e}"));
             }
         }
     }
@@ -347,7 +348,9 @@ impl NoxaMcp {
 
         let concurrency = params.concurrency.unwrap_or(5);
         if concurrency == 0 || concurrency > 20 {
-            return Err(format!("concurrency must be between 1 and 20 (got {concurrency})"));
+            return Err(format!(
+                "concurrency must be between 1 and 20 (got {concurrency})"
+            ));
         }
 
         let config = noxa_fetch::CrawlConfig {
@@ -422,7 +425,9 @@ impl NoxaMcp {
         let format = params.format.as_deref().unwrap_or("markdown");
         let concurrency = params.concurrency.unwrap_or(5);
         if concurrency == 0 || concurrency > 20 {
-            return Err(format!("concurrency must be between 1 and 20 (got {concurrency})"));
+            return Err(format!(
+                "concurrency must be between 1 and 20 (got {concurrency})"
+            ));
         }
         let url_refs: Vec<&str> = params.urls.iter().map(String::as_str).collect();
 
@@ -1050,7 +1055,11 @@ mod tests {
 
     #[tokio::test]
     async fn validate_rejects_link_local() {
-        assert!(validate_url("http://169.254.169.254/latest/meta-data/").await.is_err());
+        assert!(
+            validate_url("http://169.254.169.254/latest/meta-data/")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1078,7 +1087,11 @@ mod tests {
     #[tokio::test]
     async fn validate_rejects_ipv4_mapped_ipv6() {
         assert!(validate_url("http://[::ffff:127.0.0.1]/").await.is_err());
-        assert!(validate_url("http://[::ffff:169.254.169.254]/latest/meta-data/").await.is_err());
+        assert!(
+            validate_url("http://[::ffff:169.254.169.254]/latest/meta-data/")
+                .await
+                .is_err()
+        );
         assert!(validate_url("http://[::ffff:10.0.0.1]/").await.is_err());
     }
 
@@ -1096,29 +1109,45 @@ mod tests {
     async fn validate_accepts_hostname_resolving_to_public() {
         let result = validate_url_impl("http://example.com/", |_| async {
             // Simulate example.com → 93.184.216.34 (IANA-assigned, public)
-            Ok(vec!["93.184.216.34:80".parse::<std::net::SocketAddr>().unwrap()])
+            Ok(vec![
+                "93.184.216.34:80".parse::<std::net::SocketAddr>().unwrap(),
+            ])
         })
         .await;
-        assert!(result.is_ok(), "hostname resolving to a public IP should be accepted");
+        assert!(
+            result.is_ok(),
+            "hostname resolving to a public IP should be accepted"
+        );
     }
 
     #[tokio::test]
     async fn validate_rejects_hostname_resolving_to_private() {
         let result = validate_url_impl("http://attacker.example/", |_| async {
             // Simulate DNS rebinding: attacker.example → 192.168.1.1 (private)
-            Ok(vec!["192.168.1.1:80".parse::<std::net::SocketAddr>().unwrap()])
+            Ok(vec![
+                "192.168.1.1:80".parse::<std::net::SocketAddr>().unwrap(),
+            ])
         })
         .await;
-        assert!(result.is_err(), "hostname resolving to a private IP should be rejected");
+        assert!(
+            result.is_err(),
+            "hostname resolving to a private IP should be rejected"
+        );
     }
 
     #[tokio::test]
     async fn validate_rejects_hostname_dns_failure() {
         let result = validate_url_impl("http://nxdomain.example/", |_| async {
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no such host"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such host",
+            ))
         })
         .await;
-        assert!(result.is_err(), "DNS failure should be rejected (fail-closed)");
+        assert!(
+            result.is_err(),
+            "DNS failure should be rejected (fail-closed)"
+        );
     }
 
     #[tokio::test]

@@ -62,7 +62,9 @@ fn check_prerequisites() {
                 .unwrap_or(false);
 
             if too_old {
-                println!("\x1b[33m[!]\x1b[0m Rust 1.85+ required (edition 2024). Run: rustup update");
+                println!(
+                    "\x1b[33m[!]\x1b[0m Rust 1.85+ required (edition 2024). Run: rustup update"
+                );
                 all_good = false;
             }
         }
@@ -90,7 +92,9 @@ fn check_prerequisites() {
         if ollama_running() {
             println!("\x1b[32m[+]\x1b[0m Ollama is running");
         } else {
-            println!("\x1b[33m[!]\x1b[0m Ollama installed but not running (start with: ollama serve)");
+            println!(
+                "\x1b[33m[!]\x1b[0m Ollama installed but not running (start with: ollama serve)"
+            );
         }
     } else {
         println!("\x1b[33m[!]\x1b[0m Ollama not found (optional — needed for local LLM features)");
@@ -174,7 +178,9 @@ fn configure_env(theme: &ColorfulTheme, dir: &Path) {
             .count();
         println!("\x1b[32m[+]\x1b[0m proxies.txt found with {count} proxies (auto-loaded)");
     } else {
-        println!("\x1b[34m[*]\x1b[0m To use proxies, create proxies.txt (format: host:port:user:pass)");
+        println!(
+            "\x1b[34m[*]\x1b[0m To use proxies, create proxies.txt (format: host:port:user:pass)"
+        );
     }
 
     println!();
@@ -248,7 +254,9 @@ fn setup_ollama(theme: &ColorfulTheme) {
     println!();
 
     if Command::new("ollama").arg("--version").output().is_err() {
-        println!("\x1b[34m[*]\x1b[0m Ollama not installed (optional — needed for local LLM features).");
+        println!(
+            "\x1b[34m[*]\x1b[0m Ollama not installed (optional — needed for local LLM features)."
+        );
 
         let install = Confirm::with_theme(theme)
             .with_prompt("Install Ollama?")
@@ -278,7 +286,9 @@ fn setup_ollama(theme: &ColorfulTheme) {
             match status {
                 Ok(s) if s.success() => println!("\x1b[32m[+]\x1b[0m Ollama installed."),
                 _ => {
-                    println!("\x1b[31m[x]\x1b[0m Ollama install failed. Try manually: https://ollama.ai");
+                    println!(
+                        "\x1b[31m[x]\x1b[0m Ollama install failed. Try manually: https://ollama.ai"
+                    );
                     println!();
                     return;
                 }
@@ -306,7 +316,9 @@ fn setup_ollama(theme: &ColorfulTheme) {
             if ollama_running() {
                 println!("\x1b[32m[+]\x1b[0m Ollama is running.");
             } else {
-                println!("\x1b[33m[!]\x1b[0m Ollama didn't start. Start it manually and re-run setup.");
+                println!(
+                    "\x1b[33m[!]\x1b[0m Ollama didn't start. Start it manually and re-run setup."
+                );
                 println!();
                 return;
             }
@@ -367,7 +379,9 @@ fn setup_mcp(theme: &ColorfulTheme, dir: &Path) {
         return;
     }
 
-    println!("\x1b[34m[*]\x1b[0m Tools available via MCP: scrape, crawl, map, batch, extract, summarize, diff, brand");
+    println!(
+        "\x1b[34m[*]\x1b[0m Tools available via MCP: scrape, crawl, map, batch, extract, summarize, diff, brand"
+    );
     println!();
 
     let configure = Confirm::with_theme(theme)
@@ -459,7 +473,10 @@ fn print_summary(dir: &Path) {
     println!();
     println!("  \x1b[1mCLI:\x1b[0m");
     println!("    {} https://example.com --format llm", noxa.display());
-    println!("    {} https://example.com --search \"rust async\"", noxa.display());
+    println!(
+        "    {} https://example.com --search \"rust async\"",
+        noxa.display()
+    );
     println!();
     println!("  \x1b[1mMCP Server:\x1b[0m");
     println!("    {}", mcp.display());
@@ -486,7 +503,7 @@ fn check_ollama_model(model: &str) -> bool {
     let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:11434") else {
         return false;
     };
-    use std::io::{Write as _, Read as _};
+    use std::io::{Read as _, Write as _};
     let req = "GET /api/tags HTTP/1.0\r\nHost: localhost\r\n\r\n";
     if stream.write_all(req.as_bytes()).is_err() {
         return false;

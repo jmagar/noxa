@@ -197,6 +197,9 @@ mod tests {
 
         let log_path = dir.path().join("example_com/.operations.ndjson");
         let content = std::fs::read_to_string(&log_path).unwrap();
-        assert!(content.contains("output_truncated"), "content was: {content}");
+        assert!(
+            content.contains("output_truncated"),
+            "content was: {content}"
+        );
     }
 }

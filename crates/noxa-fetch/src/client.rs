@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use noxa_pdf::PdfMode;
 use rand::seq::SliceRandom;
+use serde_json;
 use tokio::sync::Semaphore;
 use tracing::{debug, instrument, warn};
-use serde_json;
 
 use crate::browser::{self, BrowserProfile, BrowserVariant};
 use crate::error::FetchError;
@@ -219,7 +219,12 @@ impl FetchClient {
             ClientPool::Rotating { clients }
         };
 
-        Ok(Self { pool, pdf_mode, store, ops_log })
+        Ok(Self {
+            pool,
+            pdf_mode,
+            store,
+            ops_log,
+        })
     }
 
     /// Return the operations log configured for this client, if any.

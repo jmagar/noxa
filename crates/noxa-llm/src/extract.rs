@@ -43,15 +43,25 @@ fn build_schema_correction_prompt(value: &serde_json::Value, schema: &serde_json
         return "Return ONLY corrected JSON matching the schema.".to_string();
     };
 
-    let correction = compiled.iter_errors(value).next().map(|e| {
-        let path = e.instance_path().to_string();
-        let keyword = e.kind().keyword();
-        if path.is_empty() || path == "/" {
-            format!("Field failed '{}' check. Return ONLY corrected JSON.", keyword)
-        } else {
-            format!("Field '{}' failed '{}' check. Return ONLY corrected JSON.", path, keyword)
-        }
-    }).unwrap_or_else(|| "Return ONLY corrected JSON matching the schema.".to_string());
+    let correction = compiled
+        .iter_errors(value)
+        .next()
+        .map(|e| {
+            let path = e.instance_path().to_string();
+            let keyword = e.kind().keyword();
+            if path.is_empty() || path == "/" {
+                format!(
+                    "Field failed '{}' check. Return ONLY corrected JSON.",
+                    keyword
+                )
+            } else {
+                format!(
+                    "Field '{}' failed '{}' check. Return ONLY corrected JSON.",
+                    path, keyword
+                )
+            }
+        })
+        .unwrap_or_else(|| "Return ONLY corrected JSON matching the schema.".to_string());
 
     // Hard cap at 200 chars — schema errors should never need more than this.
     if correction.len() > 200 {
@@ -485,9 +495,9 @@ mod tests {
     /// does not appear in any message sent during the retry call.
     #[tokio::test]
     async fn retry_prompt_does_not_embed_raw_model_output() {
-        use std::sync::{Arc, Mutex};
-        use async_trait::async_trait;
         use crate::provider::{CompletionRequest, LlmProvider};
+        use async_trait::async_trait;
+        use std::sync::{Arc, Mutex};
 
         /// A mock that records every request it receives.
         struct RecordingProvider {
@@ -508,8 +518,12 @@ mod tests {
                     .push(request.messages.clone());
                 Ok(self.responses[idx].clone())
             }
-            async fn is_available(&self) -> bool { true }
-            fn name(&self) -> &str { "recording-mock" }
+            async fn is_available(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "recording-mock"
+            }
         }
 
         // A distinctive raw model output that must NOT appear in the retry prompt.
@@ -531,7 +545,9 @@ mod tests {
             "properties": { "price": { "type": "number" } }
         });
 
-        let result = extract_json("some content", &schema, &mock, None).await.unwrap();
+        let result = extract_json("some content", &schema, &mock, None)
+            .await
+            .unwrap();
         assert_eq!(result["price"], 9.99);
 
         // Inspect the messages sent on the second (retry) call.
