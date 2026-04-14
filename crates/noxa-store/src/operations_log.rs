@@ -2,15 +2,16 @@
 //!
 //! One JSON object per line. O(1) appends via `OpenOptions::append(true)`.
 //!
-//! **Concurrency guarantees:**
-//! - Same-process concurrency is serialized through `spawn_blocking` (only one
-//!   blocking append runs at a time per Tokio runtime).
-//! - Cross-process atomicity is **not** guaranteed for large entries because
-//!   `write_all()` may split into multiple syscalls. `O_APPEND` only guarantees
-//!   atomicity for writes up to `PIPE_BUF` (typically 4 KiB on Linux).
-//! - For the typical single-writer scenario this is safe; concurrent writers
-//!   from separate processes may interleave partial lines for entries exceeding
-//!   `PIPE_BUF`.
+//! **Concurrency notes:**
+//! - `O_APPEND` guarantees the seek-to-end + write is atomic at the kernel
+//!   level (inode lock), but `write_all()` may issue multiple `write(2)`
+//!   syscalls for large buffers. If two writers (threads or processes) append
+//!   entries that each exceed the OS page size, partial lines can interleave.
+//! - The `OUTPUT_SIZE_LIMIT` truncation keeps most entries small, but this
+//!   module does **not** guarantee corruption-free concurrent writes for
+//!   entries near that limit.
+//! - For the typical single-writer scenario (one CLI / one MCP server) this
+//!   is safe.
 use std::io::Write;
 use std::path::{Component, PathBuf};
 
