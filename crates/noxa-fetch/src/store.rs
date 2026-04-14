@@ -4,7 +4,8 @@
 //! (`Sidecar`) that keeps the full `ExtractionResult` in `current` plus a
 //! `changelog` of every content change over time.  Old sidecars (raw
 //! `ExtractionResult` JSON without a `schema_version` key) are migrated
-//! transparently on first read.
+//! transparently **in-memory** on first read; the migrated form is not written
+//! back to disk until the next `write()` call.
 use std::path::{Component, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -103,6 +104,12 @@ pub struct Sidecar {
 // StoreResult
 // ---------------------------------------------------------------------------
 
+/// Result of a [`ContentStore::write`] operation.
+///
+/// Marked `#[non_exhaustive]` so that future additive fields (e.g. new
+/// metrics or status flags) do not constitute a semver-breaking change for
+/// downstream crates that pattern-match or construct this struct.
+#[non_exhaustive]
 pub struct StoreResult {
     pub md_path: PathBuf,
     pub json_path: PathBuf,
@@ -352,9 +359,14 @@ impl ContentStore {
                 (existing, false, changed, wc_delta, diff_opt)
             } else {
                 // First write — create new sidecar.
+                // Strip query params from `url` to avoid persisting tokens/secrets.
+                let clean_url = url::Url::parse(url)
+                    .ok()
+                    .map(|mut u| { u.set_query(None); u.to_string() })
+                    .unwrap_or_else(|| url.to_string());
                 let sidecar = Sidecar {
                     schema_version: 1,
-                    url: url.to_string(),
+                    url: clean_url,
                     first_seen: now,
                     last_fetched: now,
                     fetch_count: 1,
@@ -370,7 +382,6 @@ impl ContentStore {
 
         // ---- Serialize ---------------------------------------------------------
         let write_md = is_new || changed;
-        let markdown_bytes = to_store.content.markdown.as_bytes().to_vec();
         let json_bytes = tokio::task::spawn_blocking(move || {
             serde_json::to_vec(&sidecar).map_err(|e| format!("store: serialize: {e}"))
         })
@@ -378,22 +389,22 @@ impl ContentStore {
         .map_err(|e| format!("store: serialize join: {e}"))??;
 
         // ---- Atomic writes -------------------------------------------------------
+        // Write order: .md first (when needed), then .json.
+        //
+        // The JSON sidecar is the authoritative commit point — if a crash occurs
+        // between a successful .md rename and the .json rename, the old sidecar
+        // remains on disk and the .md will be rewritten on the next fetch.
+        // If the .md write fails before the sidecar is updated, the sidecar
+        // still reflects the previous state, making the failure safely retryable.
         let rand_suffix = {
             use rand::Rng;
             format!("{:016x}", rand::thread_rng().r#gen::<u64>())
         };
 
-        // Always write the JSON sidecar (last_fetched / fetch_count always update).
-        let tmp_json = json_path.with_extension(format!("json.{rand_suffix}.tmp"));
-        tokio::fs::write(&tmp_json, &json_bytes)
-            .await
-            .map_err(|e| format!("store: write json.tmp: {e}"))?;
-        tokio::fs::rename(&tmp_json, &json_path)
-            .await
-            .map_err(|e| format!("store: rename json: {e}"))?;
-
         // Only rewrite the .md when content changed or it's the first write.
+        // Defer the allocation until it is actually needed.
         if write_md {
+            let markdown_bytes = to_store.content.markdown.as_bytes().to_vec();
             let tmp_md = md_path.with_extension(format!("md.{rand_suffix}.tmp"));
             tokio::fs::write(&tmp_md, &markdown_bytes)
                 .await
@@ -402,6 +413,17 @@ impl ContentStore {
                 .await
                 .map_err(|e| format!("store: rename md: {e}"))?;
         }
+
+        // Always write the JSON sidecar (last_fetched / fetch_count always update).
+        // This acts as the transaction commit — written last so a crash before
+        // this point leaves the previous sidecar intact.
+        let tmp_json = json_path.with_extension(format!("json.{rand_suffix}.tmp"));
+        tokio::fs::write(&tmp_json, &json_bytes)
+            .await
+            .map_err(|e| format!("store: write json.tmp: {e}"))?;
+        tokio::fs::rename(&tmp_json, &json_path)
+            .await
+            .map_err(|e| format!("store: rename json: {e}"))?;
 
         Ok(StoreResult {
             md_path,
@@ -420,7 +442,9 @@ impl ContentStore {
 
 /// Try to parse `contents` as a new-format `Sidecar`.  If that fails (old
 /// format or parse error), fall back to reading a raw `ExtractionResult` and
-/// wrapping it with `mtime` as `first_seen`.
+/// wrapping it with the current time for `first_seen`/`last_fetched` (no mtime
+/// is available at this call site).  The migrated sidecar is **not** written
+/// back to disk; it will be persisted on the next `write()` call.
 fn parse_sidecar_or_legacy(
     contents: &str,
 ) -> Result<Sidecar, serde_json::Error> {
@@ -428,7 +452,7 @@ fn parse_sidecar_or_legacy(
     if let Ok(sidecar) = serde_json::from_str::<Sidecar>(contents) {
         return Ok(sidecar);
     }
-    // Legacy: raw ExtractionResult — no mtime available here.
+    // Legacy: raw ExtractionResult — no mtime available here; use now.
     let extraction = serde_json::from_str::<noxa_core::ExtractionResult>(contents)?;
     let now = Utc::now();
     Ok(Sidecar {
@@ -437,13 +461,19 @@ fn parse_sidecar_or_legacy(
         first_seen: now,
         last_fetched: now,
         fetch_count: 1,
-        changelog: vec![],
+        changelog: vec![ChangelogEntry {
+            at: now,
+            word_count: extraction.metadata.word_count,
+            diff: None,
+        }],
         current: extraction,
     })
 }
 
 /// Like `parse_sidecar_or_legacy` but uses `mtime` for `first_seen` when
-/// migrating an old-format file.
+/// migrating an old-format file.  An initial `ChangelogEntry` (with `diff:
+/// None`) is seeded so that migrated sidecars satisfy the invariant that
+/// `changelog[0]` represents the initial fetch.
 fn parse_sidecar_or_migrate(
     contents: &str,
     mtime: DateTime<Utc>,
@@ -460,7 +490,11 @@ fn parse_sidecar_or_migrate(
         first_seen: mtime,
         last_fetched: mtime,
         fetch_count: 1,
-        changelog: vec![],
+        changelog: vec![ChangelogEntry {
+            at: mtime,
+            word_count: extraction.metadata.word_count,
+            diff: None,
+        }],
         current: extraction,
     })
 }
@@ -862,6 +896,9 @@ mod tests {
             .expect("sidecar should exist");
         assert_eq!(sidecar.schema_version, 1);
         assert_eq!(sidecar.fetch_count, 1);
+        // Legacy migration must seed an initial changelog entry (diff: None).
+        assert_eq!(sidecar.changelog.len(), 1, "migrated sidecar should have one changelog entry");
+        assert!(sidecar.changelog[0].diff.is_none(), "initial entry has no diff");
     }
 
     #[tokio::test]

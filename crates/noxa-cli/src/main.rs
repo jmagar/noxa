@@ -1707,11 +1707,19 @@ fn run_retrieve(query: &str) {
 
     for (url, path) in all_docs {
         let url_lower = url.to_lowercase();
-        // Also pull title from JSON sidecar if present
+        // Also pull title from JSON sidecar if present.
+        // Support both new Sidecar envelope and legacy raw ExtractionResult.
         let title_lower = path.with_extension("json")
             .pipe(|jp| std::fs::read_to_string(jp).ok())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v["metadata"]["title"].as_str().map(|t| t.to_lowercase()))
+            .and_then(|v| {
+                // New sidecar: nested under current.metadata.title.
+                if let Some(t) = v["current"]["metadata"]["title"].as_str() {
+                    return Some(t.to_lowercase());
+                }
+                // Legacy format: metadata.title at top level.
+                v["metadata"]["title"].as_str().map(|t| t.to_lowercase())
+            })
             .unwrap_or_default();
         let score = terms.iter().filter(|t| url_lower.contains(t.as_str()) || title_lower.contains(t.as_str())).count();
         if score > 0 {
@@ -3167,12 +3175,26 @@ fn collect_docs(
         if path.is_dir() {
             collect_docs(&path, store_root, out);
         } else if path.extension().and_then(|x| x.to_str()) == Some("md") {
-            // Read URL from JSON sidecar; fall back to reconstructing from path
+            // Read URL from JSON sidecar; fall back to reconstructing from path.
+            // Support both the new Sidecar envelope (url at top-level, metadata
+            // nested under "current") and the legacy raw ExtractionResult format
+            // (metadata at top-level).
             let json_path = path.with_extension("json");
             let url = std::fs::read_to_string(&json_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v["metadata"]["url"].as_str().map(|u| u.to_string()));
+                .and_then(|v| {
+                    // New sidecar: top-level "url" field.
+                    if let Some(u) = v["url"].as_str().filter(|s| !s.is_empty()) {
+                        return Some(u.to_string());
+                    }
+                    // New sidecar: nested under current.metadata.url.
+                    if let Some(u) = v["current"]["metadata"]["url"].as_str() {
+                        return Some(u.to_string());
+                    }
+                    // Legacy format: metadata.url at top level.
+                    v["metadata"]["url"].as_str().map(|u| u.to_string())
+                });
             if let Some(url) = url {
                 out.push((url, path));
             }
