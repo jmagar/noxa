@@ -40,7 +40,7 @@ pub struct FetchConfig {
     /// Optional content store. When set, every successful `fetch_and_extract`
     /// call automatically persists the result to disk. `None` (the default)
     /// disables persistence — existing call sites are unaffected.
-    pub store: Option<crate::store::ContentStore>,
+    pub store: Option<noxa_store::FilesystemContentStore>,
 }
 
 impl Default for FetchConfig {
@@ -160,7 +160,7 @@ pub struct FetchClient {
     pool: ClientPool,
     pdf_mode: PdfMode,
     /// Optional content store for auto-persisting extraction results.
-    store: Option<crate::store::ContentStore>,
+    store: Option<noxa_store::FilesystemContentStore>,
 }
 
 impl FetchClient {
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn test_fetch_config_clone_preserves_store() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::ContentStore::new(dir.path());
+        let store = noxa_store::FilesystemContentStore::new(dir.path());
         let config = FetchConfig {
             store: Some(store),
             ..Default::default()
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn test_fetch_client_new_extracts_store_from_config() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::ContentStore::new(dir.path());
+        let store = noxa_store::FilesystemContentStore::new(dir.path());
         let config = FetchConfig {
             store: Some(store),
             ..Default::default()

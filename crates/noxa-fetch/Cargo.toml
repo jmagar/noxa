@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 noxa-core = { workspace = true }
+noxa-store = { workspace = true }
 noxa-pdf = { path = "../noxa-pdf" }
 serde = { workspace = true }
 thiserror = { workspace = true }

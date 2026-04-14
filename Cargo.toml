@@ -10,6 +10,7 @@ repository = "https://github.com/jmagar/noxa"
 
 [workspace.dependencies]
 noxa-core = { path = "crates/noxa-core" }
+noxa-store = { path = "crates/noxa-store" }
 noxa-fetch = { path = "crates/noxa-fetch" }
 noxa-llm = { path = "crates/noxa-llm" }
 noxa-pdf = { path = "crates/noxa-pdf" }

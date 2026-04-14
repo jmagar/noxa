@@ -23,6 +23,7 @@ use noxa_fetch::{
     BatchExtractResult, BrowserProfile, CrawlConfig, CrawlResult, Crawler, FetchClient,
     FetchConfig, FetchResult, PageResult, SitemapEntry,
 };
+use noxa_store::{FilesystemContentStore, url_to_store_path};
 use noxa_llm::LlmProvider;
 use noxa_mcp;
 use noxa_pdf::PdfMode;
@@ -501,7 +502,7 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
     let store = if cli.no_store {
         None
     } else {
-        Some(noxa_fetch::ContentStore::open())
+        Some(FilesystemContentStore::new(content_store_root(resolved.output_dir.as_deref())))
     };
 
     FetchConfig {
@@ -580,11 +581,14 @@ fn url_to_filename(raw_url: &str, format: &OutputFormat) -> String {
         Err(_) => (String::new(), String::new(), None),
     };
 
+    let clean_host = host.strip_prefix("www.").unwrap_or(&host);
+    let host_dir = clean_host.replace('.', "_");
+
     let mut stem = path.trim_matches('/').to_string();
     if stem.is_empty() {
-        // Use hostname for root URLs to avoid collisions in batch mode
-        let clean_host = host.strip_prefix("www.").unwrap_or(&host);
-        stem = format!("{}/index", clean_host.replace('.', "_"));
+        stem = format!("{host_dir}/index");
+    } else {
+        stem = format!("{host_dir}/{stem}");
     }
 
     // Append query params so /p?id=123 doesn't collide with /p?id=456
@@ -706,9 +710,18 @@ where
     Ok(())
 }
 
-/// Write extraction output to a file inside `dir`, creating parent dirs as needed.
-fn effective_output_dir(dir: &Path) -> PathBuf {
-    dir.join(".noxa")
+/// Canonical content store root: `output_dir/.noxa/content` when configured,
+/// otherwise `~/.noxa/content`. Every fetch path writes here so the same URL
+/// always maps to the same file regardless of how it was fetched.
+///
+/// Exits the process with an error message if the home directory cannot be
+/// determined. Using `"."` as a fallback scatters data unpredictably; hard
+/// error is intentional.
+fn content_store_root(output_dir: Option<&Path>) -> PathBuf {
+    noxa_store::content_store_root(output_dir).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    })
 }
 
 /// Write extraction output to a file inside `dir`, creating parent dirs as needed.
@@ -1607,7 +1620,7 @@ fn crawl_status_dir() -> std::path::PathBuf {
 }
 
 fn crawl_status_path(url: &str) -> std::path::PathBuf {
-    let key = noxa_fetch::url_to_store_path(url)
+    let key = url_to_store_path(url)
         .components()
         .next()
         .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -1625,6 +1638,9 @@ fn write_crawl_status(
     last_url: Option<&str>,
     done: bool,
     elapsed_secs: f64,
+    docs_dir: &str,
+    excluded: usize,
+    total_words: usize,
 ) {
     let pid = std::process::id();
     let payload = serde_json::json!({
@@ -1637,6 +1653,9 @@ fn write_crawl_status(
         "last_url": last_url,
         "done": done,
         "elapsed_secs": (elapsed_secs * 10.0).round() / 10.0,
+        "docs_dir": docs_dir,
+        "excluded": excluded,
+        "total_words": total_words,
     });
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1649,12 +1668,7 @@ fn write_crawl_status(
     }
 }
 
-fn run_retrieve(query: &str) {
-
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
 
     if !store_root.exists() {
         eprintln!("{dim}no local docs — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --crawl <url>{reset}");
@@ -1673,7 +1687,7 @@ fn run_retrieve(query: &str) {
             format!("https://{query}")
         };
         let md_path = store_root
-            .join(noxa_fetch::url_to_store_path(&url))
+            .join(url_to_store_path(&url))
             .with_extension("md");
         if md_path.exists() {
             match std::fs::read_to_string(&md_path) {
@@ -1788,6 +1802,9 @@ fn run_status(domain: &str) {
     let done_flag    = v["done"].as_bool().unwrap_or(false);
     let elapsed      = v["elapsed_secs"].as_f64().unwrap_or(0.0);
     let pid          = v["pid"].as_u64().unwrap_or(0);
+    let docs_dir     = v["docs_dir"].as_str().unwrap_or("");
+    let excluded     = v["excluded"].as_u64().unwrap_or(0);
+    let total_words  = v["total_words"].as_u64().unwrap_or(0);
 
     // Check if process is still alive
     let running = !done_flag && pid > 0 && {
@@ -1812,7 +1829,23 @@ fn run_status(domain: &str) {
     };
 
     eprintln!("\n  {dim}crawl{reset}  {bold}{cyan}{url}{reset}  {state_label}\n");
-    eprintln!("  {dim}pages{reset}    {pages_display}  {green}{pages_ok} ok{reset}  {}",
+    if !docs_dir.is_empty() {
+        eprintln!("  {dim}docs{reset}     {pink}{docs_dir}{reset}");
+    }
+    let words_suffix = if done && total_words > 0 {
+        let s = if total_words >= 1_000_000 {
+            format!("  {dim}~{:.1}M words{reset}", total_words as f64 / 1_000_000.0)
+        } else if total_words >= 1_000 {
+            format!("  {dim}~{}k words{reset}", total_words / 1_000)
+        } else {
+            format!("  {dim}{total_words} words{reset}")
+        };
+        s
+    } else { String::new() };
+    let excl_suffix = if done && excluded > 0 {
+        format!("  {dim}{excluded} excluded{reset}")
+    } else { String::new() };
+    eprintln!("  {dim}pages{reset}    {pages_display}  {green}{pages_ok} ok{reset}  {}{words_suffix}{excl_suffix}",
         if pages_errors > 0 { format!("{yellow}{pages_errors} errors{reset}") } else { format!("{dim}0 errors{reset}") }
     );
     eprintln!("  {dim}elapsed{reset}  {bold}{elapsed:.1}s{reset}");
@@ -1823,10 +1856,19 @@ fn run_status(domain: &str) {
         eprintln!("  {dim}pid{reset}      {dim}{pid}{reset}");
         eprintln!("\n  {dim}noxa --crawl {url} --wait{reset}  {dim}to stream live progress{reset}");
     }
+    if done {
+        // Strip scheme for cleaner display in hints
+        let bare = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
+        let bare = bare.strip_prefix("www.").unwrap_or(bare);
+        let bare = bare.trim_end_matches('/');
+        eprintln!("\n  {dim}noxa --list {bare}{reset}          {dim}browse cached pages{reset}");
+        eprintln!("  {dim}noxa --retrieve <url>{reset}      {dim}read a specific page{reset}");
+        eprintln!("  {dim}noxa --grep \"<term>\" {reset}       {dim}search across all pages{reset}");
+    }
     eprintln!();
 }
 
-fn spawn_crawl_background(cli: &Cli) {
+fn spawn_crawl_background(cli: &Cli, resolved: &config::ResolvedConfig) {
 
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -1857,14 +1899,26 @@ fn spawn_crawl_background(cli: &Cli) {
     // Detach from process group so it survives terminal close
     unsafe { cmd.pre_exec(|| { libc::setsid(); Ok(()) }); }
 
+    let store_root = content_store_root(resolved.output_dir.as_deref());
+    let domain_dir = url::Url::parse(&normalize_url(url))
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h).replace('.', "_")))
+        .map(|d| store_root.join(d))
+        .unwrap_or(store_root);
+
     match cmd.spawn() {
         Ok(child) => {
             eprintln!(
                 "\n  {green}{bold}✓ crawl started{reset}  {bold}{cyan}{url}{reset}\n\
                  \n\
+                 {dim}  docs{reset}    {pink}{}{reset}\n\
+                 {dim}  config{reset}  depth {}  ·  up to {} pages  ·  {} concurrent{}\n\
                  {dim}  status{reset}  noxa --status {url}\n\
                  {dim}  log{reset}     {}{reset}\n\
                  {dim}  pid{reset}     {dim}{}{reset}\n",
+                domain_dir.display(),
+                resolved.depth, resolved.max_pages, resolved.concurrency,
+                if resolved.use_sitemap { "  ·  sitemap" } else { "" },
                 log_path.display(), child.id()
             );
         }
@@ -1933,13 +1987,23 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
     let max_pages = resolved.max_pages;
     let completed_offset = resume_state.as_ref().map_or(0, |s| s.completed_pages);
 
+    // Compute docs dir once — used for status file and final summary
+    let store_root = content_store_root(resolved.output_dir.as_deref());
+    let domain_dir = url::Url::parse(&normalize_url(url))
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h).replace('.', "_")))
+        .map(|d| store_root.join(d))
+        .unwrap_or(store_root);
+    let docs_dir_str = domain_dir.to_string_lossy().to_string();
+
     // Status file: ~/.noxa/crawls/<domain>.json — updated each page
     let status_path = crawl_status_path(url);
     let start_time = std::time::Instant::now();
-    write_crawl_status(&status_path, url, 0, 0, 0, max_pages, None, false, 0.0);
+    write_crawl_status(&status_path, url, 0, 0, 0, max_pages, None, false, 0.0, &docs_dir_str, 0, 0);
 
     let status_path_bg = status_path.clone();
     let url_for_status = url.to_string();
+    let docs_dir_bg = docs_dir_str.clone();
     let print_progress = cli.wait;
 
     // Spawn background task to print streaming progress to stderr
@@ -1958,6 +2022,7 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
                 count, ok, errors, max_pages,
                 Some(&page.url), false,
                 start_time.elapsed().as_secs_f64(),
+                &docs_dir_bg, 0, 0,
             );
         }
     });
@@ -1970,10 +2035,15 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
     let _ = progress_handle.await;
 
     // Mark crawl done in status file
+    let final_words: usize = result.pages.iter()
+        .filter_map(|p| p.extraction.as_ref())
+        .map(|e| e.metadata.word_count as usize)
+        .sum();
     write_crawl_status(
         &status_path, url,
         result.total, result.ok, result.errors, max_pages,
-        None, true, result.elapsed_secs,
+        None, true, result.elapsed_secs, &docs_dir_str,
+        result.excluded, final_words,
     );
 
     // If cancelled via Ctrl+C and --crawl-state is set, save state for resume
@@ -2015,23 +2085,35 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         }
     }
 
-    if let Some(ref dir) = resolved.output_dir {
-        let output_dir = effective_output_dir(dir);
-        let mut saved = 0usize;
-        for page in &result.pages {
-            if let Some(ref extraction) = page.extraction {
-                let filename = url_to_filename(&page.url, &resolved.format);
-                let content = format_output(extraction, &resolved.format, resolved.metadata);
-                write_to_file(&output_dir, &filename, &content)?;
-                saved += 1;
-            }
-        }
+    // ContentStore auto-persisted every page during the crawl.
+    // Show where they landed; if no output_dir is configured, just print to stdout.
+    if !cli.no_store {
+        let saved = result.pages.iter().filter(|p| p.extraction.is_some()).count();
+        let total_words: usize = result.pages.iter()
+            .filter_map(|p| p.extraction.as_ref())
+            .map(|e| e.metadata.word_count as usize)
+            .sum();
+        let words_str = if total_words >= 1_000_000 {
+            format!("~{:.1}M words", total_words as f64 / 1_000_000.0)
+        } else if total_words >= 1_000 {
+            format!("~{}k words", total_words / 1_000)
+        } else {
+            format!("{total_words} words")
+        };
+        let pages_str = if saved >= max_pages {
+            format!("{bold}{saved}{reset}{dim}/{max_pages} (capped){reset}")
+        } else {
+            format!("{bold}{saved}{reset}{dim}/{max_pages}{reset}")
+        };
         let err_part = if result.errors > 0 {
             format!("  {yellow}{} errors{reset}", result.errors)
         } else { String::new() };
+        let excl_part = if result.excluded > 0 {
+            format!("  {dim}{} excluded{reset}", result.excluded)
+        } else { String::new() };
         eprintln!(
-            "\n  {green}{bold}✓{reset} {bold}{saved} pages{reset}  {pink}{}{reset}  {dim}{:.1}s{reset}{err_part}\n",
-            output_dir.display(), result.elapsed_secs,
+            "\n  {green}{bold}✓{reset} {pages_str} pages  {dim}{words_str}{reset}  {pink}{}{reset}  {dim}{:.1}s{reset}{err_part}{excl_part}\n",
+            domain_dir.display(), result.elapsed_secs,
         );
     } else {
         print_crawl_output(&result, &resolved.format, resolved.metadata);
@@ -2087,7 +2169,7 @@ async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
     }
 
     if let Some(ref dir) = resolved.output_dir {
-        let output_dir = effective_output_dir(dir);
+        let output_dir = dir.clone();
         let content = format_map_output(&entries, &resolved.format);
         let filename = format!(
             "sitemap.{}",
@@ -2135,29 +2217,11 @@ async fn run_batch(
         }
     }
 
-    // Build a lookup of custom filenames by URL
-    let custom_names: std::collections::HashMap<&str, &str> = entries
-        .iter()
-        .filter_map(|(url, name)| name.as_deref().map(|n| (url.as_str(), n)))
-        .collect();
-
-    if let Some(ref dir) = resolved.output_dir {
-        let output_dir = effective_output_dir(dir);
-        let mut saved = 0usize;
-        for r in &results {
-            if let Ok(ref extraction) = r.result {
-                let filename = custom_names
-                    .get(r.url.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| url_to_filename(&r.url, &resolved.format));
-                let content = format_output(extraction, &resolved.format, resolved.metadata);
-                write_to_file(&output_dir, &filename, &content)?;
-                saved += 1;
-            }
-        }
-        eprintln!("Saved {saved} files to {}", output_dir.display());
-    } else {
-        print_batch_output(&results, &resolved.format, resolved.metadata);
+    print_batch_output(&results, &resolved.format, resolved.metadata);
+    if !cli.no_store {
+        let store_root = content_store_root(resolved.output_dir.as_deref());
+        let saved = results.iter().filter(|r| r.result.is_ok()).count();
+        eprintln!("Saved {saved} files to {}", store_root.display());
     }
 
     eprintln!(
@@ -2487,7 +2551,7 @@ async fn run_watch_multi(
             }
 
             if let Some(ref dir) = resolved.output_dir {
-                let output_dir = effective_output_dir(dir);
+                let output_dir = dir.clone();
                 let payload = serde_json::json!({
                     "event": "watch_changes",
                     "check_number": check_number,
@@ -2565,7 +2629,7 @@ async fn run_diff(
 
     let diff = noxa_core::diff::diff(&old, &new_result);
     if let Some(ref dir) = resolved.output_dir {
-        let output_dir = effective_output_dir(dir);
+        let output_dir = dir.clone();
         let content = format_diff_output(&diff, &resolved.format);
         let filename = format!(
             "diff.{}",
@@ -2592,7 +2656,7 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
     );
     let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
     if let Some(ref dir) = resolved.output_dir {
-        let output_dir = effective_output_dir(dir);
+        let output_dir = dir.clone();
         write_to_file(&output_dir, "brand.json", &output)?;
     } else {
         println!("{output}");
@@ -2729,7 +2793,7 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
 
     if let Some((output_str, file_format)) = file_output {
         if let Some(ref dir) = resolved.output_dir {
-            let output_dir = effective_output_dir(dir);
+            let output_dir = dir.clone();
             let url = cli
                 .urls
                 .first()
@@ -2853,7 +2917,7 @@ async fn run_batch_llm(
                 eprintln!("-> extracted {detail} ({:.1}s)", llm_elapsed.as_secs_f64());
 
                 if let Some(ref dir) = resolved.output_dir {
-                    let output_dir = effective_output_dir(dir);
+                    let output_dir = dir.clone();
                     let file_format = if cli.summarize.is_some() {
                         OutputFormat::Text
                     } else {
@@ -3005,7 +3069,7 @@ async fn run_research(
 
                 let json = serde_json::to_string_pretty(&status_resp).unwrap_or_default();
                 if let Some(ref dir) = resolved.output_dir {
-                    let output_dir = effective_output_dir(dir);
+                    let output_dir = dir.clone();
                     write_to_file(&output_dir, &filename, &json)?;
                 } else {
                     std::fs::write(&filename, &json)
@@ -3058,12 +3122,7 @@ async fn run_research(
     ))
 }
 
-fn run_list(filter: &str) {
-
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+fn run_list(filter: &str, store_root: std::path::PathBuf) {
 
     if !store_root.exists() {
         eprintln!("{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}");
@@ -3180,12 +3239,7 @@ fn collect_docs(
     }
 }
 
-fn run_grep(pattern: &str) {
-
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
 
     if !store_root.exists() {
         eprintln!("{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}");
@@ -3393,7 +3447,7 @@ async fn run_search(
         .await;
 
     for ((idx, title, url, snip), scrape) in valid.iter().zip(scraped.iter()) {
-        let store_path = store_root.join(noxa_fetch::url_to_store_path(url)).with_extension("md");
+        let store_path = store_root.join(url_to_store_path(url)).with_extension("md");
         println!("{dim}{idx:2}.{reset} {bold}{title}{reset}");
         println!("     {blue}{url}{reset}");
         if !snip.is_empty() {
@@ -3469,7 +3523,7 @@ async fn main() {
     }
 
     if let Some(ref query) = cli.retrieve {
-        run_retrieve(query);
+        run_retrieve(query, content_store_root(resolved.output_dir.as_deref()));
         return;
     }
 
@@ -3483,7 +3537,7 @@ async fn main() {
             }
         } else {
             // Background mode: re-exec self with --wait, detach
-            spawn_crawl_background(&cli);
+            spawn_crawl_background(&cli, &resolved);
         }
         return;
     }
@@ -3532,12 +3586,12 @@ async fn main() {
     }
 
     if let Some(ref filter) = cli.list {
-        run_list(filter);
+        run_list(filter, content_store_root(resolved.output_dir.as_deref()));
         return;
     }
 
     if let Some(ref pattern) = cli.grep {
-        run_grep(pattern);
+        run_grep(pattern, content_store_root(resolved.output_dir.as_deref()));
         return;
     }
 
@@ -3603,47 +3657,35 @@ async fn main() {
     // Single-page extraction (handles both HTML and PDF via content-type detection)
     match fetch_and_extract(&cli, &resolved).await {
         Ok(FetchOutput::Local(result)) => {
-            if let Some(ref dir) = resolved.output_dir {
-                let output_dir = effective_output_dir(dir);
+            print_output(&result, &resolved.format, resolved.metadata);
+            if !cli.no_store {
                 let url = cli
                     .urls
                     .first()
                     .map(|u| normalize_url(u))
                     .unwrap_or_default();
-                let custom_name = entries.first().and_then(|(_, name)| name.clone());
-                let filename =
-                    custom_name.unwrap_or_else(|| url_to_filename(&url, &resolved.format));
                 let content = format_output(&result, &resolved.format, resolved.metadata);
-                let dest = output_dir.join(&filename);
-                if let Err(e) = write_to_file(&output_dir, &filename, &content) {
-                    eprintln!("error: {e}");
-                    process::exit(1);
-                }
+                let store_root = content_store_root(resolved.output_dir.as_deref());
+                let dest = store_root
+                    .join(url_to_store_path(&url))
+                    .with_extension("md");
                 print_save_hint(&dest, &content);
-            } else {
-                print_output(&result, &resolved.format, resolved.metadata);
             }
         }
         Ok(FetchOutput::Cloud(resp)) => {
-            if let Some(ref dir) = resolved.output_dir {
-                let output_dir = effective_output_dir(dir);
+            print_cloud_output(&resp, &resolved.format);
+            if !cli.no_store {
                 let url = cli
                     .urls
                     .first()
                     .map(|u| normalize_url(u))
                     .unwrap_or_default();
-                let custom_name = entries.first().and_then(|(_, name)| name.clone());
-                let filename =
-                    custom_name.unwrap_or_else(|| url_to_filename(&url, &resolved.format));
                 let content = format_cloud_output(&resp, &resolved.format);
-                let dest = output_dir.join(&filename);
-                if let Err(e) = write_to_file(&output_dir, &filename, &content) {
-                    eprintln!("error: {e}");
-                    process::exit(1);
-                }
+                let store_root = content_store_root(resolved.output_dir.as_deref());
+                let dest = store_root
+                    .join(url_to_store_path(&url))
+                    .with_extension("md");
                 print_save_hint(&dest, &content);
-            } else {
-                print_cloud_output(&resp, &resolved.format);
             }
         }
         Err(e) => {
@@ -3673,7 +3715,7 @@ mod tests {
     fn url_to_filename_path() {
         assert_eq!(
             url_to_filename("https://example.com/docs/api", &OutputFormat::Markdown),
-            "docs/api.md"
+            "example_com/docs/api.md"
         );
     }
 
@@ -3681,7 +3723,7 @@ mod tests {
     fn url_to_filename_trailing_slash() {
         assert_eq!(
             url_to_filename("https://example.com/docs/api/", &OutputFormat::Markdown),
-            "docs/api.md"
+            "example_com/docs/api.md"
         );
     }
 
@@ -3689,7 +3731,7 @@ mod tests {
     fn url_to_filename_nested_path() {
         assert_eq!(
             url_to_filename("https://example.com/blog/my-post", &OutputFormat::Markdown),
-            "blog/my-post.md"
+            "example_com/blog/my-post.md"
         );
     }
 
@@ -3697,7 +3739,7 @@ mod tests {
     fn url_to_filename_query_params() {
         assert_eq!(
             url_to_filename("https://example.com/p?id=123", &OutputFormat::Markdown),
-            "p_id_123.md"
+            "example_com/p_id_123.md"
         );
     }
 
@@ -3705,7 +3747,7 @@ mod tests {
     fn url_to_filename_json_format() {
         assert_eq!(
             url_to_filename("https://example.com/docs/api", &OutputFormat::Json),
-            "docs/api.json"
+            "example_com/docs/api.json"
         );
     }
 
@@ -3713,7 +3755,7 @@ mod tests {
     fn url_to_filename_text_format() {
         assert_eq!(
             url_to_filename("https://example.com/docs/api", &OutputFormat::Text),
-            "docs/api.txt"
+            "example_com/docs/api.txt"
         );
     }
 
@@ -3721,7 +3763,7 @@ mod tests {
     fn url_to_filename_llm_format() {
         assert_eq!(
             url_to_filename("https://example.com/docs/api", &OutputFormat::Llm),
-            "docs/api.md"
+            "example_com/docs/api.md"
         );
     }
 
@@ -3729,7 +3771,7 @@ mod tests {
     fn url_to_filename_html_format() {
         assert_eq!(
             url_to_filename("https://example.com/docs/api", &OutputFormat::Html),
-            "docs/api.html"
+            "example_com/docs/api.html"
         );
     }
 
@@ -3741,7 +3783,7 @@ mod tests {
                 "https://example.com/path%20with%20spaces",
                 &OutputFormat::Markdown
             ),
-            "path_20with_20spaces.md"
+            "example_com/path_20with_20spaces.md"
         );
     }
 
@@ -3777,20 +3819,15 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_output_dir_nests_under_dot_noxa() {
-        let dir = std::path::PathBuf::from("out");
-        assert_eq!(effective_output_dir(&dir), dir.join(".noxa"));
+    fn test_content_store_root_no_output_dir() {
+        let root = content_store_root(None);
+        assert!(root.ends_with(".noxa/content"));
     }
 
     #[test]
-    fn test_write_to_file_uses_effective_output_dir() {
-        let base = std::env::temp_dir().join("noxa_effective_output_dir_test");
-        let dir = effective_output_dir(&base);
-        let _ = std::fs::remove_dir_all(&base);
-        write_to_file(&dir, "nested/deep/file.md", "hello").unwrap();
-        let content = std::fs::read_to_string(base.join(".noxa/nested/deep/file.md")).unwrap();
-        assert_eq!(content, "hello");
-        let _ = std::fs::remove_dir_all(&base);
+    fn test_content_store_root_with_output_dir() {
+        let dir = std::path::PathBuf::from("/tmp/mybase");
+        assert_eq!(content_store_root(Some(&dir)), dir.join(".noxa/content"));
     }
 
     #[test]

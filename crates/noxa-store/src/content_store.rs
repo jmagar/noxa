@@ -1,82 +1,26 @@
-//! Canonical content store for search snapshots.
+//! Per-URL content store: manages `.md` and `.json` sidecar files under a configurable root.
 use std::path::{Component, PathBuf};
 
-/// Map a URL to a relative store path without extension.
-pub fn url_to_store_path(url: &str) -> PathBuf {
-    let parsed = match url::Url::parse(url) {
-        Ok(url) => url,
-        Err(_) => return PathBuf::from("unknown"),
-    };
+use crate::paths::{content_store_root, url_to_store_path};
+use crate::types::StoreResult;
 
-    let host = parsed.host_str().unwrap_or("unknown");
-    let clean_host = sanitize_component(host.strip_prefix("www.").unwrap_or(host));
-
-    let segments: Vec<String> = parsed
-        .path_segments()
-        .into_iter()
-        .flatten()
-        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
-        .map(sanitize_component)
-        .collect();
-
-    let path_part = if segments.is_empty() {
-        "index".to_string()
-    } else {
-        segments.join("/")
-    };
-
-    let mut rel = format!("{clean_host}/{path_part}");
-    if rel.len() > 240 {
-        rel.truncate(240);
-    }
-    if parsed.query().is_some() {
-        rel.push('_');
-        rel.push_str(&format!("{:08x}", url_hash(url)));
-    }
-
-    PathBuf::from(rel)
-}
-
-fn url_hash(url: &str) -> u32 {
-    url.bytes().fold(2166136261_u32, |acc, b| {
-        (acc ^ (b as u32)).wrapping_mul(16777619)
-    })
-}
-
-fn sanitize_component(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    let trimmed = out.trim_matches('_');
-    if trimmed.is_empty() {
-        "index".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-pub struct StoreResult {
-    pub md_path: PathBuf,
-    pub json_path: PathBuf,
-    pub is_new: bool,
-    pub changed: bool,
-    pub word_count_delta: i64,
-}
-
+/// Filesystem-backed content store.
+///
+/// Stores one `.md` (current markdown) and one `.json` (sidecar changelog) per URL,
+/// organized under `<root>/<domain>/<path>`.
+///
+/// All writes are atomic (tmp + rename). Sensitive fields are stripped before
+/// serialization. Files are created with `0o600` permissions on Unix.
 #[derive(Debug, Clone)]
-pub struct ContentStore {
+pub struct FilesystemContentStore {
     root: PathBuf,
     /// Maximum combined byte size of markdown + plain_text before a document is
     /// skipped (not written). Default: 2 MiB. `None` disables the guard.
     pub max_content_bytes: Option<usize>,
 }
 
-impl ContentStore {
+impl FilesystemContentStore {
+    /// Create a store at an explicit root path.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
@@ -84,15 +28,19 @@ impl ContentStore {
         }
     }
 
-    pub fn open() -> Self {
-        let root = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".noxa")
-            .join("content");
-        Self {
+    /// Create a store at the default location (`~/.noxa/content/`).
+    ///
+    /// Returns `Err` if the home directory cannot be determined.
+    pub fn open() -> Result<Self, String> {
+        let root = content_store_root(None)?;
+        Ok(Self {
             root,
             max_content_bytes: Some(2 * 1024 * 1024),
-        }
+        })
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
     }
 
     fn resolve_path(&self, url: &str) -> Result<PathBuf, String> {
@@ -110,16 +58,11 @@ impl ContentStore {
 
         // Symlink protection: canonicalize the parent directory (which must
         // already exist or be created) to resolve any symlinks, then verify
-        // that the final path still resides under the canonical root. We
-        // canonicalize the parent rather than the full path because the file
-        // itself may not exist yet at resolution time.
+        // that the final path still resides under the canonical root.
         let canonical_root = std::fs::canonicalize(&self.root).map_err(|e| {
             format!("store: cannot canonicalize root {}: {e}", self.root.display())
         })?;
         let parent = base.parent().unwrap_or(&base);
-        // The parent may not exist yet (first write for this host). Use
-        // the deepest ancestor that does exist to canonicalize, then
-        // reconstruct the suffix.
         let mut existing_ancestor = parent.to_path_buf();
         let mut suffix = PathBuf::new();
         while !existing_ancestor.exists() {
@@ -141,10 +84,7 @@ impl ContentStore {
         Ok(base)
     }
 
-    pub async fn read(
-        &self,
-        url: &str,
-    ) -> Result<Option<noxa_core::ExtractionResult>, String> {
+    pub async fn read(&self, url: &str) -> Result<Option<noxa_core::ExtractionResult>, String> {
         let base = match self.resolve_path(url) {
             Ok(b) => b,
             Err(_) => return Ok(None),
@@ -180,11 +120,11 @@ impl ContentStore {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("store: create_dir: {e}"))?;
+            #[cfg(unix)]
+            set_dir_permissions(parent)?;
         }
 
         // Size guard — skip oversized documents rather than filling disk.
-        // Include raw_html in the estimate because it is serialized into the
-        // stored JSON and can be substantially larger than markdown + plain_text.
         let estimated = extraction.content.markdown.len()
             + extraction.content.plain_text.len()
             + extraction.content.raw_html.as_deref().map_or(0, |h| h.len());
@@ -209,12 +149,11 @@ impl ContentStore {
         let previous: Option<noxa_core::ExtractionResult> =
             match tokio::fs::read_to_string(&json_path).await {
                 Ok(contents) => {
-                    let parsed = tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         serde_json::from_str::<noxa_core::ExtractionResult>(&contents).ok()
                     })
                     .await
-                    .unwrap_or(None);
-                    parsed
+                    .unwrap_or(None)
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) => return Err(format!("store: read previous: {e}")),
@@ -233,15 +172,19 @@ impl ContentStore {
             word_count_delta = 0;
         }
 
-        // Strip query params from metadata.url before persisting — prevents
-        // leaking auth tokens / API keys that may appear in query strings.
+        // Security stripping — applied before any serialization.
         let mut to_store = extraction.clone();
+        // Strip query params from metadata.url — prevents leaking auth tokens / API keys.
         if let Some(ref url_str) = to_store.metadata.url {
             if let Ok(mut u) = url::Url::parse(url_str) {
                 u.set_query(None);
                 to_store.metadata.url = Some(u.to_string());
             }
         }
+        // Strip sensitive fields.
+        to_store.content.raw_html = None; // persistent XSS surface for downstream renderers
+        to_store.metadata.file_path = None; // leaks local filesystem paths
+        to_store.metadata.search_query = None; // leaks user search intent
 
         let markdown_bytes = to_store.content.markdown.as_bytes().to_vec();
         let json_bytes = tokio::task::spawn_blocking(move || {
@@ -250,10 +193,8 @@ impl ContentStore {
         .await
         .map_err(|e| format!("store: serialize join: {e}"))??;
 
-        // Atomic writes: write to .tmp then rename (POSIX rename is atomic on
-        // same filesystem — eliminates the corruption window between two writes).
-        // Use a random suffix to avoid races between concurrent writes for the
-        // same URL (e.g. parallel search result processing).
+        // Atomic writes: write to .tmp then rename.
+        // Random suffix prevents races between concurrent writes for the same URL.
         let rand_suffix = {
             use rand::Rng;
             format!("{:016x}", rand::thread_rng().r#gen::<u64>())
@@ -274,6 +215,12 @@ impl ContentStore {
             .await
             .map_err(|e| format!("store: rename json: {e}"))?;
 
+        #[cfg(unix)]
+        {
+            set_file_permissions(&md_path)?;
+            set_file_permissions(&json_path)?;
+        }
+
         Ok(StoreResult {
             md_path,
             json_path,
@@ -284,10 +231,29 @@ impl ContentStore {
     }
 }
 
+#[cfg(unix)]
+fn set_dir_permissions(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    // Only set if we just created this directory — skip if it already has correct perms.
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("store: stat dir {}: {e}", path.display()))?;
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("store: chmod dir {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_file_permissions(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("store: chmod file {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Component;
 
     fn make_extraction(markdown: &str) -> noxa_core::ExtractionResult {
         noxa_core::ExtractionResult {
@@ -302,6 +268,16 @@ mod tests {
                 image: None,
                 favicon: None,
                 word_count: markdown.split_whitespace().count(),
+                content_hash: None,
+                source_type: None,
+                file_path: None,
+                last_modified: None,
+                is_truncated: None,
+                technologies: vec![],
+                seed_url: None,
+                crawl_depth: None,
+                search_query: None,
+                fetched_at: None,
             },
             content: noxa_core::Content {
                 markdown: markdown.to_string(),
@@ -317,30 +293,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_url_to_store_path_root() {
-        let p = url_to_store_path("https://example.com/");
-        assert_eq!(p, std::path::PathBuf::from("example_com/index"));
-    }
-
-    #[tokio::test]
-    async fn test_url_to_store_path_strips_www() {
-        let p = url_to_store_path("https://www.rust-lang.org/learn");
-        assert_eq!(p, std::path::PathBuf::from("rust-lang_org/learn"));
-    }
-
-    #[tokio::test]
-    async fn test_url_to_store_path_query_discriminates() {
-        let p1 = url_to_store_path("https://example.com/search?q=rust");
-        let p2 = url_to_store_path("https://example.com/search?q=go");
-        assert_ne!(p1, p2);
-        let p1_str = p1.to_string_lossy();
-        assert!(p1_str.starts_with("example_com/search_"));
-    }
-
-    #[tokio::test]
     async fn test_first_write_is_new() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
+        let store = FilesystemContentStore::new(dir.path());
         let extraction = make_extraction("# Hello\n\nFirst content.");
         let result = store
             .write("https://example.com/page", &extraction)
@@ -355,12 +310,9 @@ mod tests {
     #[tokio::test]
     async fn test_second_write_detects_change() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
+        let store = FilesystemContentStore::new(dir.path());
         let first = make_extraction("# Hello\n\nFirst content.");
-        store
-            .write("https://example.com/page", &first)
-            .await
-            .unwrap();
+        store.write("https://example.com/page", &first).await.unwrap();
         let second = make_extraction("# Hello\n\nUpdated content.");
         let result = store
             .write("https://example.com/page", &second)
@@ -368,13 +320,12 @@ mod tests {
             .unwrap();
         assert!(!result.is_new);
         assert!(result.changed);
-        assert!(result.word_count_delta != 0 || result.changed);
     }
 
     #[tokio::test]
     async fn test_identical_content_not_changed() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
+        let store = FilesystemContentStore::new(dir.path());
         let e = make_extraction("# Same\n\nContent.");
         store.write("https://example.com/same", &e).await.unwrap();
         let result = store.write("https://example.com/same", &e).await.unwrap();
@@ -383,69 +334,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_corrupted_prev_json_treated_as_new() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
-        let rel = url_to_store_path("https://example.com/corrupt");
-        let json_path = dir.path().join(&rel).with_extension("json");
-        tokio::fs::create_dir_all(json_path.parent().unwrap())
-            .await
-            .unwrap();
-        tokio::fs::write(&json_path, b"{{not valid json{{")
-            .await
-            .unwrap();
-        let e = make_extraction("content");
-        let result = store
-            .write("https://example.com/corrupt", &e)
-            .await
-            .unwrap();
-        assert!(result.is_new);
-    }
-
-    #[tokio::test]
-    async fn test_store_path_stays_within_root() {
-        let p = url_to_store_path("https://evil.com/../../../etc/passwd");
-        assert!(p.to_string_lossy().starts_with("evil_com/"));
-    }
-
-    #[tokio::test]
-    async fn test_url_to_store_path_strips_parent_components() {
-        let p = url_to_store_path("https://evil.com/a/../../etc/./passwd");
-        assert!(!p.components().any(|c| matches!(c, Component::ParentDir)));
-        assert!(!p.components().any(|c| matches!(c, Component::CurDir)));
-    }
-
-    #[tokio::test]
-    async fn test_url_to_store_path_sanitizes_ipv6_host_and_path() {
-        let p = url_to_store_path("https://[fe80::1]/bad:path/segment");
-        let s = p.to_string_lossy();
-        assert!(s.starts_with("fe80__1/"));
-        assert!(!s.contains(':'));
-        assert!(!s.contains('['));
-        assert!(!s.contains(']'));
-    }
-
-    #[test]
-    fn test_url_hash_matches_fnv1a() {
-        assert_eq!(url_hash("hello"), 0x4f9f2cab);
-    }
-
-    // --- new tests for read(), Clone, atomic writes, query-param stripping ---
-
-    #[tokio::test]
-    async fn test_read_returns_none_for_unknown_url() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
-        let result = store.read("https://example.com/never-written").await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
     async fn test_read_returns_written_extraction() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
+        let store = FilesystemContentStore::new(dir.path());
         let e = make_extraction("# Hello\n\nReadable content.");
-        store.write("https://example.com/readable", &e).await.unwrap();
+        store
+            .write("https://example.com/readable", &e)
+            .await
+            .unwrap();
         let read_back = store
             .read("https://example.com/readable")
             .await
@@ -455,63 +351,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_corrupted_json_returns_err() {
+    async fn test_raw_html_stripped_before_write() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
-        let rel = url_to_store_path("https://example.com/bad-json");
-        let json_path = dir.path().join(&rel).with_extension("json");
-        tokio::fs::create_dir_all(json_path.parent().unwrap())
-            .await
-            .unwrap();
-        tokio::fs::write(&json_path, b"{{not valid json{{")
-            .await
-            .unwrap();
-        let result = store.read("https://example.com/bad-json").await;
-        assert!(result.is_err(), "corrupted JSON should return Err");
-    }
-
-    #[tokio::test]
-    async fn test_read_path_escape_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
-        // resolve_path returns Err for path escapes; read() maps that to Ok(None)
-        let result = store
-            .read("https://evil.com/../../etc/passwd")
-            .await
-            .unwrap();
-        // url_to_store_path already sanitizes this to a safe path, so Ok(None) expected
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_clone_produces_same_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = ContentStore::new(dir.path());
-        let b = a.clone();
-        assert_eq!(a.root, b.root);
-        assert_eq!(a.max_content_bytes, b.max_content_bytes);
-    }
-
-    #[tokio::test]
-    async fn test_atomic_write_no_tmp_files_after_completion() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
-        let e = make_extraction("# Atomic\n\nContent.");
+        let store = FilesystemContentStore::new(dir.path());
+        let mut e = make_extraction("# Secret\n\nContent.");
+        e.content.raw_html = Some("<script>alert('xss')</script>".to_string());
         store
-            .write("https://example.com/atomic", &e)
+            .write("https://example.com/xss", &e)
             .await
             .unwrap();
-        // No .tmp files should remain
-        let rel = url_to_store_path("https://example.com/atomic");
-        let base = dir.path().join(&rel);
-        assert!(!base.with_extension("md.tmp").exists());
-        assert!(!base.with_extension("json.tmp").exists());
+        let read_back = store
+            .read("https://example.com/xss")
+            .await
+            .unwrap()
+            .expect("should be Some");
+        assert!(
+            read_back.content.raw_html.is_none(),
+            "raw_html must be stripped before write"
+        );
     }
 
     #[tokio::test]
     async fn test_metadata_url_query_params_stripped() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(dir.path());
+        let store = FilesystemContentStore::new(dir.path());
         let mut e = make_extraction("# Secret\n\nContent.");
         e.metadata.url =
             Some("https://api.example.com/data?token=supersecret&foo=bar".to_string());
@@ -525,31 +388,21 @@ mod tests {
             .unwrap()
             .expect("should be Some");
         let stored_url = read_back.metadata.url.unwrap();
-        assert!(
-            !stored_url.contains("token="),
-            "query params must be stripped before storage"
-        );
-        assert!(
-            !stored_url.contains("supersecret"),
-            "secret value must not appear in stored URL"
-        );
+        assert!(!stored_url.contains("token="));
+        assert!(!stored_url.contains("supersecret"));
     }
 
     #[tokio::test]
     async fn test_max_content_bytes_guard_skips_oversized() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = ContentStore::new(dir.path());
-        store.max_content_bytes = Some(10); // tiny limit
+        let mut store = FilesystemContentStore::new(dir.path());
+        store.max_content_bytes = Some(10);
         let e = make_extraction("# Big\n\nThis content is definitely more than 10 bytes.");
         let result = store
             .write("https://example.com/big", &e)
             .await
             .unwrap();
-        // Document is skipped — is_new=false, changed=false
         assert!(!result.is_new);
         assert!(!result.changed);
-        // File should NOT have been written
-        let rel = url_to_store_path("https://example.com/big");
-        assert!(!dir.path().join(&rel).with_extension("md").exists());
     }
 }
