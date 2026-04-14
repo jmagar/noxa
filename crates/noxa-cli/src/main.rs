@@ -516,7 +516,13 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
     let store = if cli.no_store {
         None
     } else {
-        Some(FilesystemContentStore::new(content_store_root(resolved.output_dir.as_deref())))
+        let root = content_store_root(resolved.output_dir.as_deref());
+        // Ensure the root directory exists so that ContentStore::resolve_path can
+        // canonicalize it.  A fresh output_dir would otherwise cause all writes to
+        // fail silently because std::fs::canonicalize returns an error for a
+        // non-existent path.
+        std::fs::create_dir_all(&root).ok();
+        Some(FilesystemContentStore::new(root))
     };
 
     let ops_log = build_ops_log(cli, resolved);
@@ -564,6 +570,20 @@ fn build_extraction_options(resolved: &config::ResolvedConfig) -> ExtractionOpti
         only_main_content: resolved.only_main_content,
         include_raw_html: resolved.raw_html || matches!(resolved.format, OutputFormat::Html),
     }
+}
+
+/// Returns the root path for the local content store.
+///
+/// When `output_dir` is `Some`, that directory is used directly.
+/// Otherwise falls back to `~/.noxa/content` (the canonical default).
+fn content_store_root(output_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    if let Some(dir) = output_dir {
+        return dir.to_path_buf();
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".noxa")
+        .join("content")
 }
 
 /// Normalize a URL: prepend `https://` if no scheme is present.
@@ -1979,7 +1999,7 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         fetch: build_fetch_config(cli, resolved),
         max_depth: resolved.depth,
         max_pages: resolved.max_pages,
-        concurrency: resolved.concurrency,
+        concurrency: resolved.concurrency.max(1),
         delay: std::time::Duration::from_millis(resolved.delay),
         path_prefix: resolved.path_prefix.clone(),
         use_sitemap: resolved.use_sitemap,
@@ -1987,6 +2007,7 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         exclude_patterns,
         progress_tx: Some(progress_tx),
         cancel_flag: Some(Arc::clone(&cancel_flag)),
+        extraction_options: build_extraction_options(resolved),
     };
 
     // Load resume state if --crawl-state file exists
@@ -3450,6 +3471,7 @@ fn grep_dir(
 async fn run_search(
     cli: &Cli,
     fetch_client: &Arc<noxa_fetch::FetchClient>,
+    resolved: &config::ResolvedConfig,
     query: &str,
 ) -> Result<(), String> {
     if query.trim().is_empty() {
@@ -3551,10 +3573,7 @@ async fn run_search(
         return Ok(());
     }
 
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+    let store_root = content_store_root(resolved.output_dir.as_deref());
 
     let valid: Vec<(usize, String, String, String)> = results
         .into_iter()
@@ -3569,8 +3588,9 @@ async fn run_search(
         .collect();
 
     let url_refs: Vec<&str> = valid.iter().map(|(_, _, u, _)| u.as_str()).collect();
+    let options = build_extraction_options(resolved);
     let scraped = fetch_client
-        .fetch_and_extract_batch(&url_refs, concurrency)
+        .fetch_and_extract_batch_with_options(&url_refs, concurrency, &options)
         .await;
 
     for ((idx, title, url, snip), scrape) in valid.iter().zip(scraped.iter()) {
@@ -3729,7 +3749,7 @@ async fn main() {
                 process::exit(1);
             }),
         );
-        if let Err(e) = run_search(&cli, &fetch_client, query).await {
+        if let Err(e) = run_search(&cli, &fetch_client, &resolved, query).await {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -4154,5 +4174,22 @@ mod enum_deserialize_tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         // Writing to the leaf symlink should be rejected.
         assert!(write_to_file(path, "output.md", "x").is_err());
+    }
+
+    #[test]
+    fn content_store_root_uses_explicit_output_dir() {
+        let path = std::path::PathBuf::from("custom-output");
+        assert_eq!(content_store_root(Some(path.as_path())), path);
+    }
+
+    #[test]
+    fn content_store_root_defaults_to_noxa_content() {
+        let result = content_store_root(None);
+        // The default path should end with .noxa/content regardless of home dir
+        assert!(
+            result.ends_with(".noxa/content"),
+            "expected path ending with .noxa/content, got: {}",
+            result.display()
+        );
     }
 }
