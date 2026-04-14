@@ -319,15 +319,6 @@ impl FilesystemContentStore {
                         word_count: to_store.metadata.word_count,
                         diff: Some(content_diff.clone()),
                     });
-
-                    // Enforce changelog cap: keep entry[0] (initial fetch sentinel)
-                    // and trim the oldest intermediate entries.
-                    if let Some(cap) = self.max_changelog_entries {
-                        if cap > 1 && existing.changelog.len() > cap {
-                            let excess = existing.changelog.len() - cap;
-                            existing.changelog.drain(1..1 + excess);
-                        }
-                    }
                 }
 
                 let diff_opt = if changed { Some(content_diff) } else { None };
@@ -354,6 +345,19 @@ impl FilesystemContentStore {
                 };
                 (sidecar, true, false, 0i64, None)
             };
+
+        // ---- Enforce changelog cap ------------------------------------------------
+        // Applied unconditionally so that sidecars exceeding the cap from older
+        // runs are pruned even on identical re-fetches.  Entry[0] (initial-fetch
+        // sentinel) is always preserved.
+        let mut sidecar = sidecar;
+        if let Some(cap) = self.max_changelog_entries {
+            let cap = cap.max(1); // at least keep the sentinel
+            if sidecar.changelog.len() > cap {
+                let excess = sidecar.changelog.len() - cap;
+                sidecar.changelog.drain(1..1 + excess);
+            }
+        }
 
         // ---- Serialize ---------------------------------------------------------
         let write_md = is_new || changed;
