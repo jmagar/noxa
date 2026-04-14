@@ -253,6 +253,10 @@ impl Crawler {
             }
         }
 
+        // Wrap extraction_options in Arc so all spawned tasks share a single
+        // allocation instead of deep-cloning selector vectors on every URL.
+        let extraction_options = Arc::new(self.config.extraction_options.clone());
+
         while !frontier.is_empty() && pages.len() < self.config.max_pages {
             // Check cancel flag before processing each batch
             if self.is_cancelled() {
@@ -280,7 +284,7 @@ impl Crawler {
                 let url = url.clone();
                 let depth = *depth;
                 let delay = self.config.delay;
-                let extraction_options = self.config.extraction_options.clone();
+                let extraction_options = Arc::clone(&extraction_options);
 
                 handles.push(tokio::spawn(async move {
                     // Acquire permit — blocks if concurrency limit reached
