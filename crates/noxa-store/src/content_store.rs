@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{content_store_root, url_to_store_path};
-use crate::types::StoreResult;
+use crate::types::{StoreError, StoreResult};
 
 // ---------------------------------------------------------------------------
 // Sidecar format (schema_version = 1)
@@ -75,7 +75,7 @@ impl FilesystemContentStore {
     /// Create a store at the default location (`~/.noxa/content/`).
     ///
     /// Returns `Err` if the home directory cannot be determined.
-    pub fn open() -> Result<Self, String> {
+    pub fn open() -> Result<Self, StoreError> {
         let root = content_store_root(None)?;
         Ok(Self {
             root,
@@ -87,24 +87,25 @@ impl FilesystemContentStore {
         &self.root
     }
 
-    fn resolve_path(&self, url: &str) -> Result<PathBuf, String> {
+    fn resolve_path(&self, url: &str) -> Result<PathBuf, StoreError> {
         let rel = url_to_store_path(url);
         if rel
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
         {
-            return Err(format!("store: computed path escapes root for url: {url}"));
+            return Err(StoreError::PathEscape(url.to_string()));
         }
         let base = self.root.join(&rel);
         if !base.starts_with(&self.root) {
-            return Err(format!("store: computed path escapes root for url: {url}"));
+            return Err(StoreError::PathEscape(url.to_string()));
         }
 
         // Symlink protection: canonicalize the parent directory (which must
         // already exist or be created) to resolve any symlinks, then verify
         // that the final path still resides under the canonical root.
-        let canonical_root = std::fs::canonicalize(&self.root).map_err(|e| {
-            format!("store: cannot canonicalize root {}: {e}", self.root.display())
+        let canonical_root = std::fs::canonicalize(&self.root).map_err(|e| StoreError::IoPath {
+            source: e,
+            path: self.root.clone(),
         })?;
         let parent = base.parent().unwrap_or(&base);
         let mut existing_ancestor = parent.to_path_buf();
@@ -118,17 +119,20 @@ impl FilesystemContentStore {
                 None => break,
             }
         }
-        let canonical_parent = std::fs::canonicalize(&existing_ancestor)
-            .map_err(|e| format!("store: cannot canonicalize path ancestor: {e}"))?;
+        let canonical_parent =
+            std::fs::canonicalize(&existing_ancestor).map_err(|e| StoreError::IoPath {
+                source: e,
+                path: existing_ancestor.clone(),
+            })?;
         let resolved = canonical_parent.join(&suffix);
         if !resolved.starts_with(&canonical_root) {
-            return Err(format!("store: computed path escapes root for url: {url}"));
+            return Err(StoreError::PathEscape(url.to_string()));
         }
 
         Ok(base)
     }
 
-    pub async fn read(&self, url: &str) -> Result<Option<noxa_core::ExtractionResult>, String> {
+    pub async fn read(&self, url: &str) -> Result<Option<noxa_core::ExtractionResult>, StoreError> {
         let base = match self.resolve_path(url) {
             Ok(b) => b,
             Err(_) => return Ok(None),
@@ -137,16 +141,13 @@ impl FilesystemContentStore {
         match tokio::fs::read_to_string(&json_path).await {
             Ok(contents) => {
                 let result = tokio::task::spawn_blocking(move || {
-                    parse_sidecar_or_legacy(&contents)
-                        .map(|s| s.current)
-                        .map_err(|e| format!("store: deserialize: {e}"))
+                    parse_sidecar_or_legacy(&contents).map(|s| s.current)
                 })
-                .await
-                .map_err(|e| format!("store: read join: {e}"))??;
+                .await??;
                 Ok(Some(result))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("store: read: {e}")),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -154,7 +155,7 @@ impl FilesystemContentStore {
     // read_sidecar() — returns the full versioned sidecar
     // -----------------------------------------------------------------------
 
-    pub async fn read_sidecar(&self, url: &str) -> Result<Option<Sidecar>, String> {
+    pub async fn read_sidecar(&self, url: &str) -> Result<Option<Sidecar>, StoreError> {
         let base = match self.resolve_path(url) {
             Ok(b) => b,
             Err(_) => return Ok(None),
@@ -167,18 +168,15 @@ impl FilesystemContentStore {
                     .await
                     .ok()
                     .and_then(|m| m.modified().ok())
-                    .map(|st| DateTime::<Utc>::from(st))
+                    .map(DateTime::<Utc>::from)
                     .unwrap_or_else(Utc::now);
-                let result = tokio::task::spawn_blocking(move || {
-                    parse_sidecar_or_migrate(&contents, mtime)
-                        .map_err(|e| format!("store: deserialize: {e}"))
-                })
-                .await
-                .map_err(|e| format!("store: read_sidecar join: {e}"))??;
+                let result =
+                    tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime))
+                        .await??;
                 Ok(Some(result))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("store: read_sidecar: {e}")),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -190,16 +188,14 @@ impl FilesystemContentStore {
         &self,
         url: &str,
         extraction: &noxa_core::ExtractionResult,
-    ) -> Result<StoreResult, String> {
+    ) -> Result<StoreResult, StoreError> {
         let base = self.resolve_path(url)?;
 
         let md_path = base.with_extension("md");
         let json_path = base.with_extension("json");
 
         if let Some(parent) = md_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("store: create_dir: {e}"))?;
+            tokio::fs::create_dir_all(parent).await?;
             #[cfg(unix)]
             set_dir_permissions(parent)?;
         }
@@ -207,57 +203,58 @@ impl FilesystemContentStore {
         // Size guard — skip oversized documents rather than filling disk.
         let estimated = extraction.content.markdown.len()
             + extraction.content.plain_text.len()
-            + extraction.content.raw_html.as_deref().map_or(0, |h| h.len());
-        if let Some(max) = self.max_content_bytes {
-            if estimated > max {
-                tracing::warn!(
-                    url,
-                    estimated,
-                    max,
-                    "content store: skipping oversized document"
-                );
-                return Ok(StoreResult {
-                    md_path,
-                    json_path,
-                    is_new: false,
-                    changed: false,
-                    word_count_delta: 0,
-                    diff: None,
-                });
-            }
+            + extraction
+                .content
+                .raw_html
+                .as_deref()
+                .map_or(0, |h| h.len());
+        if let Some(max) = self.max_content_bytes
+            && estimated > max
+        {
+            tracing::warn!(
+                url,
+                estimated,
+                max,
+                "content store: skipping oversized document"
+            );
+            return Ok(StoreResult {
+                md_path,
+                json_path,
+                is_new: false,
+                changed: false,
+                word_count_delta: 0,
+                diff: None,
+            });
         }
 
         // ---- Read and optionally migrate existing sidecar -------------------
         let now = Utc::now();
 
-        let existing_sidecar: Option<Sidecar> =
-            match tokio::fs::read_to_string(&json_path).await {
-                Ok(contents) => {
-                    // Need mtime for legacy migration.
-                    let mtime = tokio::fs::metadata(&json_path)
-                        .await
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(|st| DateTime::<Utc>::from(st))
-                        .unwrap_or(now);
-                    tokio::task::spawn_blocking(move || {
-                        parse_sidecar_or_migrate(&contents, mtime).ok()
-                    })
+        let existing_sidecar: Option<Sidecar> = match tokio::fs::read_to_string(&json_path).await {
+            Ok(contents) => {
+                // Need mtime for legacy migration.
+                let mtime = tokio::fs::metadata(&json_path)
+                    .await
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(DateTime::<Utc>::from)
+                    .unwrap_or(now);
+                tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime).ok())
                     .await
                     .unwrap_or(None)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(format!("store: read previous: {e}")),
-            };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
 
         // ---- Strip query params from metadata.url before persisting --------
         let mut to_store = extraction.clone();
         // Strip query params from metadata.url — prevents leaking auth tokens / API keys.
-        if let Some(ref url_str) = to_store.metadata.url {
-            if let Ok(mut u) = url::Url::parse(url_str) {
-                u.set_query(None);
-                to_store.metadata.url = Some(u.to_string());
-            }
+        if let Some(ref url_str) = to_store.metadata.url
+            && let Ok(mut u) = url::Url::parse(url_str)
+        {
+            u.set_query(None);
+            to_store.metadata.url = Some(u.to_string());
         }
         // Strip sensitive fields.
         to_store.content.raw_html = None; // persistent XSS surface for downstream renderers
@@ -270,8 +267,8 @@ impl FilesystemContentStore {
                 // Compare against previous current content.
                 let content_diff = noxa_core::diff::diff(&existing.current, &to_store);
                 let changed = content_diff.status == noxa_core::ChangeStatus::Changed;
-                let wc_delta =
-                    to_store.metadata.word_count as i64 - existing.current.metadata.word_count as i64;
+                let wc_delta = to_store.metadata.word_count as i64
+                    - existing.current.metadata.word_count as i64;
 
                 existing.last_fetched = now;
                 existing.fetch_count += 1;
@@ -292,7 +289,10 @@ impl FilesystemContentStore {
                 // Strip query params from `url` to avoid persisting tokens/secrets.
                 let clean_url = url::Url::parse(url)
                     .ok()
-                    .map(|mut u| { u.set_query(None); u.to_string() })
+                    .map(|mut u| {
+                        u.set_query(None);
+                        u.to_string()
+                    })
                     .unwrap_or_else(|| url.to_string());
                 let sidecar = Sidecar {
                     schema_version: 1,
@@ -312,11 +312,10 @@ impl FilesystemContentStore {
 
         // ---- Serialize ---------------------------------------------------------
         let write_md = is_new || changed;
-        let json_bytes = tokio::task::spawn_blocking(move || {
-            serde_json::to_vec(&sidecar).map_err(|e| format!("store: serialize: {e}"))
+        let json_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, StoreError> {
+            Ok(serde_json::to_vec(&sidecar)?)
         })
-        .await
-        .map_err(|e| format!("store: serialize join: {e}"))??;
+        .await??;
 
         // ---- Atomic writes -------------------------------------------------------
         // Write order: .md first (when needed), then .json.
@@ -337,30 +336,23 @@ impl FilesystemContentStore {
         if write_md {
             let markdown_bytes = to_store.content.markdown.as_bytes().to_vec();
             let tmp_md = md_path.with_extension(format!("md.{rand_suffix}.tmp"));
-            tokio::fs::write(&tmp_md, &markdown_bytes)
-                .await
-                .map_err(|e| format!("store: write md.tmp: {e}"))?;
-            tokio::fs::rename(&tmp_md, &md_path)
-                .await
-                .map_err(|e| format!("store: rename md: {e}"))?;
+            tokio::fs::write(&tmp_md, &markdown_bytes).await?;
+            // Set restrictive permissions on the tmp file BEFORE rename so there
+            // is no window where the final path is world-readable.
+            #[cfg(unix)]
+            set_file_permissions(&tmp_md)?;
+            tokio::fs::rename(&tmp_md, &md_path).await?;
         }
 
         // Always write the JSON sidecar (last_fetched / fetch_count always update).
         // This acts as the transaction commit — written last so a crash before
         // this point leaves the previous sidecar intact.
         let tmp_json = json_path.with_extension(format!("json.{rand_suffix}.tmp"));
-        tokio::fs::write(&tmp_json, &json_bytes)
-            .await
-            .map_err(|e| format!("store: write json.tmp: {e}"))?;
-        tokio::fs::rename(&tmp_json, &json_path)
-            .await
-            .map_err(|e| format!("store: rename json: {e}"))?;
-
+        tokio::fs::write(&tmp_json, &json_bytes).await?;
+        // Set restrictive permissions on the tmp file BEFORE rename.
         #[cfg(unix)]
-        {
-            set_file_permissions(&md_path)?;
-            set_file_permissions(&json_path)?;
-        }
+        set_file_permissions(&tmp_json)?;
+        tokio::fs::rename(&tmp_json, &json_path).await?;
 
         Ok(StoreResult {
             md_path,
@@ -382,9 +374,7 @@ impl FilesystemContentStore {
 /// wrapping it with the current time for `first_seen`/`last_fetched` (no mtime
 /// is available at this call site).  The migrated sidecar is **not** written
 /// back to disk; it will be persisted on the next `write()` call.
-fn parse_sidecar_or_legacy(
-    contents: &str,
-) -> Result<Sidecar, serde_json::Error> {
+fn parse_sidecar_or_legacy(contents: &str) -> Result<Sidecar, serde_json::Error> {
     // New format has `schema_version` key.
     if let Ok(sidecar) = serde_json::from_str::<Sidecar>(contents) {
         return Ok(sidecar);
@@ -437,23 +427,21 @@ fn parse_sidecar_or_migrate(
 }
 
 #[cfg(unix)]
-fn set_dir_permissions(path: &std::path::Path) -> Result<(), String> {
+fn set_dir_permissions(path: &std::path::Path) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt;
     // Only set if we just created this directory — skip if it already has correct perms.
-    let meta = std::fs::metadata(path)
-        .map_err(|e| format!("store: stat dir {}: {e}", path.display()))?;
+    let meta = std::fs::metadata(path)?;
     if meta.permissions().mode() & 0o777 != 0o700 {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("store: chmod dir {}: {e}", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn set_file_permissions(path: &std::path::Path) -> Result<(), String> {
+fn set_file_permissions(path: &std::path::Path) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("store: chmod file {}: {e}", path.display()))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -518,7 +506,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FilesystemContentStore::new(dir.path());
         let first = make_extraction("# Hello\n\nFirst content.");
-        store.write("https://example.com/page", &first).await.unwrap();
+        store
+            .write("https://example.com/page", &first)
+            .await
+            .unwrap();
         let second = make_extraction("# Hello\n\nUpdated content.");
         let result = store
             .write("https://example.com/page", &second)
@@ -596,7 +587,10 @@ mod tests {
     async fn test_read_returns_none_for_unknown_url() {
         let dir = tempfile::tempdir().unwrap();
         let store = FilesystemContentStore::new(dir.path());
-        let result = store.read("https://example.com/never-written").await.unwrap();
+        let result = store
+            .read("https://example.com/never-written")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -623,10 +617,7 @@ mod tests {
         let store = FilesystemContentStore::new(dir.path());
         let mut e = make_extraction("# Secret\n\nContent.");
         e.content.raw_html = Some("<script>alert('xss')</script>".to_string());
-        store
-            .write("https://example.com/xss", &e)
-            .await
-            .unwrap();
+        store.write("https://example.com/xss", &e).await.unwrap();
         let read_back = store
             .read("https://example.com/xss")
             .await
@@ -643,8 +634,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FilesystemContentStore::new(dir.path());
         let mut e = make_extraction("# Secret\n\nContent.");
-        e.metadata.url =
-            Some("https://api.example.com/data?token=supersecret&foo=bar".to_string());
+        e.metadata.url = Some("https://api.example.com/data?token=supersecret&foo=bar".to_string());
         store
             .write("https://example.com/secret-page", &e)
             .await
@@ -665,10 +655,7 @@ mod tests {
         let mut store = FilesystemContentStore::new(dir.path());
         store.max_content_bytes = Some(10);
         let e = make_extraction("# Big\n\nThis content is definitely more than 10 bytes.");
-        let result = store
-            .write("https://example.com/big", &e)
-            .await
-            .unwrap();
+        let result = store.write("https://example.com/big", &e).await.unwrap();
         assert!(!result.is_new);
         assert!(!result.changed);
     }
@@ -694,7 +681,10 @@ mod tests {
         assert_eq!(sidecar.schema_version, 1);
         assert_eq!(sidecar.fetch_count, 1);
         assert_eq!(sidecar.changelog.len(), 1);
-        assert!(sidecar.changelog[0].diff.is_none(), "first entry has no diff");
+        assert!(
+            sidecar.changelog[0].diff.is_none(),
+            "first entry has no diff"
+        );
     }
 
     #[tokio::test]
@@ -744,7 +734,11 @@ mod tests {
             .expect("sidecar should exist");
         // fetch_count increments, but changelog stays at 1
         assert_eq!(sidecar.fetch_count, 2);
-        assert_eq!(sidecar.changelog.len(), 1, "no new entry for identical content");
+        assert_eq!(
+            sidecar.changelog.len(),
+            1,
+            "no new entry for identical content"
+        );
     }
 
     #[tokio::test]
@@ -794,8 +788,15 @@ mod tests {
         assert_eq!(sidecar.schema_version, 1);
         assert_eq!(sidecar.fetch_count, 1);
         // Legacy migration must seed an initial changelog entry (diff: None).
-        assert_eq!(sidecar.changelog.len(), 1, "migrated sidecar should have one changelog entry");
-        assert!(sidecar.changelog[0].diff.is_none(), "initial entry has no diff");
+        assert_eq!(
+            sidecar.changelog.len(),
+            1,
+            "migrated sidecar should have one changelog entry"
+        );
+        assert!(
+            sidecar.changelog[0].diff.is_none(),
+            "initial entry has no diff"
+        );
     }
 
     #[tokio::test]
@@ -803,9 +804,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FilesystemContentStore::new(dir.path());
         let first = make_extraction("# Version 1");
-        store.write("https://example.com/cur", &first).await.unwrap();
+        store
+            .write("https://example.com/cur", &first)
+            .await
+            .unwrap();
         let second = make_extraction("# Version 2\n\nMore words here.");
-        store.write("https://example.com/cur", &second).await.unwrap();
+        store
+            .write("https://example.com/cur", &second)
+            .await
+            .unwrap();
         let read_result = store
             .read("https://example.com/cur")
             .await
@@ -821,10 +828,7 @@ mod tests {
             read_result.content.markdown,
             sidecar.current.content.markdown
         );
-        assert_eq!(
-            read_result.content.markdown,
-            second.content.markdown
-        );
+        assert_eq!(read_result.content.markdown, second.content.markdown);
     }
 
     #[tokio::test]

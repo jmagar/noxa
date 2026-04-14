@@ -14,8 +14,8 @@
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -329,12 +329,10 @@ impl Pipeline {
 
                 // Read file + compute URL+hash in spawn_blocking (sync file I/O).
                 let path2 = path.clone();
-                let hash_and_url = tokio::task::spawn_blocking(move || {
-                    startup_scan_key(&path2)
-                })
-                .await
-                .ok()
-                .flatten();
+                let hash_and_url = tokio::task::spawn_blocking(move || startup_scan_key(&path2))
+                    .await
+                    .ok()
+                    .flatten();
 
                 let (hash, url) = match hash_and_url {
                     Some(t) => t,
@@ -447,8 +445,16 @@ impl Pipeline {
         let chunks = self.counters.total_chunks.load(Ordering::Relaxed);
         let embed_ms = self.counters.total_embed_ms.load(Ordering::Relaxed);
         let upsert_ms = self.counters.total_upsert_ms.load(Ordering::Relaxed);
-        let avg_embed_ms = if indexed > 0 { embed_ms / indexed as u64 } else { 0 };
-        let avg_upsert_ms = if indexed > 0 { upsert_ms / indexed as u64 } else { 0 };
+        let avg_embed_ms = if indexed > 0 {
+            embed_ms / indexed as u64
+        } else {
+            0
+        };
+        let avg_upsert_ms = if indexed > 0 {
+            upsert_ms / indexed as u64
+        } else {
+            0
+        };
         tracing::info!(
             indexed,
             failed,
@@ -627,7 +633,14 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
         "md" | "rst" | "org" => {
             let content = as_text(&bytes);
             let word_count = content.split_whitespace().count();
-            Ok(make_text_result(content, String::new(), file_url, Some(title), "file", word_count))
+            Ok(make_text_result(
+                content,
+                String::new(),
+                file_url,
+                Some(title),
+                "file",
+                word_count,
+            ))
         }
         "txt" | "yaml" | "yml" | "toml" => {
             let content = as_text(&bytes);
@@ -671,18 +684,14 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
         }
 
         // ── Jupyter Notebook ──────────────────────────────────────────────────
-        "ipynb" => {
-            tokio::task::spawn_blocking(move || parse_ipynb(&bytes, file_url, title))
-                .await
-                .map_err(|e| RagError::Parse(format!("ipynb spawn_blocking: {e}")))?
-        }
+        "ipynb" => tokio::task::spawn_blocking(move || parse_ipynb(&bytes, file_url, title))
+            .await
+            .map_err(|e| RagError::Parse(format!("ipynb spawn_blocking: {e}")))?,
 
         // ── PDF ────────────────────────────────────────────────────────────────
-        "pdf" => {
-            tokio::task::spawn_blocking(move || parse_pdf(&bytes, file_url, title))
-                .await
-                .map_err(|e| RagError::Parse(format!("PDF spawn_blocking: {e}")))?
-        }
+        "pdf" => tokio::task::spawn_blocking(move || parse_pdf(&bytes, file_url, title))
+            .await
+            .map_err(|e| RagError::Parse(format!("PDF spawn_blocking: {e}")))?,
 
         // ── Office binary formats (ZIP-based) ─────────────────────────────────
         "docx" => {
@@ -715,13 +724,27 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
                 .collect::<Vec<_>>()
                 .join("\n\n");
             let word_count = text.split_whitespace().count();
-            Ok(make_text_result(text.clone(), text, file_url, Some(title), "file", word_count))
+            Ok(make_text_result(
+                text.clone(),
+                text,
+                file_url,
+                Some(title),
+                "file",
+                word_count,
+            ))
         }
         "xml" | "opml" | "rss" | "atom" => {
             let content = as_text(&bytes);
             let text = extract_xml_text(&content);
             let word_count = text.split_whitespace().count();
-            Ok(make_text_result(text.clone(), text, file_url, Some(title), "file", word_count))
+            Ok(make_text_result(
+                text.clone(),
+                text,
+                file_url,
+                Some(title),
+                "file",
+                word_count,
+            ))
         }
 
         // ── Subtitle / transcript (.vtt .srt) ─────────────────────────────────
@@ -729,11 +752,20 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
             let content = as_text(&bytes);
             let text = strip_subtitle_timestamps(&content);
             let word_count = text.split_whitespace().count();
-            Ok(make_text_result(text.clone(), text, file_url, Some(title), "file", word_count))
+            Ok(make_text_result(
+                text.clone(),
+                text,
+                file_url,
+                Some(title),
+                "file",
+                word_count,
+            ))
         }
 
         // ── Unknown / unsupported ──────────────────────────────────────────────
-        other => Err(RagError::Parse(format!("unsupported file extension: .{other}"))),
+        other => Err(RagError::Parse(format!(
+            "unsupported file extension: .{other}"
+        ))),
     }
 }
 
@@ -760,7 +792,7 @@ fn make_text_result(
             word_count,
             content_hash: None, // filled by process_job if needed
             source_type: Some(source_type.to_string()),
-            file_path: None, // filled by process_job
+            file_path: None,     // filled by process_job
             last_modified: None, // filled by process_job
             is_truncated: None,
             technologies: Vec::new(),
@@ -803,10 +835,9 @@ fn parse_ipynb(bytes: &[u8], url: String, title: String) -> Result<ExtractionRes
         // source is either a string or an array of strings.
         let source = match &cell["source"] {
             serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Array(lines) => lines
-                .iter()
-                .filter_map(|l| l.as_str())
-                .collect::<String>(),
+            serde_json::Value::Array(lines) => {
+                lines.iter().filter_map(|l| l.as_str()).collect::<String>()
+            }
             _ => continue,
         };
         // Skip empty cells.
@@ -819,19 +850,30 @@ fn parse_ipynb(bytes: &[u8], url: String, title: String) -> Result<ExtractionRes
 
     let text = parts.join("\n\n");
     let word_count = text.split_whitespace().count();
-    Ok(make_text_result(text.clone(), text, url, Some(title), "notebook", word_count))
+    Ok(make_text_result(
+        text.clone(),
+        text,
+        url,
+        Some(title),
+        "notebook",
+        word_count,
+    ))
 }
 
 /// Extract text from a PDF — must run in spawn_blocking.
 fn parse_pdf(bytes: &[u8], url: String, title: String) -> Result<ExtractionResult, RagError> {
-    let result = noxa_pdf::extract_pdf(
-        bytes,
-        noxa_pdf::PdfMode::Auto,
-    )
-    .map_err(|e| RagError::Parse(format!("PDF extract: {e}")))?;
+    let result = noxa_pdf::extract_pdf(bytes, noxa_pdf::PdfMode::Auto)
+        .map_err(|e| RagError::Parse(format!("PDF extract: {e}")))?;
     let text = noxa_pdf::to_markdown(&result);
     let word_count = text.split_whitespace().count();
-    Ok(make_text_result(text.clone(), text, url, Some(title), "file", word_count))
+    Ok(make_text_result(
+        text.clone(),
+        text,
+        url,
+        Some(title),
+        "file",
+        word_count,
+    ))
 }
 
 /// Shared ZIP-based office parser for DOCX, ODT, PPTX — must run in spawn_blocking.
@@ -869,18 +911,19 @@ fn parse_office_zip(
     // for DOCX.  Guard here so a crafted DOCX zip bomb cannot cause OOM.
     if ext == "docx" {
         for i in 0..archive.len() {
-            if let Ok(entry) = archive.by_index(i) {
-                if entry.size() > MAX_ENTRY_SIZE {
-                    return Err(RagError::Parse(format!(
-                        "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
-                        entry.name(),
-                        entry.size()
-                    )));
-                }
+            if let Ok(entry) = archive.by_index(i)
+                && entry.size() > MAX_ENTRY_SIZE
+            {
+                return Err(RagError::Parse(format!(
+                    "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
+                    entry.name(),
+                    entry.size()
+                )));
             }
         }
-        let result = noxa_fetch::document::extract_document(bytes, noxa_fetch::document::DocType::Docx)
-            .map_err(|e| RagError::Parse(format!("DOCX extract: {e}")))?;
+        let result =
+            noxa_fetch::document::extract_document(bytes, noxa_fetch::document::DocType::Docx)
+                .map_err(|e| RagError::Parse(format!("DOCX extract: {e}")))?;
         let mut r = result;
         r.metadata.url = Some(url);
         r.metadata.source_type = Some("file".to_string());
@@ -1026,10 +1069,10 @@ fn startup_scan_key(path: &std::path::Path) -> Option<(String, String)> {
                 .metadata
                 .content_hash
                 .unwrap_or_else(|| format!("{:x}", sha2::Sha256::digest(&bytes)));
-            if let Some(url) = q.metadata.url {
-                if !url.is_empty() {
-                    return Some((hash, url));
-                }
+            if let Some(url) = q.metadata.url
+                && !url.is_empty()
+            {
+                return Some((hash, url));
             }
         }
     }
@@ -1052,7 +1095,10 @@ fn detect_git_branch(file_path: &Path) -> Option<String> {
         if head.exists() {
             let content = std::fs::read_to_string(&head).ok()?;
             // `ref: refs/heads/main\n` → `main`
-            return content.trim().strip_prefix("ref: refs/heads/").map(str::to_string);
+            return content
+                .trim()
+                .strip_prefix("ref: refs/heads/")
+                .map(str::to_string);
         }
         dir = dir.parent()?;
     }
@@ -1116,15 +1162,19 @@ async fn process_job(
     let watch_dir = match &config.source {
         SourceConfig::FsWatcher { watch_dir, .. } => watch_dir.clone(),
     };
-    let watch_canonical = tokio::fs::canonicalize(&watch_dir).await.map_err(|e| {
-        RagError::Generic(format!("canonicalize watch_dir failed: {e}"))
-    })?;
+    let watch_canonical = tokio::fs::canonicalize(&watch_dir)
+        .await
+        .map_err(|e| RagError::Generic(format!("canonicalize watch_dir failed: {e}")))?;
     if !canonical.starts_with(&watch_canonical) {
         tracing::warn!(
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"
         );
-        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
+        return Ok(JobStats {
+            chunks: 0,
+            embed_ms: 0,
+            upsert_ms: 0,
+        });
     }
 
     const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
@@ -1134,7 +1184,11 @@ async fn process_job(
             size,
             "file too large (>50MB), skipping"
         );
-        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
+        return Ok(JobStats {
+            chunks: 0,
+            embed_ms: 0,
+            upsert_ms: 0,
+        });
     }
 
     // Read as bytes so binary formats (PDF, DOCX, PPTX, ODT) are handled correctly.
@@ -1151,7 +1205,11 @@ async fn process_job(
         Err(e) => {
             tracing::warn!(path = ?job.path, error = %e, "parse failed, skipping");
             append_failed_job(&job.path, &e, config).await;
-            return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
+            return Ok(JobStats {
+                chunks: 0,
+                embed_ms: 0,
+                upsert_ms: 0,
+            });
         }
     };
 
@@ -1161,11 +1219,11 @@ async fn process_job(
     if result.metadata.file_path.is_none() {
         result.metadata.file_path = Some(job.path.to_string_lossy().into_owned());
     }
-    if result.metadata.last_modified.is_none() {
-        if let Ok(mtime) = file_meta.modified() {
-            result.metadata.last_modified =
-                Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
-        }
+    if result.metadata.last_modified.is_none()
+        && let Ok(mtime) = file_meta.modified()
+    {
+        result.metadata.last_modified =
+            Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
     let git_branch = detect_git_branch(&job.path);
 
@@ -1173,7 +1231,11 @@ async fn process_job(
     let raw_url = result.metadata.url.as_deref().unwrap_or("").to_string();
     if let Err(e) = validate_url_scheme(&raw_url) {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
-        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
+        return Ok(JobStats {
+            chunks: 0,
+            embed_ms: 0,
+            upsert_ms: 0,
+        });
     }
     // Normalize so the mutex key and stored payload match what delete_by_url queries.
     let url = crate::store::qdrant::normalize_url(&raw_url);
@@ -1183,7 +1245,11 @@ async fn process_job(
     let chunks = chunker::chunk(&result, &config.chunker, tokenizer);
     if chunks.is_empty() {
         tracing::info!(url = %url, "no indexable content after chunking");
-        return Ok(JobStats { chunks: 0, embed_ms: 0, upsert_ms: 0 });
+        return Ok(JobStats {
+            chunks: 0,
+            embed_ms: 0,
+            upsert_ms: 0,
+        });
     }
     let chunk_ms = t1.elapsed().as_millis() as u64;
 
@@ -1286,14 +1352,17 @@ async fn process_job(
         })?;
         let upsert_ms = t4.elapsed().as_millis() as u64;
 
-        let stale = store.delete_stale_by_url(&url, &new_ids).await.map_err(|e| {
-            tracing::warn!(
-                url = %url,
-                error = %e,
-                "stale cleanup failed after upsert — duplicate chunks until next file event"
-            );
-            e
-        })?;
+        let stale = store
+            .delete_stale_by_url(&url, &new_ids)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    url = %url,
+                    error = %e,
+                    "stale cleanup failed after upsert — duplicate chunks until next file event"
+                );
+                e
+            })?;
         let delete_ms = t3.elapsed().as_millis() as u64 - upsert_ms;
 
         if stale > 0 {
@@ -1342,12 +1411,18 @@ async fn process_job(
 
     let upsert_ms = store_result?;
 
-    Ok(JobStats { chunks: n_chunks, embed_ms, upsert_ms })
+    Ok(JobStats {
+        chunks: n_chunks,
+        embed_ms,
+        upsert_ms,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_indexable_paths, detect_git_branch, is_indexable, parse_file, validate_url_scheme};
+    use super::{
+        collect_indexable_paths, detect_git_branch, is_indexable, parse_file, validate_url_scheme,
+    };
     use std::fs;
     use std::io::Write;
 
@@ -1393,7 +1468,10 @@ mod tests {
         for ext in &["epub", "eml", "mbox"] {
             let path = root.join(format!("file.{ext}"));
             fs::write(&path, "x").expect("write file");
-            assert!(!is_indexable(&path), ".{ext} should NOT be indexable (deferred)");
+            assert!(
+                !is_indexable(&path),
+                ".{ext} should NOT be indexable (deferred)"
+            );
         }
     }
 
@@ -1410,8 +1488,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let git_dir = tmp.path().join(".git");
         fs::create_dir_all(&git_dir).expect("create .git");
-        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/noxa-rag\n")
-            .expect("write HEAD");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/noxa-rag\n").expect("write HEAD");
         let nested = tmp.path().join("src/foo.rs");
         fs::create_dir_all(nested.parent().unwrap()).expect("create src");
         fs::write(&nested, "x").expect("write file");
@@ -1511,7 +1588,11 @@ mod tests {
         let root = tmp.path();
         fs::write(root.join("readme.md"), "# Hello").expect("write md");
         fs::write(root.join("page.html"), "<html></html>").expect("write html");
-        fs::write(root.join("notebook.ipynb"), r#"{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}"#).expect("write ipynb");
+        fs::write(
+            root.join("notebook.ipynb"),
+            r#"{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}"#,
+        )
+        .expect("write ipynb");
         fs::write(root.join("result.json"), "{}").expect("write json");
         // Binary extensions should be ignored.
         fs::write(root.join("photo.png"), "data").expect("write png");
@@ -1522,11 +1603,26 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
 
-        assert!(names.contains(&"readme.md".to_string()), "should collect .md");
-        assert!(names.contains(&"page.html".to_string()), "should collect .html");
-        assert!(names.contains(&"notebook.ipynb".to_string()), "should collect .ipynb");
-        assert!(names.contains(&"result.json".to_string()), "should collect .json");
-        assert!(!names.contains(&"photo.png".to_string()), "should NOT collect .png");
+        assert!(
+            names.contains(&"readme.md".to_string()),
+            "should collect .md"
+        );
+        assert!(
+            names.contains(&"page.html".to_string()),
+            "should collect .html"
+        );
+        assert!(
+            names.contains(&"notebook.ipynb".to_string()),
+            "should collect .ipynb"
+        );
+        assert!(
+            names.contains(&"result.json".to_string()),
+            "should collect .json"
+        );
+        assert!(
+            !names.contains(&"photo.png".to_string()),
+            "should NOT collect .png"
+        );
     }
 
     // ─── parse_file: plain text formats ────────────────────────────────────────
@@ -1551,8 +1647,14 @@ mod tests {
 
         // URL must be a file:// URI pointing at the file.
         let url = result.metadata.url.as_deref().expect("url must be set");
-        assert!(url.starts_with("file://"), "url should be file://, got: {url}");
-        assert!(url.contains("my-doc"), "url should contain filename stem, got: {url}");
+        assert!(
+            url.starts_with("file://"),
+            "url should be file://, got: {url}"
+        );
+        assert!(
+            url.contains("my-doc"),
+            "url should contain filename stem, got: {url}"
+        );
 
         // Title should be the filename stem.
         let title = result.metadata.title.as_deref().expect("title must be set");
@@ -1607,7 +1709,10 @@ mod tests {
                 "{filename}: markdown should not be empty"
             );
             let url = result.metadata.url.as_deref().expect("url set");
-            assert!(url.starts_with("file://"), "{filename}: url should be file://");
+            assert!(
+                url.starts_with("file://"),
+                "{filename}: url should be file://"
+            );
         }
     }
 
@@ -1644,8 +1749,15 @@ mod tests {
             .expect("parse .html");
 
         // URL must be set to a file:// URI.
-        let url = result.metadata.url.as_deref().expect("url must be set for html");
-        assert!(url.starts_with("file://"), "html url should be file://, got: {url}");
+        let url = result
+            .metadata
+            .url
+            .as_deref()
+            .expect("url must be set for html");
+        assert!(
+            url.starts_with("file://"),
+            "html url should be file://, got: {url}"
+        );
 
         // source_type must be "file".
         assert_eq!(result.metadata.source_type.as_deref(), Some("file"));
@@ -1720,7 +1832,8 @@ mod tests {
         let mut zip = zip::ZipWriter::new(buf);
         let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("word/document.xml", options).expect("start_file");
+        zip.start_file("word/document.xml", options)
+            .expect("start_file");
         zip.write_all(xml.as_bytes()).expect("write xml");
         let cursor = zip.finish().expect("finish zip");
         cursor.into_inner()
@@ -1746,7 +1859,8 @@ mod tests {
         let mut zip = zip::ZipWriter::new(buf);
         let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("content.xml", options).expect("start_file odt");
+        zip.start_file("content.xml", options)
+            .expect("start_file odt");
         zip.write_all(xml.as_bytes()).expect("write odt xml");
         let cursor = zip.finish().expect("finish odt zip");
         cursor.into_inner()
@@ -1764,17 +1878,17 @@ mod tests {
             .expect("parse .docx should succeed");
 
         let text = &result.content.markdown;
-        assert!(
-            !text.is_empty(),
-            "DOCX markdown should not be empty"
-        );
+        assert!(!text.is_empty(), "DOCX markdown should not be empty");
         assert!(
             text.contains("test document paragraph"),
             "DOCX text should contain paragraph content, got: {text:?}"
         );
         // URL must be a file:// reference.
         let url = result.metadata.url.as_deref().expect("docx url set");
-        assert!(url.starts_with("file://"), "docx url should be file://, got: {url}");
+        assert!(
+            url.starts_with("file://"),
+            "docx url should be file://, got: {url}"
+        );
     }
 
     #[tokio::test]
@@ -1789,10 +1903,7 @@ mod tests {
             .expect("parse .odt should succeed");
 
         let text = &result.content.markdown;
-        assert!(
-            !text.is_empty(),
-            "ODT markdown should not be empty"
-        );
+        assert!(!text.is_empty(), "ODT markdown should not be empty");
         assert!(
             text.contains("Open document text paragraph"),
             "ODT text should contain paragraph content, got: {text:?}"
@@ -1838,7 +1949,11 @@ mod tests {
         match result {
             Ok(r) => {
                 // If it parsed successfully, the result must have a file:// URL set.
-                let url = r.metadata.url.as_deref().expect("pdf url should be set on Ok");
+                let url = r
+                    .metadata
+                    .url
+                    .as_deref()
+                    .expect("pdf url should be set on Ok");
                 assert!(url.starts_with("file://"), "pdf url should be file://");
                 // Content may be empty for this trivial fixture depending on the extractor.
                 // At minimum verify we got a valid ExtractionResult structure back.

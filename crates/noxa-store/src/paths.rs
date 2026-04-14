@@ -66,11 +66,12 @@ pub(crate) fn sanitize_component(value: &str) -> String {
 ///
 /// Returns `Err` if the home directory cannot be determined (`$HOME` unset).
 /// This is a hard error — there is no fallback to `"."`.
-pub fn content_store_root(output_dir: Option<&std::path::Path>) -> Result<PathBuf, String> {
+pub fn content_store_root(
+    output_dir: Option<&std::path::Path>,
+) -> Result<PathBuf, crate::types::StoreError> {
     let base = match output_dir {
         Some(d) => d.to_path_buf(),
-        None => dirs::home_dir()
-            .ok_or_else(|| "cannot determine home directory: $HOME is unset".to_string())?,
+        None => dirs::home_dir().ok_or(crate::types::StoreError::HomeDirUnavailable)?,
     };
     Ok(base.join(".noxa").join("content"))
 }
@@ -160,7 +161,13 @@ mod tests {
 
     #[test]
     fn test_domain_from_url() {
-        assert_eq!(domain_from_url("https://docs.example.com/api"), "docs_example_com");
-        assert_eq!(domain_from_url("https://www.rust-lang.org/"), "rust-lang_org");
+        assert_eq!(
+            domain_from_url("https://docs.example.com/api"),
+            "docs_example_com"
+        );
+        assert_eq!(
+            domain_from_url("https://www.rust-lang.org/"),
+            "rust-lang_org"
+        );
     }
 }
