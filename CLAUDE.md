@@ -19,10 +19,13 @@ noxa/
                       # + JSON schema extraction (validated + retry), prompt extraction, summarization
     noxa-pdf/      # PDF text extraction via pdf-extract
     noxa-mcp/      # MCP server (Model Context Protocol) for AI agents
-    noxa/      # CLI binary
+    noxa-cli/  # CLI binary (produces `noxa` binary)
+    noxa-rag/  # RAG pipeline daemon (TEI embeddings + Qdrant vector store)
+                  # + multi-format ingestion (DOCX, XLSX, CSV, PDF, HTML, OPML)
+                  # + fs-watcher for automatic re-indexing
 ```
 
-Two binaries: `noxa` (CLI), `noxa-mcp` (MCP server).
+Three binaries: `noxa` (CLI), `noxa-mcp` (MCP server), `noxa-rag-daemon` (RAG pipeline).
 
 ### Core Modules (`noxa-core`)
 - `extractor.rs` — Readability-style scoring: text density, semantic tags, link density penalty
@@ -58,9 +61,28 @@ Two binaries: `noxa` (CLI), `noxa-mcp` (MCP server).
 
 ### MCP Server (`noxa-mcp`)
 - Model Context Protocol server over stdio transport
-- 8 tools: scrape, crawl, map, batch, extract, summarize, diff, brand
+- 10 tools: scrape, crawl, map, batch, extract, summarize, diff, brand, search, research
 - Works with Claude Desktop, Claude Code, and any MCP client
 - Uses `rmcp` crate (official Rust MCP SDK)
+
+### RAG Modules (`noxa-rag`)
+- `pipeline.rs` — End-to-end ingestion: fetch → chunk → embed → upsert to Qdrant
+- `chunker.rs` — Text chunking strategies for embedding
+- `embed/` — Embedding providers: TEI (local), OpenAI, VoyageAI
+- `store/` — Qdrant REST client (no gRPC)
+- `config.rs` — TOML config schema for the daemon
+- Produces `noxa-rag-daemon` binary for background indexing
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `NOXA_API_KEY` | Noxa Cloud API key (required for `--research`, `--cloud`) |
+| `SEARXNG_URL` | SearXNG instance URL (enables `--search` without cloud) |
+| `NOXA_CONFIG` | Path to `config.json` override |
+| `NOXA_NO_STORE` | Disable automatic content store persistence |
+| `GEMINI_MODEL` | Gemini model override (default: `gemini-2.5-pro`) |
+| `OPENAI_API_KEY` | OpenAI API key for LLM provider chain |
 
 ## Hard Rules
 
@@ -125,6 +147,24 @@ noxa https://example.com --browser firefox
 # Local file / stdin
 noxa --file page.html
 cat page.html | noxa --stdin
+
+# Interactive first-run setup (config, API keys, MCP registration)
+noxa setup
+
+# Web search via SearXNG or Noxa Cloud
+noxa --search "rust async runtime comparison" --num-results 20
+noxa --search "query" --no-scrape         # snippets only, skip URL scraping
+
+# Local doc store management
+noxa --list                               # all cached domains
+noxa --list docs.example.com             # docs for a specific domain
+noxa --retrieve https://example.com/docs # exact URL or fuzzy query
+noxa --grep "authentication"             # search cached docs with rg
+noxa --status docs.example.com          # background crawl status
+
+# Watch for changes
+noxa https://example.com --watch --watch-interval 60
+noxa https://example.com --watch --on-change "notify-send 'Changed!'"
 ```
 
 ## Key Thresholds
@@ -137,12 +177,15 @@ cat page.html | noxa --stdin
 
 ## MCP Setup
 
-Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Add to Claude Desktop config:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
 ```json
 {
   "mcpServers": {
     "noxa": {
-      "command": "/path/to/noxa-mcp"
+      "command": "noxa",
+      "args": ["mcp"]
     }
   }
 }

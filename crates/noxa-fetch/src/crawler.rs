@@ -50,6 +50,9 @@ pub struct CrawlConfig {
     /// When set to `true`, the crawler breaks out of the main loop early.
     /// Callers (e.g. a Ctrl+C handler) can flip this to request graceful cancellation.
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// CSS selector / extraction options forwarded to every page fetch.
+    /// Defaults to `ExtractionOptions::default()` (no filtering).
+    pub extraction_options: noxa_core::ExtractionOptions,
 }
 
 impl Default for CrawlConfig {
@@ -66,6 +69,7 @@ impl Default for CrawlConfig {
             exclude_patterns: Vec::new(),
             progress_tx: None,
             cancel_flag: None,
+            extraction_options: noxa_core::ExtractionOptions::default(),
         }
     }
 }
@@ -77,6 +81,8 @@ pub struct CrawlResult {
     pub total: usize,
     pub ok: usize,
     pub errors: usize,
+    /// URLs skipped because they matched an `exclude_patterns` rule.
+    pub excluded: usize,
     pub elapsed_secs: f64,
     /// URLs visited during this crawl (for resume state).
     #[serde(skip)]
@@ -195,6 +201,7 @@ impl Crawler {
                     total: 1,
                     ok: 0,
                     errors: 1,
+                    excluded: 0,
                     elapsed_secs: 0.0,
                     visited: HashSet::new(),
                     remaining_frontier: Vec::new(),
@@ -209,6 +216,7 @@ impl Crawler {
         let mut visited: HashSet<String>;
         let mut pages: Vec<PageResult> = Vec::new();
         let mut frontier: Vec<(String, usize)>;
+        let mut excluded: usize = 0;
 
         // Resume from saved state or start fresh
         if let Some(state) = resume_state {
@@ -237,6 +245,8 @@ impl Crawler {
                                 };
                                 let norm = normalize(&parsed);
                                 frontier.push((norm, 0));
+                            } else if self.is_excluded_by_pattern(&entry.url) {
+                                excluded += 1;
                             }
                         }
                         let added = frontier.len() - before;
@@ -251,6 +261,10 @@ impl Crawler {
                 }
             }
         }
+
+        // Wrap extraction_options in Arc so all spawned tasks share a single
+        // allocation instead of deep-cloning selector vectors on every URL.
+        let extraction_options = Arc::new(self.config.extraction_options.clone());
 
         while !frontier.is_empty() && pages.len() < self.config.max_pages {
             // Check cancel flag before processing each batch
@@ -279,6 +293,7 @@ impl Crawler {
                 let url = url.clone();
                 let depth = *depth;
                 let delay = self.config.delay;
+                let extraction_options = Arc::clone(&extraction_options);
 
                 handles.push(tokio::spawn(async move {
                     // Acquire permit — blocks if concurrency limit reached
@@ -286,7 +301,7 @@ impl Crawler {
                     tokio::time::sleep(delay).await;
 
                     let page_start = Instant::now();
-                    let result = client.fetch_and_extract(&url).await;
+                    let result = client.fetch_and_extract_with_options(&url, &extraction_options).await;
                     let elapsed = page_start.elapsed();
 
                     match result {
@@ -342,6 +357,8 @@ impl Crawler {
                     for link in &extraction.content.links {
                         if let Some(candidate) = self.qualify_link(&link.href, &visited) {
                             next_frontier.push((candidate, depth + 1));
+                        } else if self.is_excluded_by_pattern(&link.href) {
+                            excluded += 1;
                         }
                     }
                 }
@@ -382,11 +399,24 @@ impl Crawler {
             total: pages.len(),
             ok: ok_count,
             errors: err_count,
+            excluded,
             elapsed_secs: total_elapsed.as_secs_f64(),
             remaining_frontier: frontier,
             visited,
             pages,
         }
+    }
+
+    /// Returns true if the URL's path matches any configured exclude pattern.
+    fn is_excluded_by_pattern(&self, href: &str) -> bool {
+        let Ok(parsed) = Url::parse(href) else {
+            return false;
+        };
+        let path = parsed.path();
+        self.config
+            .exclude_patterns
+            .iter()
+            .any(|pat| glob_match(pat, path))
     }
 
     /// Check if a discovered link should be added to the frontier.

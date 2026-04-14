@@ -3,13 +3,14 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 license = "AGPL-3.0"
 repository = "https://github.com/jmagar/noxa"
 
 [workspace.dependencies]
 noxa-core = { path = "crates/noxa-core" }
+noxa-store = { path = "crates/noxa-store" }
 noxa-fetch = { path = "crates/noxa-fetch" }
 noxa-llm = { path = "crates/noxa-llm" }
 noxa-pdf = { path = "crates/noxa-pdf" }

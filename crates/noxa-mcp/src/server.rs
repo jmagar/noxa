@@ -25,7 +25,7 @@ pub struct NoxaMcp {
     fetch_client: Arc<noxa_fetch::FetchClient>,
     llm_chain: Option<noxa_llm::ProviderChain>,
     cloud: Option<CloudClient>,
-    store: noxa_fetch::ContentStore,
+    store: noxa_store::FilesystemContentStore,
 }
 
 /// Parse a browser string into a BrowserProfile.
@@ -185,7 +185,10 @@ impl NoxaMcp {
         }
 
         // Create the content store first so we can clone it into FetchConfig.
-        let store = noxa_fetch::ContentStore::open();
+        let store = noxa_store::FilesystemContentStore::open().unwrap_or_else(|e| {
+            error!("content store init failed: {e}");
+            std::process::exit(1);
+        });
         info!("content store ready");
 
         // Inject store into FetchConfig so FetchClient auto-persists all extractions.
@@ -1113,8 +1116,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_rejects_ipv6_link_local_and_ula() {
-        assert!(validate_url("http://[fe80::1]/").is_err());
-        assert!(validate_url("http://[fc00::1]/").is_err());
+        assert!(validate_url("http://[fe80::1]/").await.is_err());
+        assert!(validate_url("http://[fc00::1]/").await.is_err());
     }
 
     #[test]
