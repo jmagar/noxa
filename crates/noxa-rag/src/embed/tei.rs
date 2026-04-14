@@ -29,7 +29,7 @@ struct EmbedRequest<'a> {
 pub struct TeiProvider {
     pub(crate) client: reqwest::Client,
     pub(crate) url: String,
-    pub(crate) model: String,
+    pub(crate) _model: String,
     pub(crate) dimensions: usize,
 }
 
@@ -39,7 +39,7 @@ impl TeiProvider {
         Self {
             client: reqwest::Client::new(),
             url,
-            model,
+            _model: model,
             dimensions: DEFAULT_DIMENSIONS,
         }
     }
@@ -83,7 +83,7 @@ impl TeiProvider {
         Ok(Self {
             client,
             url,
-            model,
+            _model: model,
             dimensions,
         })
     }
@@ -210,7 +210,7 @@ impl EmbedProvider for TeiProvider {
             return Ok(vec![]);
         }
 
-        let total_batches = (texts.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+        let total_batches = texts.len().div_ceil(BATCH_SIZE);
         let mut results: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
         for (batch_idx, chunk) in texts.chunks(BATCH_SIZE).enumerate() {
@@ -220,7 +220,7 @@ impl EmbedProvider for TeiProvider {
                     status: Some(413), ..
                 }) => {
                     // Halve batch size and retry. Propagate real errors directly.
-                    let sub_total = (chunk.len() + BATCH_SIZE_REDUCED - 1) / BATCH_SIZE_REDUCED;
+                    let sub_total = chunk.len().div_ceil(BATCH_SIZE_REDUCED);
                     let mut chunk_results: Vec<Vec<f32>> = Vec::with_capacity(chunk.len());
                     for (sub_idx, sub_chunk) in chunk.chunks(BATCH_SIZE_REDUCED).enumerate() {
                         tracing::debug!(

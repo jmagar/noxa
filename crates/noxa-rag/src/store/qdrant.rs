@@ -39,7 +39,6 @@ struct CollectionNamedVectors {
     vectors: HashMap<String, CollectionVectors>,
 }
 
-
 #[derive(Serialize)]
 struct UpsertRequest {
     points: Vec<QdrantPoint>,
@@ -82,7 +81,7 @@ pub struct QdrantStore {
     client: reqwest::Client,
     base_url: String, // e.g. "http://127.0.0.1:53333"
     collection: String,
-    uuid_namespace: uuid::Uuid,
+    _uuid_namespace: uuid::Uuid,
 }
 
 impl QdrantStore {
@@ -111,7 +110,7 @@ impl QdrantStore {
             client,
             base_url: url.trim_end_matches('/').to_string(),
             collection,
-            uuid_namespace,
+            _uuid_namespace: uuid_namespace,
         })
     }
 
@@ -222,7 +221,7 @@ fn parse_collection_vector_size(vectors: serde_json::Value) -> Result<usize, Rag
     let named: CollectionNamedVectors = serde_json::from_value(json!({ "vectors": vectors }))
         .map_err(|e| RagError::Store(format!("collection_info parse failed: {e}")))?;
 
-    let mut sizes = named.vectors.into_iter().map(|(_, config)| config.size);
+    let mut sizes = named.vectors.into_values().map(|config| config.size);
     let first = sizes
         .next()
         .ok_or_else(|| RagError::Store("collection_info missing vectors".to_string()))?;
@@ -607,9 +606,7 @@ impl VectorStore for QdrantStore {
             .json()
             .await
             .map_err(|e| RagError::Store(format!("collection_point_count parse failed: {e}")))?;
-        Ok(body["result"]["vectors_count"]
-            .as_u64()
-            .unwrap_or(0))
+        Ok(body["result"]["vectors_count"].as_u64().unwrap_or(0))
     }
 
     /// Check whether any point exists with both `url` == `url` AND `content_hash` == `hash`.

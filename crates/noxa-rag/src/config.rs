@@ -142,14 +142,14 @@ pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     }
 
     // Validate failed_jobs_log is absolute if set
-    if let Some(ref log_path) = config.pipeline.failed_jobs_log {
-        if !log_path.is_absolute() {
-            return Err(RagError::Config(format!(
-                "pipeline.failed_jobs_log must be an absolute path (got: {}). \
-                 systemd daemon runs with CWD = / and relative paths resolve there.",
-                log_path.display()
-            )));
-        }
+    if let Some(ref log_path) = config.pipeline.failed_jobs_log
+        && !log_path.is_absolute()
+    {
+        return Err(RagError::Config(format!(
+            "pipeline.failed_jobs_log must be an absolute path (got: {}). \
+             systemd daemon runs with CWD = / and relative paths resolve there.",
+            log_path.display()
+        )));
     }
 
     Ok(config)

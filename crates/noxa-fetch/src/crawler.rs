@@ -301,7 +301,9 @@ impl Crawler {
                     tokio::time::sleep(delay).await;
 
                     let page_start = Instant::now();
-                    let result = client.fetch_and_extract_with_options(&url, &extraction_options).await;
+                    let result = client
+                        .fetch_and_extract_with_options(&url, &extraction_options)
+                        .await;
                     let elapsed = page_start.elapsed();
 
                     match result {
