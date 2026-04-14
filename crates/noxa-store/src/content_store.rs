@@ -65,6 +65,10 @@ pub struct FilesystemContentStore {
     /// Maximum combined byte size of markdown + plain_text before a document is
     /// skipped (not written). Default: 2 MiB. `None` disables the guard.
     pub max_content_bytes: Option<usize>,
+    /// Maximum number of changelog entries per sidecar.  When exceeded, old
+    /// entries (all except `[0]`, the initial-fetch sentinel) are drained from
+    /// the front.  `None` disables the cap.  Default: 100.
+    pub max_changelog_entries: Option<usize>,
 }
 
 impl FilesystemContentStore {
@@ -80,6 +84,7 @@ impl FilesystemContentStore {
             root,
             canonical_root,
             max_content_bytes: Some(2 * 1024 * 1024),
+            max_changelog_entries: Some(100),
         }
     }
 
@@ -96,6 +101,7 @@ impl FilesystemContentStore {
             root,
             canonical_root,
             max_content_bytes: Some(2 * 1024 * 1024),
+            max_changelog_entries: Some(100),
         })
     }
 
@@ -316,6 +322,15 @@ impl FilesystemContentStore {
                         word_count: to_store.metadata.word_count,
                         diff: Some(content_diff.clone()),
                     });
+
+                    // Enforce changelog cap: keep entry[0] (initial fetch sentinel)
+                    // and trim the oldest intermediate entries.
+                    if let Some(cap) = self.max_changelog_entries {
+                        if cap > 1 && existing.changelog.len() > cap {
+                            let excess = existing.changelog.len() - cap;
+                            existing.changelog.drain(1..1 + excess);
+                        }
+                    }
                 }
 
                 let diff_opt = if changed { Some(content_diff) } else { None };
