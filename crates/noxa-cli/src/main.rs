@@ -455,6 +455,33 @@ fn build_ops_log(
     Some(Arc::new(FilesystemOperationsLog::new(root)))
 }
 
+/// Append an entry to the operations log if one is configured.
+///
+/// Centralises the repeated `if let Some(ref log) … append … warn` pattern
+/// that appears in every command handler.
+async fn log_operation(
+    ops_log: &Option<Arc<FilesystemOperationsLog>>,
+    url: &str,
+    op: Op,
+    input: impl FnOnce() -> serde_json::Value,
+    output: impl FnOnce() -> serde_json::Value,
+) {
+    if let Some(log) = ops_log {
+        let domain = domain_from_url(url);
+        let op_dbg = format!("{op:?}");
+        let entry = OperationEntry {
+            op,
+            at: chrono::Utc::now(),
+            url: url.to_string(),
+            input: input(),
+            output: output(),
+        };
+        if let Err(e) = log.append(&domain, &entry).await {
+            tracing::warn!(op = %op_dbg, url, %domain, error = %e, "ops log append failed");
+        }
+    }
+}
+
 /// Build FetchConfig from CLI flags.
 ///
 /// `--proxy` sets a single static proxy (no rotation).
@@ -2504,15 +2531,10 @@ async fn run_watch_single(
 ) -> Result<(), String> {
     // Watch restart continuity: try to restore the last stored snapshot as the
     // baseline instead of always doing a fresh fetch on startup.
-    let store = if cli.no_store {
-        None
-    } else {
-        Some(FilesystemContentStore::new(content_store_root(
-            resolved.output_dir.as_deref(),
-        )))
-    };
+    // Reuse the client's store instead of creating a redundant instance.
+    let store = client.store();
 
-    let (mut previous, mut is_initial_baseline) = if let Some(ref s) = store {
+    let (mut previous, mut is_initial_baseline) = if let Some(s) = store {
         match s.read(url).await {
             Ok(Some(stored)) => {
                 eprintln!(
@@ -2571,22 +2593,17 @@ async fn run_watch_single(
             eprintln!("[watch] Changes detected! ({})", timestamp());
 
             // Append change to ops log.
-            if let Some(log) = client.ops_log() {
-                let domain = domain_from_url(url);
-                let entry = OperationEntry {
-                    op: Op::Diff,
-                    at: chrono::Utc::now(),
-                    url: url.to_string(),
-                    input: serde_json::json!({
-                        "source": "watch",
-                        "interval_secs": cli.watch_interval
-                    }),
-                    output: serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
-                };
-                if let Err(e) = log.append(&domain, &entry).await {
-                    tracing::warn!("ops log append failed for watch: {e}");
-                }
-            }
+            let watch_ops_log = client.ops_log().cloned();
+            log_operation(
+                &watch_ops_log,
+                url,
+                Op::Diff,
+                || serde_json::json!({
+                    "source": "watch",
+                    "interval_secs": cli.watch_interval
+                }),
+                || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
+            ).await;
 
             // is_initial_baseline suppresses --on-change on the first reconciliation
             // write when there was no stored snapshot (avoids spurious triggers on startup).
@@ -2744,25 +2761,20 @@ async fn run_watch_multi(
             }
 
             // Append each changed URL to ops log.
-            if let Some(log) = client.ops_log() {
-                for entry in &changed {
-                    if let Some(url) = entry["url"].as_str() {
-                        let domain = domain_from_url(url);
-                        let log_entry = OperationEntry {
-                            op: Op::Diff,
-                            at: chrono::Utc::now(),
-                            url: url.to_string(),
-                            input: serde_json::json!({
-                                "source": "watch",
-                                "interval_secs": cli.watch_interval,
-                                "check_number": check_number
-                            }),
-                            output: entry.clone(),
-                        };
-                        if let Err(e) = log.append(&domain, &log_entry).await {
-                            tracing::warn!("ops log append failed for watch-multi: {e}");
-                        }
-                    }
+            let multi_ops_log = client.ops_log().cloned();
+            for entry in &changed {
+                if let Some(url) = entry["url"].as_str() {
+                    log_operation(
+                        &multi_ops_log,
+                        url,
+                        Op::Diff,
+                        || serde_json::json!({
+                            "source": "watch",
+                            "interval_secs": cli.watch_interval,
+                            "check_number": check_number
+                        }),
+                        || entry.clone(),
+                    ).await;
                 }
             }
 
@@ -2831,24 +2843,15 @@ async fn run_diff(
     let diff = noxa_core::diff::diff(&old, &new_result);
 
     // Append diff result to ops log.
-    if let Some(ops_log) = build_ops_log(cli, resolved) {
-        let url = cli
-            .urls
-            .first()
-            .map(|u| normalize_url(u))
-            .unwrap_or_default();
-        let domain = domain_from_url(&url);
-        let entry = OperationEntry {
-            op: Op::Diff,
-            at: chrono::Utc::now(),
-            url: url.clone(),
-            input: serde_json::json!({ "source": "file", "snapshot": snapshot_path }),
-            output: serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
-        };
-        if let Err(e) = ops_log.append(&domain, &entry).await {
-            tracing::warn!("ops log append failed for diff: {e}");
-        }
-    }
+    let ops_log = build_ops_log(cli, resolved);
+    let url = cli.urls.first().map(|u| normalize_url(u)).unwrap_or_default();
+    log_operation(
+        &ops_log,
+        &url,
+        Op::Diff,
+        || serde_json::json!({ "source": "file", "snapshot": snapshot_path }),
+        || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
+    ).await;
 
     print_diff_output(&diff, &resolved.format);
     Ok(())
@@ -2862,19 +2865,14 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         Some(result.url.as_str()).filter(|s| !s.is_empty()),
     );
 
-    if let Some(ops_log) = build_ops_log(cli, resolved) {
-        let domain = domain_from_url(&result.url);
-        let entry = OperationEntry {
-            op: Op::Brand,
-            at: chrono::Utc::now(),
-            url: result.url.clone(),
-            input: serde_json::json!({}),
-            output: serde_json::to_value(&brand).unwrap_or(serde_json::Value::Null),
-        };
-        if let Err(e) = ops_log.append(&domain, &entry).await {
-            tracing::warn!("ops log append failed for brand: {e}");
-        }
-    }
+    let ops_log = build_ops_log(cli, resolved);
+    log_operation(
+        &ops_log,
+        &result.url,
+        Op::Brand,
+        || serde_json::json!({}),
+        || serde_json::to_value(&brand).unwrap_or(serde_json::Value::Null),
+    ).await;
 
     let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
     println!("{output}");
@@ -2954,7 +2952,6 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
     let provider = build_llm_provider(cli, resolved).await?;
     let model = resolved.llm_model.as_deref();
     let ops_log = build_ops_log(cli, resolved);
-    let domain = domain_from_url(&url);
 
     let output_str: Option<String> = if let Some(ref schema_input) = cli.extract_json {
         // Support @file syntax for loading schema from file
@@ -2979,23 +2976,18 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM extraction failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        if let Some(ref log) = ops_log {
-            let entry = OperationEntry {
-                op: Op::Extract,
-                at: chrono::Utc::now(),
-                url: url.clone(),
-                input: serde_json::json!({
-                    "kind": "json",
-                    "schema": schema,
-                    "provider": provider.name(),
-                    "model": model
-                }),
-                output: extracted.clone(),
-            };
-            if let Err(e) = log.append(&domain, &entry).await {
-                tracing::warn!("ops log append failed for extract-json: {e}");
-            }
-        }
+        log_operation(
+            &ops_log,
+            &url,
+            Op::Extract,
+            || serde_json::json!({
+                "kind": "json",
+                "schema": schema,
+                "provider": provider.name(),
+                "model": model
+            }),
+            || extracted.clone(),
+        ).await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(ref prompt) = cli.extract_prompt {
@@ -3010,23 +3002,18 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM extraction failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        if let Some(ref log) = ops_log {
-            let entry = OperationEntry {
-                op: Op::Extract,
-                at: chrono::Utc::now(),
-                url: url.clone(),
-                input: serde_json::json!({
-                    "kind": "prompt",
-                    "prompt": prompt,
-                    "provider": provider.name(),
-                    "model": model
-                }),
-                output: extracted.clone(),
-            };
-            if let Err(e) = log.append(&domain, &entry).await {
-                tracing::warn!("ops log append failed for extract-prompt: {e}");
-            }
-        }
+        log_operation(
+            &ops_log,
+            &url,
+            Op::Extract,
+            || serde_json::json!({
+                "kind": "prompt",
+                "prompt": prompt,
+                "provider": provider.name(),
+                "model": model
+            }),
+            || extracted.clone(),
+        ).await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(sentences) = cli.summarize {
@@ -3041,22 +3028,17 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
         .map_err(|e| format!("LLM summarization failed: {e}"))?;
         eprintln!("LLM: {:.1}s", t.elapsed().as_secs_f64());
 
-        if let Some(ref log) = ops_log {
-            let entry = OperationEntry {
-                op: Op::Summarize,
-                at: chrono::Utc::now(),
-                url: url.clone(),
-                input: serde_json::json!({
-                    "sentences": sentences,
-                    "provider": provider.name(),
-                    "model": model
-                }),
-                output: serde_json::Value::String(summary.clone()),
-            };
-            if let Err(e) = log.append(&domain, &entry).await {
-                tracing::warn!("ops log append failed for summarize: {e}");
-            }
-        }
+        log_operation(
+            &ops_log,
+            &url,
+            Op::Summarize,
+            || serde_json::json!({
+                "sentences": sentences,
+                "provider": provider.name(),
+                "model": model
+            }),
+            || serde_json::Value::String(summary.clone()),
+        ).await;
 
         Some(summary)
     } else {
@@ -3173,8 +3155,7 @@ async fn run_batch_llm(
                 eprintln!("-> extracted {detail} ({:.1}s)", llm_elapsed.as_secs_f64());
 
                 // Append to ops log.
-                if let Some(ref log) = ops_log {
-                    let domain = domain_from_url(url);
+                {
                     let (op, log_input, log_output) = if let Some(ref schema) = schema {
                         (
                             Op::Extract,
@@ -3204,16 +3185,7 @@ async fn run_batch_llm(
                             },
                         )
                     };
-                    let log_entry = OperationEntry {
-                        op,
-                        at: chrono::Utc::now(),
-                        url: url.clone(),
-                        input: log_input,
-                        output: log_output,
-                    };
-                    if let Err(e) = log.append(&domain, &log_entry).await {
-                        tracing::warn!("ops log append failed for batch-llm: {e}");
-                    }
+                    log_operation(&ops_log, url, op, || log_input, || log_output).await;
                 }
 
                 println!("--- {url}");

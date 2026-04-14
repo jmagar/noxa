@@ -58,17 +58,33 @@ pub struct Sidecar {
 #[derive(Debug, Clone)]
 pub struct FilesystemContentStore {
     root: PathBuf,
+    /// Cached canonical (symlink-resolved) root path.  Populated lazily on first
+    /// use of `resolve_path()` so that the store can be constructed before the
+    /// directory exists on disk.
+    canonical_root: std::sync::Arc<std::sync::OnceLock<PathBuf>>,
     /// Maximum combined byte size of markdown + plain_text before a document is
     /// skipped (not written). Default: 2 MiB. `None` disables the guard.
     pub max_content_bytes: Option<usize>,
+    /// Maximum number of changelog entries per sidecar.  When exceeded, old
+    /// entries (all except `[0]`, the initial-fetch sentinel) are drained from
+    /// the front.  `None` disables the cap.  Default: 100.
+    pub max_changelog_entries: Option<usize>,
 }
 
 impl FilesystemContentStore {
     /// Create a store at an explicit root path.
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let canonical_root = std::sync::Arc::new(std::sync::OnceLock::new());
+        // Eagerly try to cache the canonical root if the directory already exists.
+        if let Ok(cr) = std::fs::canonicalize(&root) {
+            let _ = canonical_root.set(cr);
+        }
         Self {
-            root: root.into(),
+            root,
+            canonical_root,
             max_content_bytes: Some(2 * 1024 * 1024),
+            max_changelog_entries: Some(100),
         }
     }
 
@@ -77,14 +93,25 @@ impl FilesystemContentStore {
     /// Returns `Err` if the home directory cannot be determined.
     pub fn open() -> Result<Self, StoreError> {
         let root = content_store_root(None)?;
-        Ok(Self {
-            root,
-            max_content_bytes: Some(2 * 1024 * 1024),
-        })
+        Ok(Self::new(root))
     }
 
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// Return the cached canonical root, lazily populating on first call.
+    fn get_canonical_root(&self) -> Result<PathBuf, StoreError> {
+        if let Some(cr) = self.canonical_root.get() {
+            return Ok(cr.clone());
+        }
+        let cr = std::fs::canonicalize(&self.root).map_err(|e| StoreError::IoPath {
+            source: e,
+            path: self.root.clone(),
+        })?;
+        // Ignore set error — another thread may have populated it concurrently.
+        let _ = self.canonical_root.set(cr.clone());
+        Ok(cr)
     }
 
     fn resolve_path(&self, url: &str) -> Result<PathBuf, StoreError> {
@@ -100,13 +127,11 @@ impl FilesystemContentStore {
             return Err(StoreError::PathEscape(url.to_string()));
         }
 
-        // Symlink protection: canonicalize the parent directory (which must
-        // already exist or be created) to resolve any symlinks, then verify
-        // that the final path still resides under the canonical root.
-        let canonical_root = std::fs::canonicalize(&self.root).map_err(|e| StoreError::IoPath {
-            source: e,
-            path: self.root.clone(),
-        })?;
+        // Use the cached canonical root instead of calling canonicalize per-request.
+        let canonical_root = self.get_canonical_root()?;
+
+        // Symlink protection: walk up to find the nearest existing ancestor,
+        // canonicalize it, then verify the resolved path stays under the root.
         let parent = base.parent().unwrap_or(&base);
         let mut existing_ancestor = parent.to_path_buf();
         let mut suffix = PathBuf::new();
@@ -129,7 +154,12 @@ impl FilesystemContentStore {
             return Err(StoreError::PathEscape(url.to_string()));
         }
 
-        Ok(base)
+        // Return the canonicalized path (not `base`) to close the TOCTOU gap:
+        // a symlink created between check and write cannot escape the root.
+        let file_name = base
+            .file_name()
+            .ok_or_else(|| StoreError::PathEscape(url.to_string()))?;
+        Ok(resolved.join(file_name))
     }
 
     pub async fn read(&self, url: &str) -> Result<Option<noxa_core::ExtractionResult>, StoreError> {
@@ -264,8 +294,14 @@ impl FilesystemContentStore {
         // ---- Build the updated sidecar and decide what changed -------------
         let (sidecar, is_new, changed, word_count_delta, diff_result) =
             if let Some(mut existing) = existing_sidecar {
-                // Compare against previous current content.
-                let content_diff = noxa_core::diff::diff(&existing.current, &to_store);
+                // Offload CPU-bound diff to spawn_blocking to avoid blocking the executor.
+                let prev = existing.current.clone();
+                let curr = to_store.clone();
+                let content_diff = tokio::task::spawn_blocking(move || {
+                    noxa_core::diff::diff(&prev, &curr)
+                })
+                .await
+                .map_err(StoreError::TaskJoin)?;
                 let changed = content_diff.status == noxa_core::ChangeStatus::Changed;
                 let wc_delta = to_store.metadata.word_count as i64
                     - existing.current.metadata.word_count as i64;
@@ -309,6 +345,19 @@ impl FilesystemContentStore {
                 };
                 (sidecar, true, false, 0i64, None)
             };
+
+        // ---- Enforce changelog cap ------------------------------------------------
+        // Applied unconditionally so that sidecars exceeding the cap from older
+        // runs are pruned even on identical re-fetches.  Entry[0] (initial-fetch
+        // sentinel) is always preserved.
+        let mut sidecar = sidecar;
+        if let Some(cap) = self.max_changelog_entries {
+            let cap = cap.max(1); // at least keep the sentinel
+            if sidecar.changelog.len() > cap {
+                let excess = sidecar.changelog.len() - cap;
+                sidecar.changelog.drain(1..1 + excess);
+            }
+        }
 
         // ---- Serialize ---------------------------------------------------------
         let write_md = is_new || changed;
