@@ -222,6 +222,11 @@ impl FetchClient {
         Ok(Self { pool, pdf_mode, store, ops_log })
     }
 
+    /// Return the content store configured for this client, if any.
+    pub fn store(&self) -> Option<&noxa_store::FilesystemContentStore> {
+        self.store.as_ref()
+    }
+
     /// Return the operations log configured for this client, if any.
     pub fn ops_log(&self) -> Option<&Arc<noxa_store::FilesystemOperationsLog>> {
         self.ops_log.as_ref()

@@ -2413,13 +2413,10 @@ async fn run_watch_single(
 ) -> Result<(), String> {
     // Watch restart continuity: try to restore the last stored snapshot as the
     // baseline instead of always doing a fresh fetch on startup.
-    let store = if cli.no_store {
-        None
-    } else {
-        Some(FilesystemContentStore::new(content_store_root(resolved.output_dir.as_deref())))
-    };
+    // Reuse the client's store instead of creating a redundant instance.
+    let store = client.store();
 
-    let (mut previous, mut is_initial_baseline) = if let Some(ref s) = store {
+    let (mut previous, mut is_initial_baseline) = if let Some(s) = store {
         match s.read(url).await {
             Ok(Some(stored)) => {
                 eprintln!(
