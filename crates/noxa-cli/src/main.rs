@@ -501,9 +501,13 @@ fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -> FetchConf
     let store = if cli.no_store {
         None
     } else {
-        Some(noxa_fetch::ContentStore::new(content_store_root(
-            resolved.output_dir.as_deref(),
-        )))
+        let root = content_store_root(resolved.output_dir.as_deref());
+        // Ensure the root directory exists so that ContentStore::resolve_path can
+        // canonicalize it.  A fresh output_dir would otherwise cause all writes to
+        // fail silently because std::fs::canonicalize returns an error for a
+        // non-existent path.
+        std::fs::create_dir_all(&root).ok();
+        Some(noxa_fetch::ContentStore::new(root))
     };
 
     FetchConfig {
@@ -1665,12 +1669,9 @@ fn write_crawl_status(
     }
 }
 
-fn run_retrieve(query: &str) {
+fn run_retrieve(query: &str, output_dir: Option<&std::path::Path>) {
 
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+    let store_root = content_store_root(output_dir);
 
     if !store_root.exists() {
         eprintln!("{dim}no local docs — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --crawl <url>{reset}");
@@ -3075,12 +3076,9 @@ async fn run_research(
     ))
 }
 
-fn run_list(filter: &str) {
+fn run_list(filter: &str, output_dir: Option<&std::path::Path>) {
 
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+    let store_root = content_store_root(output_dir);
 
     if !store_root.exists() {
         eprintln!("{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}");
@@ -3197,12 +3195,9 @@ fn collect_docs(
     }
 }
 
-fn run_grep(pattern: &str) {
+fn run_grep(pattern: &str, output_dir: Option<&std::path::Path>) {
 
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("content");
+    let store_root = content_store_root(output_dir);
 
     if !store_root.exists() {
         eprintln!("{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}");
@@ -3485,7 +3480,7 @@ async fn main() {
     }
 
     if let Some(ref query) = cli.retrieve {
-        run_retrieve(query);
+        run_retrieve(query, resolved.output_dir.as_deref());
         return;
     }
 
@@ -3548,12 +3543,12 @@ async fn main() {
     }
 
     if let Some(ref filter) = cli.list {
-        run_list(filter);
+        run_list(filter, resolved.output_dir.as_deref());
         return;
     }
 
     if let Some(ref pattern) = cli.grep {
-        run_grep(pattern);
+        run_grep(pattern, resolved.output_dir.as_deref());
         return;
     }
 
