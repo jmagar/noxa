@@ -103,7 +103,12 @@ impl FilesystemContentStore {
         // Symlink protection: canonicalize the parent directory (which must
         // already exist or be created) to resolve any symlinks, then verify
         // that the final path still resides under the canonical root.
-        let canonical_root = std::fs::canonicalize(&self.root)?;
+        let canonical_root = std::fs::canonicalize(&self.root).map_err(|e| {
+            StoreError::IoPath {
+                source: e,
+                path: self.root.clone(),
+            }
+        })?;
         let parent = base.parent().unwrap_or(&base);
         let mut existing_ancestor = parent.to_path_buf();
         let mut suffix = PathBuf::new();
@@ -116,7 +121,12 @@ impl FilesystemContentStore {
                 None => break,
             }
         }
-        let canonical_parent = std::fs::canonicalize(&existing_ancestor)?;
+        let canonical_parent = std::fs::canonicalize(&existing_ancestor).map_err(|e| {
+            StoreError::IoPath {
+                source: e,
+                path: existing_ancestor.clone(),
+            }
+        })?;
         let resolved = canonical_parent.join(&suffix);
         if !resolved.starts_with(&canonical_root) {
             return Err(StoreError::PathEscape(url.to_string()));

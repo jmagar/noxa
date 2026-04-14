@@ -1,11 +1,18 @@
 //! Domain-level operations log in NDJSON format (`.operations.ndjson`).
 //!
 //! One JSON object per line. O(1) appends via `OpenOptions::append(true)`.
-//! No mutex needed — concurrent appends from the same process are serialized
-//! via `spawn_blocking`; cross-process atomicity relies on `O_APPEND`
-//! kernel-level inode locking.
+//!
+//! **Concurrency guarantees:**
+//! - Same-process concurrency is serialized through `spawn_blocking` (only one
+//!   blocking append runs at a time per Tokio runtime).
+//! - Cross-process atomicity is **not** guaranteed for large entries because
+//!   `write_all()` may split into multiple syscalls. `O_APPEND` only guarantees
+//!   atomicity for writes up to `PIPE_BUF` (typically 4 KiB on Linux).
+//! - For the typical single-writer scenario this is safe; concurrent writers
+//!   from separate processes may interleave partial lines for entries exceeding
+//!   `PIPE_BUF`.
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use crate::types::{OperationEntry, StoreError};
 
@@ -27,6 +34,15 @@ impl FilesystemOperationsLog {
 
     /// Append one operation entry to the domain log.
     pub async fn append(&self, domain: &str, entry: &OperationEntry) -> Result<(), StoreError> {
+        // Validate that `domain` contains only normal path components to prevent
+        // path traversal (e.g. `../x` or absolute paths escaping `self.root`).
+        if std::path::Path::new(domain)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(StoreError::PathEscape(domain.to_string()));
+        }
+
         let path = self.root.join(domain).join(".operations.ndjson");
 
         if let Some(parent) = path.parent() {

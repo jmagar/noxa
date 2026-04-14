@@ -9,9 +9,16 @@ pub enum StoreError {
     #[error("store I/O: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Filesystem I/O failure with path context.
+    #[error("store I/O error on {path}: {source}")]
+    IoPath {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
     /// JSON (de)serialization failure.
-    #[error("store serialization: {0}")]
-    Serialize(#[from] serde_json::Error),
+    #[error("store JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 
     /// A computed store path would escape the root directory.
     #[error("store: path escapes root for url: {0}")]
