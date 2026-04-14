@@ -58,6 +58,10 @@ pub struct Sidecar {
 #[derive(Debug, Clone)]
 pub struct FilesystemContentStore {
     root: PathBuf,
+    /// Cached canonical (symlink-resolved) root path.  Populated lazily on first
+    /// use of `resolve_path()` so that the store can be constructed before the
+    /// directory exists on disk.
+    canonical_root: std::sync::Arc<std::sync::OnceLock<PathBuf>>,
     /// Maximum combined byte size of markdown + plain_text before a document is
     /// skipped (not written). Default: 2 MiB. `None` disables the guard.
     pub max_content_bytes: Option<usize>,
@@ -66,8 +70,15 @@ pub struct FilesystemContentStore {
 impl FilesystemContentStore {
     /// Create a store at an explicit root path.
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let canonical_root = std::sync::Arc::new(std::sync::OnceLock::new());
+        // Eagerly try to cache the canonical root if the directory already exists.
+        if let Ok(cr) = std::fs::canonicalize(&root) {
+            let _ = canonical_root.set(cr);
+        }
         Self {
-            root: root.into(),
+            root,
+            canonical_root,
             max_content_bytes: Some(2 * 1024 * 1024),
         }
     }
@@ -77,14 +88,32 @@ impl FilesystemContentStore {
     /// Returns `Err` if the home directory cannot be determined.
     pub fn open() -> Result<Self, String> {
         let root = content_store_root(None)?;
+        let canonical_root = std::sync::Arc::new(std::sync::OnceLock::new());
+        if let Ok(cr) = std::fs::canonicalize(&root) {
+            let _ = canonical_root.set(cr);
+        }
         Ok(Self {
             root,
+            canonical_root,
             max_content_bytes: Some(2 * 1024 * 1024),
         })
     }
 
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// Return the cached canonical root, lazily populating on first call.
+    fn get_canonical_root(&self) -> Result<PathBuf, String> {
+        if let Some(cr) = self.canonical_root.get() {
+            return Ok(cr.clone());
+        }
+        let cr = std::fs::canonicalize(&self.root).map_err(|e| {
+            format!("store: cannot canonicalize root {}: {e}", self.root.display())
+        })?;
+        // Ignore set error — another thread may have populated it concurrently.
+        let _ = self.canonical_root.set(cr.clone());
+        Ok(cr)
     }
 
     fn resolve_path(&self, url: &str) -> Result<PathBuf, String> {
@@ -100,12 +129,11 @@ impl FilesystemContentStore {
             return Err(format!("store: computed path escapes root for url: {url}"));
         }
 
-        // Symlink protection: canonicalize the parent directory (which must
-        // already exist or be created) to resolve any symlinks, then verify
-        // that the final path still resides under the canonical root.
-        let canonical_root = std::fs::canonicalize(&self.root).map_err(|e| {
-            format!("store: cannot canonicalize root {}: {e}", self.root.display())
-        })?;
+        // Use the cached canonical root instead of calling canonicalize per-request.
+        let canonical_root = self.get_canonical_root()?;
+
+        // Symlink protection: walk up to find the nearest existing ancestor,
+        // canonicalize it, then verify the resolved path stays under the root.
         let parent = base.parent().unwrap_or(&base);
         let mut existing_ancestor = parent.to_path_buf();
         let mut suffix = PathBuf::new();
@@ -125,7 +153,12 @@ impl FilesystemContentStore {
             return Err(format!("store: computed path escapes root for url: {url}"));
         }
 
-        Ok(base)
+        // Return the canonicalized path (not `base`) to close the TOCTOU gap:
+        // a symlink created between check and write cannot escape the root.
+        let file_name = base
+            .file_name()
+            .ok_or_else(|| format!("store: no file name in path for url: {url}"))?;
+        Ok(resolved.join(file_name))
     }
 
     pub async fn read(&self, url: &str) -> Result<Option<noxa_core::ExtractionResult>, String> {
