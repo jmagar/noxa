@@ -151,9 +151,9 @@ fn configure_env(theme: &ColorfulTheme, dir: &Path) {
 
     let ollama_model: String = Input::with_theme(theme)
         .with_prompt("Ollama model (local)")
-        .default("qwen3:8b".into())
+        .default("qwen3.5:9b".into())
         .interact_text()
-        .unwrap_or_else(|_| "qwen3:8b".into());
+        .unwrap_or_else(|_| "qwen3.5:9b".into());
 
     let openai_key: String = Password::with_theme(theme)
         .with_prompt("OpenAI API key (optional, press enter to skip)")
@@ -329,7 +329,7 @@ fn setup_ollama(theme: &ColorfulTheme) {
     }
 
     // Pull model
-    let model = read_env_var("OLLAMA_MODEL").unwrap_or_else(|| "qwen3:8b".into());
+    let model = read_env_var("OLLAMA_MODEL").unwrap_or_else(|| "qwen3.5:9b".into());
     let has_model = check_ollama_model(&model);
 
     if has_model {

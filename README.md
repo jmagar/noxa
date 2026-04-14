@@ -719,6 +719,8 @@ noxa/
 ## Configuration
 
 Non-secret defaults live in `config.json` in your working directory. The full behavior contract is documented in [`docs/config.md`](docs/config.md).
+`config/config.example.json` is the template you copy to `config.json`, and `config/config.schema.json` documents the accepted keys.
+`config/.env.example` is the template you copy to `.env` for secrets and runtime URLs such as `SEARXNG_URL`.
 Set `output_dir` in `config.json` if you want results written to files instead of stdout.
 
 Copy the example:
@@ -733,7 +735,7 @@ For `llm_provider` and `llm_model`, leaving the keys unset preserves the
 Gemini -> OpenAI -> Ollama -> Anthropic fallback chain. Setting them in
 `config.json` or on the CLI forces that specific provider/model.
 
-**Secrets and URLs** always go in `.env`, not `config.json`:
+**Secrets and runtime URLs** always go in `.env`, not `config.json`:
 
 ```bash
 cp config/.env.example .env
@@ -795,7 +797,7 @@ These settings can also be controlled via command-line flags:
 | `NOXA_CLOUD_CLUSTER` | Cloud cluster name |
 | `NOXA_CLOUD_SERVICE_ACCOUNT_KEY` | Path to cloud service account key file |
 
-The `config/.env.example` file covers the runtime noxa variables above.
+The `config/.env.example` file covers the runtime noxa variables above. Use it alongside `config/config.example.json` and `config/config.schema.json`, which cover the non-secret JSON config contract.
 
 `noxa setup` (or `./setup.sh` for repo clones) generates a `.env` interactively and can configure these for you.
 
@@ -808,7 +810,7 @@ Local deployment and Ollama variables — used by `noxa setup`:
 | `NOXA_AUTH_KEY` | REST API authentication key |
 | `NOXA_LOG` | Log level (default: `info`) |
 | `OLLAMA_HOST` | Ollama base URL (default: `http://localhost:11434`) |
-| `OLLAMA_MODEL` | Default Ollama model (default: `qwen3:8b`) |
+| `OLLAMA_MODEL` | Default Ollama model (default: `qwen3.5:9b`) |
 
 LLM provider API keys:
 
