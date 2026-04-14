@@ -11,14 +11,13 @@
 /// - `factory` — build_embed_provider / build_vector_store
 /// - `pipeline` — filesystem watcher orchestration
 /// - `error` — RagError enum
-
 // Tokenizer Sync compile-time assertion.
 // tokenizers::Tokenizer must be Sync to be used across tokio workers.
 // If this fails to compile, workers cannot safely share the tokenizer.
 const _: () = {
-    fn assert_sync<T: Sync>() {}
+    fn _assert_sync<T: Sync>() {}
     fn _check() {
-        assert_sync::<tokenizers::Tokenizer>();
+        _assert_sync::<tokenizers::Tokenizer>();
     }
 };
 

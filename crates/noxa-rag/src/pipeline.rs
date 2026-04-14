@@ -869,14 +869,12 @@ fn parse_office_zip(
     // for DOCX.  Guard here so a crafted DOCX zip bomb cannot cause OOM.
     if ext == "docx" {
         for i in 0..archive.len() {
-            if let Ok(entry) = archive.by_index(i) {
-                if entry.size() > MAX_ENTRY_SIZE {
-                    return Err(RagError::Parse(format!(
-                        "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
-                        entry.name(),
-                        entry.size()
-                    )));
-                }
+            if let Ok(entry) = archive.by_index(i) && entry.size() > MAX_ENTRY_SIZE {
+                return Err(RagError::Parse(format!(
+                    "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
+                    entry.name(),
+                    entry.size()
+                )));
             }
         }
         let result = noxa_fetch::document::extract_document(bytes, noxa_fetch::document::DocType::Docx)
@@ -1026,10 +1024,8 @@ fn startup_scan_key(path: &std::path::Path) -> Option<(String, String)> {
                 .metadata
                 .content_hash
                 .unwrap_or_else(|| format!("{:x}", sha2::Sha256::digest(&bytes)));
-            if let Some(url) = q.metadata.url {
-                if !url.is_empty() {
-                    return Some((hash, url));
-                }
+            if let Some(url) = q.metadata.url && !url.is_empty() {
+                return Some((hash, url));
             }
         }
     }
@@ -1161,11 +1157,9 @@ async fn process_job(
     if result.metadata.file_path.is_none() {
         result.metadata.file_path = Some(job.path.to_string_lossy().into_owned());
     }
-    if result.metadata.last_modified.is_none() {
-        if let Ok(mtime) = file_meta.modified() {
-            result.metadata.last_modified =
-                Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
-        }
+    if result.metadata.last_modified.is_none() && let Ok(mtime) = file_meta.modified() {
+        result.metadata.last_modified =
+            Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
     let git_branch = detect_git_branch(&job.path);
 

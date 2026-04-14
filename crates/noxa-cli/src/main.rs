@@ -25,7 +25,7 @@ use noxa_fetch::{
 };
 use noxa_store::{FilesystemContentStore, FilesystemOperationsLog, Op, OperationEntry, domain_from_url, url_to_store_path};
 use noxa_llm::LlmProvider;
-use noxa_mcp;
+use noxa_mcp as _;
 use noxa_pdf::PdfMode;
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
@@ -1651,6 +1651,7 @@ fn crawl_status_path(url: &str) -> std::path::PathBuf {
     crawl_status_dir().join(format!("{key}.json"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_crawl_status(
     path: &std::path::Path,
     url: &str,
@@ -1684,10 +1685,8 @@ fn write_crawl_status(
         let _ = std::fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    if let Ok(bytes) = serde_json::to_vec_pretty(&payload) {
-        if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&payload) && std::fs::write(&tmp, &bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
     }
 }
 
@@ -1733,10 +1732,7 @@ fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
         .collect();
 
     let mut scored: Vec<(usize, String, std::path::PathBuf)> = Vec::new();
-    collect_docs(&store_root, &store_root, &mut {
-        let mut docs = Vec::new();
-        docs
-    });
+    collect_docs(&store_root, &store_root, &mut Vec::new());
 
     // Walk and score inline to avoid a second pass
     let mut all_docs: Vec<(String, std::path::PathBuf)> = Vec::new();
@@ -1864,14 +1860,13 @@ fn run_status(domain: &str) {
         eprintln!("  {dim}docs{reset}     {pink}{docs_dir}{reset}");
     }
     let words_suffix = if done && total_words > 0 {
-        let s = if total_words >= 1_000_000 {
+        if total_words >= 1_000_000 {
             format!("  {dim}~{:.1}M words{reset}", total_words as f64 / 1_000_000.0)
         } else if total_words >= 1_000 {
             format!("  {dim}~{}k words{reset}", total_words / 1_000)
         } else {
             format!("  {dim}{total_words} words{reset}")
-        };
-        s
+        }
     } else { String::new() };
     let excl_suffix = if done && excluded > 0 {
         format!("  {dim}{excluded} excluded{reset}")
@@ -2069,7 +2064,7 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
     // Mark crawl done in status file
     let final_words: usize = result.pages.iter()
         .filter_map(|p| p.extraction.as_ref())
-        .map(|e| e.metadata.word_count as usize)
+        .map(|e| e.metadata.word_count)
         .sum();
     write_crawl_status(
         &status_path, url,
@@ -2123,7 +2118,7 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         let saved = result.pages.iter().filter(|p| p.extraction.is_some()).count();
         let total_words: usize = result.pages.iter()
             .filter_map(|p| p.extraction.as_ref())
-            .map(|e| e.metadata.word_count as usize)
+            .map(|e| e.metadata.word_count)
             .sum();
         let words_str = if total_words >= 1_000_000 {
             format!("~{:.1}M words", total_words as f64 / 1_000_000.0)
@@ -2450,7 +2445,7 @@ async fn run_watch_single(
             eprintln!("[watch] Changes detected! ({})", timestamp());
 
             // Append change to ops log.
-            if let Some(ref log) = client.ops_log() {
+            if let Some(log) = client.ops_log() {
                 let domain = domain_from_url(url);
                 let entry = OperationEntry {
                     op: Op::Diff,
@@ -2623,7 +2618,7 @@ async fn run_watch_multi(
             }
 
             // Append each changed URL to ops log.
-            if let Some(ref log) = client.ops_log() {
+            if let Some(log) = client.ops_log() {
                 for entry in &changed {
                     if let Some(url) = entry["url"].as_str() {
                         let domain = domain_from_url(url);
@@ -3356,6 +3351,7 @@ fn list_domain_docs(
     eprintln!();
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn collect_docs(
     dir: &std::path::Path,
     store_root: &std::path::Path,
@@ -3656,11 +3652,9 @@ async fn main() {
     init_logging(resolved.verbose);
 
     // Validate webhook URL early so any SSRF attempt is rejected before operations run.
-    if let Some(ref webhook_url) = cli.webhook {
-        if let Err(e) = validate_url(webhook_url).await {
-            eprintln!("error: invalid webhook URL: {e}");
-            process::exit(1);
-        }
+    if let Some(ref webhook_url) = cli.webhook && let Err(e) = validate_url(webhook_url).await {
+        eprintln!("error: invalid webhook URL: {e}");
+        process::exit(1);
     }
 
     // --map: sitemap discovery mode
