@@ -1716,9 +1716,7 @@ fn write_crawl_status(
         let _ = std::fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    if let Ok(bytes) = serde_json::to_vec_pretty(&payload)
-        && std::fs::write(&tmp, &bytes).is_ok()
-    {
+    if let Ok(bytes) = serde_json::to_vec_pretty(&payload) && std::fs::write(&tmp, &bytes).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
 }
@@ -1924,18 +1922,13 @@ fn run_status(domain: &str) {
     }
     let words_suffix = if done && total_words > 0 {
         if total_words >= 1_000_000 {
-            format!(
-                "  {dim}~{:.1}M words{reset}",
-                total_words as f64 / 1_000_000.0
-            )
+            format!("  {dim}~{:.1}M words{reset}", total_words as f64 / 1_000_000.0)
         } else if total_words >= 1_000 {
             format!("  {dim}~{}k words{reset}", total_words / 1_000)
         } else {
             format!("  {dim}{total_words} words{reset}")
         }
-    } else {
-        String::new()
-    };
+    } else { String::new() };
     let excl_suffix = if done && excluded > 0 {
         format!("  {dim}{excluded} excluded{reset}")
     } else {
@@ -2603,7 +2596,8 @@ async fn run_watch_single(
                     "interval_secs": cli.watch_interval
                 }),
                 || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
-            ).await;
+            )
+            .await;
 
             // is_initial_baseline suppresses --on-change on the first reconciliation
             // write when there was no stored snapshot (avoids spurious triggers on startup).
@@ -2771,10 +2765,11 @@ async fn run_watch_multi(
                         || serde_json::json!({
                             "source": "watch",
                             "interval_secs": cli.watch_interval,
-                            "check_number": check_number
-                        }),
-                        || entry.clone(),
-                    ).await;
+                                "check_number": check_number
+                            }),
+                            || entry.clone(),
+                    )
+                    .await;
                 }
             }
 
@@ -3810,9 +3805,7 @@ async fn main() {
     init_logging(resolved.verbose);
 
     // Validate webhook URL early so any SSRF attempt is rejected before operations run.
-    if let Some(ref webhook_url) = cli.webhook
-        && let Err(e) = validate_url(webhook_url).await
-    {
+    if let Some(ref webhook_url) = cli.webhook && let Err(e) = validate_url(webhook_url).await {
         eprintln!("error: invalid webhook URL: {e}");
         process::exit(1);
     }
