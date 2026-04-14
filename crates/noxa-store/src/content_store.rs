@@ -93,16 +93,7 @@ impl FilesystemContentStore {
     /// Returns `Err` if the home directory cannot be determined.
     pub fn open() -> Result<Self, String> {
         let root = content_store_root(None)?;
-        let canonical_root = std::sync::Arc::new(std::sync::OnceLock::new());
-        if let Ok(cr) = std::fs::canonicalize(&root) {
-            let _ = canonical_root.set(cr);
-        }
-        Ok(Self {
-            root,
-            canonical_root,
-            max_content_bytes: Some(2 * 1024 * 1024),
-            max_changelog_entries: Some(100),
-        })
+        Ok(Self::new(root))
     }
 
     pub fn root(&self) -> &std::path::Path {
