@@ -457,20 +457,21 @@ async fn log_operation(
     ops_log: &Option<Arc<FilesystemOperationsLog>>,
     url: &str,
     op: Op,
-    input: serde_json::Value,
-    output: serde_json::Value,
+    input: impl FnOnce() -> serde_json::Value,
+    output: impl FnOnce() -> serde_json::Value,
 ) {
     if let Some(log) = ops_log {
         let domain = domain_from_url(url);
+        let op_dbg = format!("{op:?}");
         let entry = OperationEntry {
             op,
             at: chrono::Utc::now(),
             url: url.to_string(),
-            input,
-            output,
+            input: input(),
+            output: output(),
         };
         if let Err(e) = log.append(&domain, &entry).await {
-            tracing::warn!("ops log append failed: {e}");
+            tracing::warn!(op = %op_dbg, url, %domain, error = %e, "ops log append failed");
         }
     }
 }
@@ -2480,11 +2481,11 @@ async fn run_watch_single(
                 &watch_ops_log,
                 url,
                 Op::Diff,
-                serde_json::json!({
+                || serde_json::json!({
                     "source": "watch",
                     "interval_secs": cli.watch_interval
                 }),
-                serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
+                || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
             ).await;
 
             // is_initial_baseline suppresses --on-change on the first reconciliation
@@ -2650,12 +2651,12 @@ async fn run_watch_multi(
                         &multi_ops_log,
                         url,
                         Op::Diff,
-                        serde_json::json!({
+                        || serde_json::json!({
                             "source": "watch",
                             "interval_secs": cli.watch_interval,
                             "check_number": check_number
                         }),
-                        entry.clone(),
+                        || entry.clone(),
                     ).await;
                 }
             }
@@ -2731,8 +2732,8 @@ async fn run_diff(
         &ops_log,
         &url,
         Op::Diff,
-        serde_json::json!({ "source": "file", "snapshot": snapshot_path }),
-        serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
+        || serde_json::json!({ "source": "file", "snapshot": snapshot_path }),
+        || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
     ).await;
 
     print_diff_output(&diff, &resolved.format);
@@ -2752,8 +2753,8 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         &ops_log,
         &result.url,
         Op::Brand,
-        serde_json::json!({}),
-        serde_json::to_value(&brand).unwrap_or(serde_json::Value::Null),
+        || serde_json::json!({}),
+        || serde_json::to_value(&brand).unwrap_or(serde_json::Value::Null),
     ).await;
 
     let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
@@ -2858,13 +2859,13 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Extract,
-            serde_json::json!({
+            || serde_json::json!({
                 "kind": "json",
                 "schema": schema,
                 "provider": provider.name(),
                 "model": model
             }),
-            extracted.clone(),
+            || extracted.clone(),
         ).await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
@@ -2884,13 +2885,13 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Extract,
-            serde_json::json!({
+            || serde_json::json!({
                 "kind": "prompt",
                 "prompt": prompt,
                 "provider": provider.name(),
                 "model": model
             }),
-            extracted.clone(),
+            || extracted.clone(),
         ).await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
@@ -2910,12 +2911,12 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Summarize,
-            serde_json::json!({
+            || serde_json::json!({
                 "sentences": sentences,
                 "provider": provider.name(),
                 "model": model
             }),
-            serde_json::Value::String(summary.clone()),
+            || serde_json::Value::String(summary.clone()),
         ).await;
 
         Some(summary)
@@ -3048,7 +3049,7 @@ async fn run_batch_llm(
                          serde_json::json!({ "sentences": sentences, "provider": provider.name(), "model": model }),
                          match &output { LlmOutput::Text(s) => serde_json::Value::String(s.clone()), LlmOutput::Json(v) => v.clone() })
                     };
-                    log_operation(&ops_log, url, op, log_input, log_output).await;
+                    log_operation(&ops_log, url, op, || log_input, || log_output).await;
                 }
 
                 println!("--- {url}");
