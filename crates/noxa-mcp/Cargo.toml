@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 noxa-core = { workspace = true }
+noxa-store = { workspace = true }
 noxa-fetch = { workspace = true }
 noxa-llm = { workspace = true }
 noxa-pdf = { workspace = true }

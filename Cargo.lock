@@ -2229,8 +2229,9 @@ dependencies = [
 
 [[package]]
 name = "noxa-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
+ "chrono",
  "clap",
  "dialoguer",
  "dirs",
@@ -2241,6 +2242,7 @@ dependencies = [
  "noxa-llm",
  "noxa-mcp",
  "noxa-pdf",
+ "noxa-store",
  "rand 0.8.5",
  "regex",
  "reqwest",
@@ -2256,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ego-tree",
  "once_cell",
@@ -2274,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-fetch"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "calamine",
@@ -2283,6 +2285,7 @@ dependencies = [
  "http",
  "noxa-core",
  "noxa-pdf",
+ "noxa-store",
  "quick-xml 0.37.5",
  "rand 0.8.5",
  "serde",
@@ -2298,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-llm"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2312,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-mcp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dirs",
  "dotenvy",
@@ -2320,6 +2323,7 @@ dependencies = [
  "noxa-fetch",
  "noxa-llm",
  "noxa-pdf",
+ "noxa-store",
  "reqwest",
  "rmcp",
  "schemars",
@@ -2334,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-pdf"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "pdf-extract",
  "thiserror 2.0.18",
@@ -2343,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-rag"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2372,6 +2376,22 @@ dependencies = [
  "url",
  "uuid",
  "zip 2.4.2",
+]
+
+[[package]]
+name = "noxa-store"
+version = "0.5.1"
+dependencies = [
+ "chrono",
+ "dirs",
+ "noxa-core",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

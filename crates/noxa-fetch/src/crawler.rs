@@ -81,6 +81,8 @@ pub struct CrawlResult {
     pub total: usize,
     pub ok: usize,
     pub errors: usize,
+    /// URLs skipped because they matched an `exclude_patterns` rule.
+    pub excluded: usize,
     pub elapsed_secs: f64,
     /// URLs visited during this crawl (for resume state).
     #[serde(skip)]
@@ -199,6 +201,7 @@ impl Crawler {
                     total: 1,
                     ok: 0,
                     errors: 1,
+                    excluded: 0,
                     elapsed_secs: 0.0,
                     visited: HashSet::new(),
                     remaining_frontier: Vec::new(),
@@ -210,6 +213,7 @@ impl Crawler {
         let mut visited: HashSet<String>;
         let mut pages: Vec<PageResult> = Vec::new();
         let mut frontier: Vec<(String, usize)>;
+        let mut excluded: usize = 0;
 
         // Resume from saved state or start fresh
         if let Some(state) = resume_state {
@@ -238,6 +242,8 @@ impl Crawler {
                                 };
                                 let norm = normalize(&parsed);
                                 frontier.push((norm, 0));
+                            } else if self.is_excluded_by_pattern(&entry.url) {
+                                excluded += 1;
                             }
                         }
                         let added = frontier.len() - before;
@@ -348,6 +354,8 @@ impl Crawler {
                     for link in &extraction.content.links {
                         if let Some(candidate) = self.qualify_link(&link.href, &visited) {
                             next_frontier.push((candidate, depth + 1));
+                        } else if self.is_excluded_by_pattern(&link.href) {
+                            excluded += 1;
                         }
                     }
                 }
@@ -388,11 +396,24 @@ impl Crawler {
             total: pages.len(),
             ok: ok_count,
             errors: err_count,
+            excluded,
             elapsed_secs: total_elapsed.as_secs_f64(),
             remaining_frontier: frontier,
             visited,
             pages,
         }
+    }
+
+    /// Returns true if the URL's path matches any configured exclude pattern.
+    fn is_excluded_by_pattern(&self, href: &str) -> bool {
+        let Ok(parsed) = Url::parse(href) else {
+            return false;
+        };
+        let path = parsed.path();
+        self.config
+            .exclude_patterns
+            .iter()
+            .any(|pat| glob_match(pat, path))
     }
 
     /// Check if a discovered link should be added to the frontier.

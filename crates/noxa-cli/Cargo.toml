@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 noxa-core = { workspace = true }
+noxa-store = { workspace = true }
 noxa-fetch = { workspace = true }
 noxa-llm = { workspace = true }
 noxa-pdf = { workspace = true }
@@ -27,6 +28,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 wreq = { version = "6.0.0-rc.28", features = ["cookies", "gzip", "brotli", "zstd", "deflate"] }
 regex = "1"
 url = "2"
+chrono = { version = "0.4", features = ["serde"] }
 dirs = { workspace = true }
 libc = "0.2"
 dialoguer = { version = "0.11", features = ["completion"] }

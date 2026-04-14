@@ -17,6 +17,7 @@ use noxa_pdf::PdfMode;
 use rand::seq::SliceRandom;
 use tokio::sync::Semaphore;
 use tracing::{debug, instrument, warn};
+use serde_json;
 
 use crate::browser::{self, BrowserProfile, BrowserVariant};
 use crate::error::FetchError;
@@ -40,7 +41,10 @@ pub struct FetchConfig {
     /// Optional content store. When set, every successful `fetch_and_extract`
     /// call automatically persists the result to disk. `None` (the default)
     /// disables persistence — existing call sites are unaffected.
-    pub store: Option<crate::store::ContentStore>,
+    pub store: Option<noxa_store::FilesystemContentStore>,
+    /// Optional operations log. When set, `map_site()` and other analytical
+    /// operations append an entry to the domain `.operations.ndjson` log.
+    pub ops_log: Option<Arc<noxa_store::FilesystemOperationsLog>>,
 }
 
 impl Default for FetchConfig {
@@ -55,6 +59,7 @@ impl Default for FetchConfig {
             headers: HashMap::from([("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())]),
             pdf_mode: PdfMode::default(),
             store: None,
+            ops_log: None,
         }
     }
 }
@@ -160,7 +165,9 @@ pub struct FetchClient {
     pool: ClientPool,
     pdf_mode: PdfMode,
     /// Optional content store for auto-persisting extraction results.
-    store: Option<crate::store::ContentStore>,
+    store: Option<noxa_store::FilesystemContentStore>,
+    /// Optional operations log for recording analytical operations (map, brand, etc.).
+    ops_log: Option<Arc<noxa_store::FilesystemOperationsLog>>,
 }
 
 impl FetchClient {
@@ -168,8 +175,9 @@ impl FetchClient {
     pub fn new(config: FetchConfig) -> Result<Self, FetchError> {
         let variants = collect_variants(&config.browser);
         let pdf_mode = config.pdf_mode.clone();
-        // Extract store before config is consumed by pool construction.
+        // Extract store and ops_log before config is consumed by pool construction.
         let store = config.store.clone();
+        let ops_log = config.ops_log.clone();
 
         let pool = if config.proxy_pool.is_empty() {
             let clients = variants
@@ -211,7 +219,41 @@ impl FetchClient {
             ClientPool::Rotating { clients }
         };
 
-        Ok(Self { pool, pdf_mode, store })
+        Ok(Self { pool, pdf_mode, store, ops_log })
+    }
+
+    /// Return the operations log configured for this client, if any.
+    pub fn ops_log(&self) -> Option<&Arc<noxa_store::FilesystemOperationsLog>> {
+        self.ops_log.as_ref()
+    }
+
+    /// Discover all sitemap URLs for the given site and append an ops-log entry.
+    ///
+    /// Delegates to [`crate::sitemap::discover`], then records an `Op::Map` entry
+    /// in the domain-level `.operations.ndjson` when an ops log is configured.
+    pub async fn map_site(&self, url: &str) -> Result<Vec<crate::SitemapEntry>, String> {
+        let entries = crate::sitemap::discover(self, url)
+            .await
+            .map_err(|e| format!("sitemap discovery failed: {e}"))?;
+
+        if let Some(ref log) = self.ops_log {
+            let domain = noxa_store::domain_from_url(url);
+            let entry = noxa_store::OperationEntry {
+                op: noxa_store::Op::Map,
+                at: chrono::Utc::now(),
+                url: url.to_string(),
+                input: serde_json::json!({}),
+                output: serde_json::json!({
+                    "count": entries.len(),
+                    "urls": entries.iter().map(|e| e.url.clone()).collect::<Vec<_>>()
+                }),
+            };
+            if let Err(e) = log.append(&domain, &entry).await {
+                tracing::warn!("ops log append failed for map: {e}");
+            }
+        }
+
+        Ok(entries)
     }
 
     /// Fetch a URL and return the raw HTML + response metadata.
@@ -888,7 +930,7 @@ mod tests {
     #[test]
     fn test_fetch_config_clone_preserves_store() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::ContentStore::new(dir.path());
+        let store = noxa_store::FilesystemContentStore::new(dir.path());
         let config = FetchConfig {
             store: Some(store),
             ..Default::default()
@@ -900,7 +942,7 @@ mod tests {
     #[test]
     fn test_fetch_client_new_extracts_store_from_config() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::ContentStore::new(dir.path());
+        let store = noxa_store::FilesystemContentStore::new(dir.path());
         let config = FetchConfig {
             store: Some(store),
             ..Default::default()
