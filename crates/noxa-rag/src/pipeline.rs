@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -611,7 +612,116 @@ fn validate_url_scheme(url: &str) -> Result<(), RagError> {
 ///   - `metadata.title`       = filename stem (unless the format provides a better one)
 ///
 /// Returns `Err(RagError::Parse(...))` on unrecoverable format errors.
-async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, RagError> {
+#[derive(Debug, Clone)]
+struct ParsedFile {
+    extraction: ExtractionResult,
+    provenance: IngestionProvenance,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct IngestionProvenance {
+    #[serde(default)]
+    external_id: Option<String>,
+    #[serde(default)]
+    platform_url: Option<String>,
+    #[serde(default)]
+    seed_url: Option<String>,
+    #[serde(default)]
+    search_query: Option<String>,
+    #[serde(default)]
+    crawl_depth: Option<u32>,
+}
+
+fn json_string(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(str::to_owned)
+}
+
+fn json_u32(value: &serde_json::Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .or_else(|| value.as_str().and_then(|s| s.parse::<u32>().ok()))
+}
+
+fn extract_ingestion_provenance(value: &serde_json::Value) -> IngestionProvenance {
+    let Some(obj) = value.as_object() else {
+        return IngestionProvenance::default();
+    };
+
+    let metadata = obj.get("metadata").and_then(|v| v.as_object());
+    let metadata_value = |key: &str| metadata.and_then(|m| m.get(key));
+    let top_value = |key: &str| obj.get(key);
+
+    IngestionProvenance {
+        external_id: top_value("external_id").and_then(json_string),
+        platform_url: top_value("platform_url").and_then(json_string),
+        seed_url: top_value("seed_url")
+            .and_then(json_string)
+            .or_else(|| metadata_value("seed_url").and_then(json_string)),
+        search_query: top_value("search_query")
+            .and_then(json_string)
+            .or_else(|| metadata_value("search_query").and_then(json_string)),
+        crawl_depth: top_value("crawl_depth")
+            .and_then(json_u32)
+            .or_else(|| metadata_value("crawl_depth").and_then(json_u32)),
+    }
+}
+
+fn merge_provenance(
+    metadata: &noxa_core::Metadata,
+    provenance: &IngestionProvenance,
+) -> IngestionProvenance {
+    IngestionProvenance {
+        external_id: provenance.external_id.clone(),
+        platform_url: provenance.platform_url.clone(),
+        seed_url: provenance
+            .seed_url
+            .clone()
+            .or_else(|| metadata.seed_url.clone()),
+        search_query: provenance
+            .search_query
+            .clone()
+            .or_else(|| metadata.search_query.clone()),
+        crawl_depth: provenance.crawl_depth.or(metadata.crawl_depth),
+    }
+}
+
+fn build_point_payload(
+    chunk: &crate::types::Chunk,
+    result: &ExtractionResult,
+    git_branch: Option<String>,
+    provenance: &IngestionProvenance,
+    url: &str,
+) -> PointPayload {
+    let provenance = merge_provenance(&result.metadata, provenance);
+
+    PointPayload {
+        text: chunk.text.clone(),
+        url: url.to_string(),
+        domain: chunk.domain.clone(),
+        chunk_index: chunk.chunk_index,
+        total_chunks: chunk.total_chunks,
+        token_estimate: chunk.token_estimate,
+        title: result.metadata.title.clone(),
+        author: result.metadata.author.clone(),
+        published_date: result.metadata.published_date.clone(),
+        language: result.metadata.language.clone(),
+        source_type: result.metadata.source_type.clone(),
+        content_hash: result.metadata.content_hash.clone(),
+        technologies: result.metadata.technologies.clone(),
+        is_truncated: result.metadata.is_truncated,
+        file_path: result.metadata.file_path.clone(),
+        last_modified: result.metadata.last_modified.clone(),
+        git_branch,
+        external_id: provenance.external_id,
+        platform_url: provenance.platform_url,
+        seed_url: provenance.seed_url,
+        search_query: provenance.search_query,
+        crawl_depth: provenance.crawl_depth,
+    }
+}
+
+async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("json");
     let file_url = url::Url::from_file_path(path)
         .map(|u| u.to_string())
@@ -626,46 +736,63 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
 
     match ext {
         // ── JSON ExtractionResult ──────────────────────────────────────────────
-        "json" => serde_json::from_slice::<ExtractionResult>(&bytes)
-            .map_err(|e| RagError::Parse(format!("JSON parse failed: {e}"))),
+        "json" => {
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|e| RagError::Parse(format!("JSON parse failed: {e}")))?;
+            let extraction = serde_json::from_value::<ExtractionResult>(value.clone())
+                .map_err(|e| RagError::Parse(format!("JSON parse failed: {e}")))?;
+            Ok(ParsedFile {
+                extraction,
+                provenance: extract_ingestion_provenance(&value),
+            })
+        }
 
         // ── Plain text group (.md .txt .log .rst .org .yaml .yml .toml) ───────
         "md" | "rst" | "org" => {
             let content = as_text(&bytes);
             let word_count = content.split_whitespace().count();
-            Ok(make_text_result(
-                content,
-                String::new(),
-                file_url,
-                Some(title),
-                "file",
-                word_count,
-            ))
+            Ok(ParsedFile {
+                extraction: make_text_result(
+                    content,
+                    String::new(),
+                    file_url,
+                    Some(title),
+                    "file",
+                    word_count,
+                ),
+                provenance: IngestionProvenance::default(),
+            })
         }
         "txt" | "yaml" | "yml" | "toml" => {
             let content = as_text(&bytes);
             let word_count = content.split_whitespace().count();
-            Ok(make_text_result(
-                content.clone(),
-                content,
-                file_url,
-                Some(title),
-                "file",
-                word_count,
-            ))
+            Ok(ParsedFile {
+                extraction: make_text_result(
+                    content.clone(),
+                    content,
+                    file_url,
+                    Some(title),
+                    "file",
+                    word_count,
+                ),
+                provenance: IngestionProvenance::default(),
+            })
         }
         "log" => {
             let raw = as_text(&bytes);
             let stripped = strip_ansi_escapes::strip_str(&raw);
             let word_count = stripped.split_whitespace().count();
-            Ok(make_text_result(
-                stripped.clone(),
-                stripped,
-                file_url,
-                Some(title),
-                "file",
-                word_count,
-            ))
+            Ok(ParsedFile {
+                extraction: make_text_result(
+                    stripped.clone(),
+                    stripped,
+                    file_url,
+                    Some(title),
+                    "file",
+                    word_count,
+                ),
+                provenance: IngestionProvenance::default(),
+            })
         }
 
         // ── HTML ───────────────────────────────────────────────────────────────
@@ -681,34 +808,52 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
             })
             .await
             .map_err(|e| RagError::Parse(format!("HTML spawn_blocking: {e}")))?
+            .map(|extraction| ParsedFile {
+                extraction,
+                provenance: IngestionProvenance::default(),
+            })
         }
 
         // ── Jupyter Notebook ──────────────────────────────────────────────────
         "ipynb" => tokio::task::spawn_blocking(move || parse_ipynb(&bytes, file_url, title))
             .await
-            .map_err(|e| RagError::Parse(format!("ipynb spawn_blocking: {e}")))?,
+            .map_err(|e| RagError::Parse(format!("ipynb spawn_blocking: {e}")))?
+            .map(|extraction| ParsedFile {
+                extraction,
+                provenance: IngestionProvenance::default(),
+            }),
 
         // ── PDF ────────────────────────────────────────────────────────────────
         "pdf" => tokio::task::spawn_blocking(move || parse_pdf(&bytes, file_url, title))
             .await
-            .map_err(|e| RagError::Parse(format!("PDF spawn_blocking: {e}")))?,
+            .map_err(|e| RagError::Parse(format!("PDF spawn_blocking: {e}")))?
+            .map(|extraction| ParsedFile {
+                extraction,
+                provenance: IngestionProvenance::default(),
+            }),
 
         // ── Office binary formats (ZIP-based) ─────────────────────────────────
-        "docx" => {
-            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "docx"))
-                .await
-                .map_err(|e| RagError::Parse(format!("DOCX spawn_blocking: {e}")))?
-        }
-        "odt" => {
-            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "odt"))
-                .await
-                .map_err(|e| RagError::Parse(format!("ODT spawn_blocking: {e}")))?
-        }
-        "pptx" => {
-            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "pptx"))
-                .await
-                .map_err(|e| RagError::Parse(format!("PPTX spawn_blocking: {e}")))?
-        }
+        "docx" => tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "docx"))
+            .await
+            .map_err(|e| RagError::Parse(format!("DOCX spawn_blocking: {e}")))?
+            .map(|extraction| ParsedFile {
+                extraction,
+                provenance: IngestionProvenance::default(),
+            }),
+        "odt" => tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "odt"))
+            .await
+            .map_err(|e| RagError::Parse(format!("ODT spawn_blocking: {e}")))?
+            .map(|extraction| ParsedFile {
+                extraction,
+                provenance: IngestionProvenance::default(),
+            }),
+        "pptx" => tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "pptx"))
+            .await
+            .map_err(|e| RagError::Parse(format!("PPTX spawn_blocking: {e}")))?
+            .map(|extraction| ParsedFile {
+                extraction,
+                provenance: IngestionProvenance::default(),
+            }),
 
         // ── Structured text (.jsonl .xml .opml .rss .atom) ────────────────────
         "jsonl" => {
@@ -724,27 +869,33 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
                 .collect::<Vec<_>>()
                 .join("\n\n");
             let word_count = text.split_whitespace().count();
-            Ok(make_text_result(
-                text.clone(),
-                text,
-                file_url,
-                Some(title),
-                "file",
-                word_count,
-            ))
+            Ok(ParsedFile {
+                extraction: make_text_result(
+                    text.clone(),
+                    text,
+                    file_url,
+                    Some(title),
+                    "file",
+                    word_count,
+                ),
+                provenance: IngestionProvenance::default(),
+            })
         }
         "xml" | "opml" | "rss" | "atom" => {
             let content = as_text(&bytes);
             let text = extract_xml_text(&content);
             let word_count = text.split_whitespace().count();
-            Ok(make_text_result(
-                text.clone(),
-                text,
-                file_url,
-                Some(title),
-                "file",
-                word_count,
-            ))
+            Ok(ParsedFile {
+                extraction: make_text_result(
+                    text.clone(),
+                    text,
+                    file_url,
+                    Some(title),
+                    "file",
+                    word_count,
+                ),
+                provenance: IngestionProvenance::default(),
+            })
         }
 
         // ── Subtitle / transcript (.vtt .srt) ─────────────────────────────────
@@ -752,14 +903,17 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
             let content = as_text(&bytes);
             let text = strip_subtitle_timestamps(&content);
             let word_count = text.split_whitespace().count();
-            Ok(make_text_result(
-                text.clone(),
-                text,
-                file_url,
-                Some(title),
-                "file",
-                word_count,
-            ))
+            Ok(ParsedFile {
+                extraction: make_text_result(
+                    text.clone(),
+                    text,
+                    file_url,
+                    Some(title),
+                    "file",
+                    word_count,
+                ),
+                provenance: IngestionProvenance::default(),
+            })
         }
 
         // ── Unknown / unsupported ──────────────────────────────────────────────
@@ -1199,8 +1353,8 @@ async fn process_job(
 
     // ── 2. Parse / ingest by file format ─────────────────────────────────────
     // parse_file() dispatches to the right extractor for each format and returns
-    // a normalized ExtractionResult.  Non-JSON formats run in spawn_blocking.
-    let mut result: ExtractionResult = match parse_file(&job.path, file_bytes).await {
+    // a normalized extraction result plus any provenance recovered from the input.
+    let parsed = match parse_file(&job.path, file_bytes).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(path = ?job.path, error = %e, "parse failed, skipping");
@@ -1212,6 +1366,7 @@ async fn process_job(
             });
         }
     };
+    let mut result = parsed.extraction;
 
     // ── 3a. Populate filesystem provenance (noxa-9ww) ─────────────────────────
     // Set file_path and last_modified from job.path if not already populated
@@ -1293,31 +1448,13 @@ async fn process_job(
             Point {
                 id,
                 vector: vector.clone(),
-                payload: PointPayload {
-                    text: chunk.text.clone(),
-                    url: url.clone(),
-                    domain: chunk.domain.clone(),
-                    chunk_index: chunk.chunk_index,
-                    total_chunks: chunk.total_chunks,
-                    token_estimate: chunk.token_estimate,
-                    title: result.metadata.title.clone(),
-                    author: result.metadata.author.clone(),
-                    published_date: result.metadata.published_date.clone(),
-                    language: result.metadata.language.clone(),
-                    source_type: result.metadata.source_type.clone(),
-                    content_hash: result.metadata.content_hash.clone(),
-                    technologies: result.metadata.technologies.clone(),
-                    is_truncated: result.metadata.is_truncated,
-                    file_path: result.metadata.file_path.clone(),
-                    last_modified: result.metadata.last_modified.clone(),
-                    git_branch: git_branch.clone(),
-                    // IngestionContext provenance fields — populated in Wave 3 by MCP sources.
-                    external_id: None,
-                    platform_url: None,
-                    seed_url: None,
-                    search_query: None,
-                    crawl_depth: None,
-                },
+                payload: build_point_payload(
+                    chunk,
+                    &result,
+                    git_branch.clone(),
+                    &parsed.provenance,
+                    &url,
+                ),
             }
         })
         .collect();
@@ -1421,10 +1558,12 @@ async fn process_job(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_indexable_paths, detect_git_branch, is_indexable, parse_file, validate_url_scheme,
+        build_point_payload, collect_indexable_paths, detect_git_branch, is_indexable, parse_file,
+        validate_url_scheme, IngestionProvenance,
     };
     use std::fs;
     use std::io::Write;
+    use serde_json::json;
 
     #[test]
     fn collect_indexable_paths_finds_nested_supported_files() {
@@ -1508,6 +1647,157 @@ mod tests {
         let file = tmp.path().join("foo.txt");
         fs::write(&file, "x").expect("write file");
         assert_eq!(detect_git_branch(&file), None);
+    }
+
+    #[tokio::test]
+    async fn parse_file_json_recovers_provenance_fields() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("page.json");
+        let body = json!({
+            "metadata": {
+                "title": "Seeded document",
+                "description": null,
+                "author": "Alice",
+                "published_date": null,
+                "language": "en",
+                "url": "https://example.com/article",
+                "site_name": null,
+                "image": null,
+                "favicon": null,
+                "word_count": 3,
+                "content_hash": null,
+                "source_type": "web",
+                "file_path": null,
+                "last_modified": null,
+                "is_truncated": null,
+                "technologies": [],
+                "seed_url": "https://seed.example/",
+                "crawl_depth": 2,
+                "search_query": "rust agent",
+                "fetched_at": null
+            },
+            "content": {
+                "markdown": "hello world",
+                "plain_text": "hello world",
+                "links": [],
+                "images": [],
+                "code_blocks": [],
+                "raw_html": null
+            },
+            "domain_data": null,
+            "structured_data": [],
+            "external_id": "linkding:42",
+            "platform_url": "https://platform.example/items/42"
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize json");
+        fs::write(&path, &bytes).expect("write file");
+
+        let parsed = parse_file(&path, bytes).await.expect("parse json");
+
+        assert_eq!(
+            parsed.extraction.metadata.seed_url.as_deref(),
+            Some("https://seed.example/")
+        );
+        assert_eq!(parsed.extraction.metadata.crawl_depth, Some(2));
+        assert_eq!(
+            parsed.extraction.metadata.search_query.as_deref(),
+            Some("rust agent")
+        );
+        assert_eq!(parsed.provenance.external_id.as_deref(), Some("linkding:42"));
+        assert_eq!(
+            parsed.provenance.platform_url.as_deref(),
+            Some("https://platform.example/items/42")
+        );
+        assert_eq!(
+            parsed.provenance.seed_url.as_deref(),
+            Some("https://seed.example/")
+        );
+        assert_eq!(
+            parsed.provenance.search_query.as_deref(),
+            Some("rust agent")
+        );
+        assert_eq!(parsed.provenance.crawl_depth, Some(2));
+    }
+
+    #[test]
+    fn build_point_payload_serializes_provenance_fields_when_present() {
+        let chunk = crate::types::Chunk {
+            text: "chunk text".to_string(),
+            source_url: "https://example.com/article".to_string(),
+            domain: "example.com".to_string(),
+            chunk_index: 0,
+            total_chunks: 1,
+            char_offset: 0,
+            token_estimate: 2,
+        };
+        let extraction = noxa_core::ExtractionResult {
+            metadata: noxa_core::Metadata {
+                title: Some("Seeded document".to_string()),
+                description: None,
+                author: Some("Alice".to_string()),
+                published_date: None,
+                language: Some("en".to_string()),
+                url: Some("https://example.com/article".to_string()),
+                site_name: None,
+                image: None,
+                favicon: None,
+                word_count: 3,
+                content_hash: None,
+                source_type: Some("web".to_string()),
+                file_path: None,
+                last_modified: None,
+                is_truncated: None,
+                technologies: Vec::new(),
+                seed_url: Some("https://seed.example/".to_string()),
+                crawl_depth: Some(2),
+                search_query: Some("rust agent".to_string()),
+                fetched_at: None,
+            },
+            content: noxa_core::Content {
+                markdown: "chunk text".to_string(),
+                plain_text: "chunk text".to_string(),
+                links: Vec::new(),
+                images: Vec::new(),
+                code_blocks: Vec::new(),
+                raw_html: None,
+            },
+            domain_data: None,
+            structured_data: Vec::new(),
+        };
+        let provenance = IngestionProvenance {
+            external_id: Some("linkding:42".to_string()),
+            platform_url: Some("https://platform.example/items/42".to_string()),
+            seed_url: None,
+            search_query: None,
+            crawl_depth: None,
+        };
+
+        let payload = build_point_payload(
+            &chunk,
+            &extraction,
+            None,
+            &provenance,
+            &chunk.source_url,
+        );
+        let json = serde_json::to_value(&payload).expect("serialize payload");
+
+        assert_eq!(
+            json.get("external_id").and_then(|v| v.as_str()),
+            Some("linkding:42")
+        );
+        assert_eq!(
+            json.get("platform_url").and_then(|v| v.as_str()),
+            Some("https://platform.example/items/42")
+        );
+        assert_eq!(
+            json.get("seed_url").and_then(|v| v.as_str()),
+            Some("https://seed.example/")
+        );
+        assert_eq!(
+            json.get("search_query").and_then(|v| v.as_str()),
+            Some("rust agent")
+        );
+        assert_eq!(json.get("crawl_depth").and_then(|v| v.as_u64()), Some(2));
     }
 
     // ─── validate_url_scheme ────────────────────────────────────────────────────
@@ -1631,7 +1921,7 @@ mod tests {
         dir: &std::path::Path,
         filename: &str,
         content: &[u8],
-    ) -> Result<noxa_core::types::ExtractionResult, crate::error::RagError> {
+    ) -> Result<super::ParsedFile, crate::error::RagError> {
         let path = dir.join(filename);
         fs::write(&path, content).expect("write temp file");
         parse_file(&path, content.to_vec()).await
@@ -1646,7 +1936,12 @@ mod tests {
             .expect("parse .md");
 
         // URL must be a file:// URI pointing at the file.
-        let url = result.metadata.url.as_deref().expect("url must be set");
+        let url = result
+            .extraction
+            .metadata
+            .url
+            .as_deref()
+            .expect("url must be set");
         assert!(
             url.starts_with("file://"),
             "url should be file://, got: {url}"
@@ -1657,21 +1952,29 @@ mod tests {
         );
 
         // Title should be the filename stem.
-        let title = result.metadata.title.as_deref().expect("title must be set");
+        let title = result
+            .extraction
+            .metadata
+            .title
+            .as_deref()
+            .expect("title must be set");
         assert_eq!(title, "my-doc");
 
         // Markdown content must be present.
         assert!(
-            !result.content.markdown.is_empty(),
+            !result.extraction.content.markdown.is_empty(),
             "markdown should not be empty"
         );
         assert!(
-            result.content.markdown.contains("My Document"),
+            result.extraction.content.markdown.contains("My Document"),
             "markdown should contain heading text"
         );
 
         // source_type should be "file".
-        assert_eq!(result.metadata.source_type.as_deref(), Some("file"));
+        assert_eq!(
+            result.extraction.metadata.source_type.as_deref(),
+            Some("file")
+        );
     }
 
     #[tokio::test]
@@ -1684,11 +1987,15 @@ mod tests {
 
         // .txt uses make_text_result with both markdown and plain_text set to the content.
         assert!(
-            result.content.plain_text.contains("Hello plain text world"),
+            result
+                .extraction
+                .content
+                .plain_text
+                .contains("Hello plain text world"),
             "plain_text should contain file content, got: {:?}",
-            result.content.plain_text
+            result.extraction.content.plain_text
         );
-        assert_eq!(result.metadata.title.as_deref(), Some("notes"));
+        assert_eq!(result.extraction.metadata.title.as_deref(), Some("notes"));
     }
 
     #[tokio::test]
@@ -1705,10 +2012,15 @@ mod tests {
                 .await
                 .unwrap_or_else(|e| panic!("parse {filename} failed: {e}"));
             assert!(
-                !result.content.markdown.is_empty(),
+                !result.extraction.content.markdown.is_empty(),
                 "{filename}: markdown should not be empty"
             );
-            let url = result.metadata.url.as_deref().expect("url set");
+            let url = result
+                .extraction
+                .metadata
+                .url
+                .as_deref()
+                .expect("url set");
             assert!(
                 url.starts_with("file://"),
                 "{filename}: url should be file://"
@@ -1725,7 +2037,7 @@ mod tests {
             .await
             .expect("parse .log");
 
-        let text = &result.content.markdown;
+        let text = &result.extraction.content.markdown;
         assert!(
             !text.contains('\x1b'),
             "ANSI escape sequences should be stripped, got: {text:?}"
@@ -1750,6 +2062,7 @@ mod tests {
 
         // URL must be set to a file:// URI.
         let url = result
+            .extraction
             .metadata
             .url
             .as_deref()
@@ -1760,11 +2073,14 @@ mod tests {
         );
 
         // source_type must be "file".
-        assert_eq!(result.metadata.source_type.as_deref(), Some("file"));
+        assert_eq!(
+            result.extraction.metadata.source_type.as_deref(),
+            Some("file")
+        );
 
         // Markdown should contain extracted text.
         assert!(
-            !result.content.markdown.is_empty(),
+            !result.extraction.content.markdown.is_empty(),
             "html markdown should not be empty"
         );
     }
@@ -1784,7 +2100,7 @@ mod tests {
             .await
             .expect("parse .ipynb");
 
-        let text = &result.content.markdown;
+        let text = &result.extraction.content.markdown;
 
         // Markdown and code cell sources must be present.
         assert!(
@@ -1877,14 +2193,19 @@ mod tests {
             .await
             .expect("parse .docx should succeed");
 
-        let text = &result.content.markdown;
+        let text = &result.extraction.content.markdown;
         assert!(!text.is_empty(), "DOCX markdown should not be empty");
         assert!(
             text.contains("test document paragraph"),
             "DOCX text should contain paragraph content, got: {text:?}"
         );
         // URL must be a file:// reference.
-        let url = result.metadata.url.as_deref().expect("docx url set");
+        let url = result
+            .extraction
+            .metadata
+            .url
+            .as_deref()
+            .expect("docx url set");
         assert!(
             url.starts_with("file://"),
             "docx url should be file://, got: {url}"
@@ -1902,7 +2223,7 @@ mod tests {
             .await
             .expect("parse .odt should succeed");
 
-        let text = &result.content.markdown;
+        let text = &result.extraction.content.markdown;
         assert!(!text.is_empty(), "ODT markdown should not be empty");
         assert!(
             text.contains("Open document text paragraph"),
@@ -1950,6 +2271,7 @@ mod tests {
             Ok(r) => {
                 // If it parsed successfully, the result must have a file:// URL set.
                 let url = r
+                    .extraction
                     .metadata
                     .url
                     .as_deref()
@@ -1957,7 +2279,7 @@ mod tests {
                 assert!(url.starts_with("file://"), "pdf url should be file://");
                 // Content may be empty for this trivial fixture depending on the extractor.
                 // At minimum verify we got a valid ExtractionResult structure back.
-                let _ = r.content.markdown; // no panic
+                let _ = r.extraction.content.markdown; // no panic
             }
             Err(crate::error::RagError::Parse(_)) => {
                 // Acceptable: the minimal fixture may not have enough structure for pdf-extract.

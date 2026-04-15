@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::error::RagError;
 use crate::store::VectorStore;
-use crate::types::{Point, SearchResult};
+use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
 // ── REST request/response shapes ─────────────────────────────────────────────
 
@@ -62,6 +62,8 @@ struct SearchRequest {
     limit: usize,
     with_payload: bool,
     score_threshold: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -171,6 +173,9 @@ impl QdrantStore {
             ("domain", "keyword"),
             ("source_type", "keyword"),
             ("language", "keyword"),
+            ("file_path", "keyword"),
+            ("last_modified", "keyword"),
+            ("git_branch", "keyword"),
         ];
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
         for (field, schema_type) in indexes {
@@ -237,7 +242,13 @@ fn parse_collection_vector_size(vectors: serde_json::Value) -> Result<usize, Rag
 
 #[cfg(test)]
 mod tests {
+    use super::QdrantStore;
     use super::parse_collection_vector_size;
+    use crate::store::VectorStore;
+    use crate::types::SearchMetadataFilter;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn parses_named_vector_collection_size() {
@@ -262,6 +273,200 @@ mod tests {
             err.to_string().contains("mismatched sizes"),
             "unexpected error: {err}"
         );
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        body: String,
+    }
+
+    async fn spawn_test_server<F>(
+        responder: F,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::task::JoinHandle<()>,
+    )
+    where
+        F: Fn(&RecordedRequest) -> String + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let responder = Arc::new(responder);
+
+        let handle = tokio::spawn(async move {
+            'connection: loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+
+                let mut buffer = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0u8; 1024];
+                    let n = match stream.read(&mut chunk).await {
+                        Ok(n) => n,
+                        Err(_) => continue 'connection,
+                    };
+                    if n == 0 {
+                        continue 'connection;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = find_subslice(&buffer, b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+
+                let headers = String::from_utf8_lossy(&buffer[..header_end]);
+                let mut content_length = 0usize;
+                let mut method = String::new();
+                let mut path = String::new();
+                for (i, line) in headers.lines().enumerate() {
+                    if i == 0 {
+                        let mut parts = line.split_whitespace();
+                        method = parts.next().unwrap_or_default().to_string();
+                        path = parts.next().unwrap_or_default().to_string();
+                    } else if let Some((name, value)) = line.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+
+                while buffer.len() < header_end + content_length {
+                    let mut chunk = [0u8; 1024];
+                    let n = match stream.read(&mut chunk).await {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                }
+
+                let body =
+                    String::from_utf8_lossy(&buffer[header_end..header_end + content_length])
+                        .to_string();
+                let request = RecordedRequest { method, path, body };
+                recorded.lock().unwrap().push(request.clone());
+
+                let response_body = responder.as_ref()(&request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        (format!("http://{}", addr), requests, handle)
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_landed_file_path_and_returns_it() {
+        let (base_url, requests, handle) = spawn_test_server(|_request| {
+            serde_json::json!({
+                "result": [
+                    {
+                        "score": 0.91,
+                        "payload": {
+                            "text": "chunk text",
+                            "url": "file:///tmp/report.md",
+                            "chunk_index": 2,
+                            "token_estimate": 123,
+                            "file_path": "/tmp/report.md",
+                            "last_modified": "2026-04-15T12:34:56Z",
+                            "git_branch": "main"
+                        }
+                    }
+                ]
+            })
+            .to_string()
+        })
+        .await;
+        let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+            .expect("store");
+
+        let filter = SearchMetadataFilter {
+            file_path: Some("/tmp/report.md".to_string()),
+            last_modified: None,
+            git_branch: None,
+        };
+
+        let results = store
+            .search(&[0.25, 0.75], 3, Some(&filter))
+            .await
+            .expect("search");
+
+        handle.abort();
+
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, "POST");
+        assert_eq!(recorded[0].path, "/collections/noxa-test/points/search");
+
+        let body: serde_json::Value = serde_json::from_str(&recorded[0].body).expect("json body");
+        assert_eq!(body["filter"]["must"][0]["key"], "file_path");
+        assert_eq!(
+            body["filter"]["must"][0]["match"]["value"],
+            "/tmp/report.md"
+        );
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(result.file_path.as_deref(), Some("/tmp/report.md"));
+        assert_eq!(
+            result.last_modified.as_deref(),
+            Some("2026-04-15T12:34:56Z")
+        );
+        assert_eq!(result.git_branch.as_deref(), Some("main"));
+    }
+
+    #[tokio::test]
+    async fn create_collection_indexes_only_landed_filter_fields() {
+        let (base_url, requests, handle) = spawn_test_server(|_request| "{}".to_string()).await;
+        let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+            .expect("store");
+
+        store
+            .create_collection(1536)
+            .await
+            .expect("create collection");
+
+        handle.abort();
+
+        let recorded = requests.lock().unwrap();
+        let index_fields: Vec<String> = recorded
+            .iter()
+            .filter(|req| req.method == "PUT" && req.path.ends_with("/index"))
+            .map(|req| {
+                let body: serde_json::Value = serde_json::from_str(&req.body).expect("json");
+                body["field_name"].as_str().unwrap_or_default().to_string()
+            })
+            .collect();
+
+        assert!(index_fields.contains(&"file_path".to_string()));
+        assert!(index_fields.contains(&"last_modified".to_string()));
+        assert!(index_fields.contains(&"git_branch".to_string()));
+        assert!(!index_fields.contains(&"external_id".to_string()));
+        assert!(!index_fields.contains(&"platform_url".to_string()));
+        assert!(!index_fields.contains(&"seed_url".to_string()));
+        assert!(!index_fields.contains(&"search_query".to_string()));
+        assert!(!index_fields.contains(&"crawl_depth".to_string()));
     }
 }
 
@@ -485,16 +690,39 @@ impl VectorStore for QdrantStore {
     }
 
     /// POST /collections/{name}/points/search
-    async fn search(&self, vector: &[f32], limit: usize) -> Result<Vec<SearchResult>, RagError> {
+    async fn search(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        filter: Option<&SearchMetadataFilter>,
+    ) -> Result<Vec<SearchResult>, RagError> {
         let url = format!(
             "{}/collections/{}/points/search",
             self.base_url, self.collection
         );
+        let filter = filter.and_then(|filter| {
+            let mut must = Vec::new();
+            if let Some(value) = &filter.file_path {
+                must.push(json!({ "key": "file_path", "match": { "value": value } }));
+            }
+            if let Some(value) = &filter.last_modified {
+                must.push(json!({ "key": "last_modified", "match": { "value": value } }));
+            }
+            if let Some(value) = &filter.git_branch {
+                must.push(json!({ "key": "git_branch", "match": { "value": value } }));
+            }
+            if must.is_empty() {
+                None
+            } else {
+                Some(json!({ "must": must }))
+            }
+        });
         let body = SearchRequest {
             vector: vector.to_vec(),
             limit,
             with_payload: true,
             score_threshold: None,
+            filter,
         };
 
         let resp = self.client.post(&url).json(&body).send().await?;
@@ -562,6 +790,18 @@ impl VectorStore for QdrantStore {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        let file_path = payload
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let last_modified = payload
+                            .get("last_modified")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let git_branch = payload
+                            .get("git_branch")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         Some(SearchResult {
                             text,
                             url,
@@ -575,6 +815,9 @@ impl VectorStore for QdrantStore {
                             source_type,
                             content_hash,
                             technologies,
+                            file_path,
+                            last_modified,
+                            git_branch,
                         })
                     }
                     _ => {

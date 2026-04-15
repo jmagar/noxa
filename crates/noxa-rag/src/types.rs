@@ -105,6 +105,23 @@ pub struct SearchResult {
     pub content_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub technologies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+}
+
+/// Narrow metadata filter for vector search.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchMetadataFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
 }
 
 /// RAG-pipeline provenance carried alongside ExtractionResult through ingestion.
@@ -140,4 +157,33 @@ pub struct IngestionContext {
     pub search_query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crawl_depth: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchResult;
+
+    #[test]
+    fn search_result_deserializes_landed_file_metadata() {
+        let value = serde_json::json!({
+            "text": "chunk text",
+            "url": "file:///tmp/report.md",
+            "score": 0.99,
+            "chunk_index": 2,
+            "token_estimate": 123,
+            "file_path": "/tmp/report.md",
+            "last_modified": "2026-04-15T12:34:56Z",
+            "git_branch": "main"
+        });
+
+        let result: SearchResult =
+            serde_json::from_value(value).expect("search result should deserialize");
+
+        assert_eq!(result.file_path.as_deref(), Some("/tmp/report.md"));
+        assert_eq!(
+            result.last_modified.as_deref(),
+            Some("2026-04-15T12:34:56Z")
+        );
+        assert_eq!(result.git_branch.as_deref(), Some("main"));
+    }
 }
