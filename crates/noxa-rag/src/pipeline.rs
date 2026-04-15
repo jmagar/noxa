@@ -476,7 +476,6 @@ impl Pipeline {
 /// We check existence because rename events (vim/emacs atomic saves) may fire for
 /// temp files that are gone by the time we process them.
 ///
-/// Deferred (no confirmed use case, would add new crate deps): .epub, .eml, .mbox
 fn is_indexable(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
@@ -499,6 +498,8 @@ fn is_indexable(path: &Path) -> bool {
         | "vtt" | "srt"
         // RSS / Atom
         | "rss" | "atom"
+        // Ebook / email
+        | "epub" | "eml" | "mbox"
     ) && path.exists()
 }
 
@@ -710,6 +711,19 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ExtractionResult, Rag
                 .map_err(|e| RagError::Parse(format!("PPTX spawn_blocking: {e}")))?
         }
 
+        // ── EPUB ───────────────────────────────────────────────────────────────
+        "epub" => tokio::task::spawn_blocking(move || parse_epub(&bytes, file_url, title))
+            .await
+            .map_err(|e| RagError::Parse(format!("EPUB spawn_blocking: {e}")))?,
+
+        // ── Email formats ──────────────────────────────────────────────────────
+        "eml" => tokio::task::spawn_blocking(move || parse_eml(&bytes, file_url, title))
+            .await
+            .map_err(|e| RagError::Parse(format!("EML spawn_blocking: {e}")))?,
+        "mbox" => tokio::task::spawn_blocking(move || parse_mbox(&bytes, file_url, title))
+            .await
+            .map_err(|e| RagError::Parse(format!("MBOX spawn_blocking: {e}")))?,
+
         // ── Structured text (.jsonl .xml .opml .rss .atom) ────────────────────
         "jsonl" => {
             let content = as_text(&bytes);
@@ -891,16 +905,13 @@ fn parse_office_zip(
 ) -> Result<ExtractionResult, RagError> {
     use std::io::Read;
 
-    const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024; // 100 MiB decompressed
-    const MAX_ENTRIES: usize = 1_000;
-
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| RagError::Parse(format!("{ext} ZIP open: {e}")))?;
 
-    if archive.len() > MAX_ENTRIES {
+    if archive.len() > MAX_ZIP_ENTRIES {
         return Err(RagError::Parse(format!(
-            "{ext}: archive has {} entries (max {MAX_ENTRIES}) — possible zip bomb",
+            "{ext}: archive has {} entries (max {MAX_ZIP_ENTRIES}) — possible zip bomb",
             archive.len()
         )));
     }
@@ -912,7 +923,7 @@ fn parse_office_zip(
     if ext == "docx" {
         for i in 0..archive.len() {
             if let Ok(entry) = archive.by_index(i)
-                && entry.size() > MAX_ENTRY_SIZE
+                && entry.size() > MAX_ZIP_ENTRY_SIZE
             {
                 return Err(RagError::Parse(format!(
                     "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
@@ -947,7 +958,7 @@ fn parse_office_zip(
             .by_index(i)
             .map_err(|e| RagError::Parse(format!("{ext} entry {i}: {e}")))?;
 
-        if entry.size() > MAX_ENTRY_SIZE {
+        if entry.size() > MAX_ZIP_ENTRY_SIZE {
             return Err(RagError::Parse(format!(
                 "{ext}: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
                 entry.name(),
@@ -977,14 +988,345 @@ fn parse_office_zip(
 
     let text = text_parts.join("\n\n");
     let word_count = text.split_whitespace().count();
+    let plain_text = text.clone();
     Ok(make_text_result(
-        text.clone(),
         text,
+        plain_text,
         url,
         Some(title),
         "file",
         word_count,
     ))
+}
+
+const MAX_ZIP_ENTRY_SIZE: u64 = 100 * 1024 * 1024; // 100 MiB decompressed
+const MAX_ZIP_ENTRIES: usize = 1_000;
+const MAX_MBOX_MESSAGES: usize = 10_000;
+
+fn parse_epub(
+    bytes: &[u8],
+    url: String,
+    fallback_title: String,
+) -> Result<ExtractionResult, RagError> {
+    use std::io::Read;
+
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| RagError::Parse(format!("epub ZIP open: {e}")))?;
+
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return Err(RagError::Parse(format!(
+            "epub: archive has {} entries (max {MAX_ZIP_ENTRIES}) — possible zip bomb",
+            archive.len()
+        )));
+    }
+
+    let mut text_parts = Vec::new();
+    let mut title = None;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| RagError::Parse(format!("epub entry {i}: {e}")))?;
+
+        if entry.size() > MAX_ZIP_ENTRY_SIZE {
+            return Err(RagError::Parse(format!(
+                "epub: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
+                entry.name(),
+                entry.size()
+            )));
+        }
+
+        let name = entry.name().to_string();
+        if !(name.ends_with(".opf")
+            || name.ends_with(".xhtml")
+            || name.ends_with(".html")
+            || name.ends_with(".htm")
+            || name.ends_with(".ncx"))
+        {
+            continue;
+        }
+
+        let mut xml_buf = String::new();
+        entry
+            .read_to_string(&mut xml_buf)
+            .map_err(|e| RagError::Parse(format!("epub read '{name}': {e}")))?;
+
+        if title.is_none() && name.ends_with(".opf") {
+            title = extract_xml_tag_text(&xml_buf, "title");
+        }
+
+        if name.ends_with(".xhtml")
+            || name.ends_with(".html")
+            || name.ends_with(".htm")
+            || name.ends_with(".ncx")
+        {
+            let fragment = extract_xml_text(&xml_buf);
+            if !fragment.trim().is_empty() {
+                text_parts.push(fragment);
+            }
+        }
+    }
+
+    let text = text_parts.join("\n\n");
+    let word_count = text.split_whitespace().count();
+    let plain_text = text.clone();
+    Ok(make_text_result(
+        text,
+        plain_text,
+        url,
+        Some(title.unwrap_or(fallback_title)),
+        "file",
+        word_count,
+    ))
+}
+
+fn parse_eml(
+    bytes: &[u8],
+    url: String,
+    fallback_title: String,
+) -> Result<ExtractionResult, RagError> {
+    let parsed =
+        mailparse::parse_mail(bytes).map_err(|e| RagError::Parse(format!("eml parse: {e}")))?;
+    email_result_from_parsed(&parsed, &url, &fallback_title)
+}
+
+fn parse_mbox(
+    bytes: &[u8],
+    url: String,
+    fallback_title: String,
+) -> Result<ExtractionResult, RagError> {
+    let text = String::from_utf8_lossy(bytes);
+    let normalized = text.replace("\r\n", "\n");
+    let mut messages = Vec::new();
+    let mut current = String::new();
+
+    for line in normalized.lines() {
+        if line.starts_with("From ") && !current.trim().is_empty() {
+            messages.push(std::mem::take(&mut current));
+            continue;
+        }
+
+        if current.is_empty() && line.starts_with("From ") {
+            continue;
+        }
+
+        current.push_str(line);
+        current.push('\n');
+    }
+
+    if !current.trim().is_empty() {
+        messages.push(current);
+    }
+
+    if messages.is_empty() {
+        return Err(RagError::Parse("mbox: no messages found".to_string()));
+    }
+    if messages.len() > MAX_MBOX_MESSAGES {
+        return Err(RagError::Parse(format!(
+            "mbox: {} messages exceeds limit ({MAX_MBOX_MESSAGES})",
+            messages.len()
+        )));
+    }
+
+    let mut sections = Vec::new();
+    let mut authors: Vec<String> = Vec::new();
+    let mut titles: Vec<String> = Vec::new();
+    let mut published_date = None;
+
+    for message in messages {
+        let parsed = mailparse::parse_mail(message.as_bytes())
+            .map_err(|e| RagError::Parse(format!("mbox message parse: {e}")))?;
+        let result = email_result_from_parsed(&parsed, &url, &fallback_title)?;
+        if let Some(ref author) = result.metadata.author
+            && !authors.iter().any(|existing| existing == author)
+        {
+            authors.push(author.clone());
+        }
+        if let Some(ref subject) = result.metadata.title
+            && !titles.iter().any(|existing| existing == subject)
+        {
+            titles.push(subject.clone());
+        }
+        if published_date.is_none() {
+            published_date = result.metadata.published_date;
+        }
+        let section = format_email_section(
+            result.metadata.title.as_deref(),
+            result.metadata.author.as_deref(),
+            &result.content.markdown,
+        );
+        if !section.trim().is_empty() {
+            sections.push(section);
+        }
+    }
+
+    let markdown = sections.join("\n\n---\n\n");
+    let word_count = markdown.split_whitespace().count();
+    let title = titles.first().cloned().or(Some(fallback_title));
+    let plain_text = markdown.clone();
+    let mut result = make_text_result(markdown, plain_text, url, title, "email", word_count);
+    if !authors.is_empty() {
+        result.metadata.author = Some(authors.join(", "));
+    }
+    result.metadata.published_date = published_date;
+    Ok(result)
+}
+
+fn format_email_section(subject: Option<&str>, author: Option<&str>, body: &str) -> String {
+    let mut lines = Vec::new();
+    if let Some(subject) = subject.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("Subject: {subject}"));
+    }
+    if let Some(author) = author.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("From: {author}"));
+    }
+    if !body.trim().is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(body.trim().to_string());
+    }
+    lines.join("\n")
+}
+
+fn email_result_from_parsed(
+    parsed: &mailparse::ParsedMail<'_>,
+    url: &str,
+    fallback_title: &str,
+) -> Result<ExtractionResult, RagError> {
+    use mailparse::MailHeaderMap;
+
+    let headers = parsed.get_headers();
+    let subject = headers
+        .get_first_value("Subject")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback_title.to_string());
+    let author = headers.get_first_value("From");
+    let published_date = headers.get_first_value("Date");
+
+    let body = select_email_body(parsed)?;
+    let word_count = body.split_whitespace().count();
+    let plain_text = body.clone();
+    let mut result = make_text_result(
+        body,
+        plain_text,
+        url.to_string(),
+        Some(subject),
+        "email",
+        word_count,
+    );
+    result.metadata.author = author;
+    result.metadata.published_date = published_date;
+    Ok(result)
+}
+
+fn select_email_body(parsed: &mailparse::ParsedMail<'_>) -> Result<String, RagError> {
+    let mut plain_parts = Vec::new();
+    let mut html_parts = Vec::new();
+    collect_email_parts(parsed, &mut plain_parts, &mut html_parts)?;
+
+    if !plain_parts.is_empty() {
+        return Ok(plain_parts.join("\n\n"));
+    }
+
+    if !html_parts.is_empty() {
+        let html = html_parts.join("\n\n");
+        let extracted = noxa_core::extract(&html, None)
+            .map_err(|e| RagError::Parse(format!("email html extract: {e}")))?;
+        if !extracted.content.markdown.trim().is_empty() {
+            return Ok(extracted.content.markdown);
+        }
+        return Ok(extracted.content.plain_text);
+    }
+
+    Ok(parsed
+        .get_body()
+        .map_err(|e| RagError::Parse(format!("email body decode: {e}")))?
+        .trim()
+        .to_string())
+}
+
+fn collect_email_parts(
+    parsed: &mailparse::ParsedMail<'_>,
+    plain_parts: &mut Vec<String>,
+    html_parts: &mut Vec<String>,
+) -> Result<(), RagError> {
+    if email_part_is_attachment(parsed) {
+        return Ok(());
+    }
+
+    let mime = parsed.ctype.mimetype.to_ascii_lowercase();
+    match mime.as_str() {
+        "text/plain" => {
+            let body = parsed
+                .get_body()
+                .map_err(|e| RagError::Parse(format!("text/plain decode: {e}")))?;
+            let trimmed = body.trim();
+            if !trimmed.is_empty() {
+                plain_parts.push(trimmed.to_string());
+            }
+        }
+        "text/html" => {
+            let body = parsed
+                .get_body()
+                .map_err(|e| RagError::Parse(format!("text/html decode: {e}")))?;
+            let trimmed = body.trim();
+            if !trimmed.is_empty() {
+                html_parts.push(trimmed.to_string());
+            }
+        }
+        _ => {
+            for subpart in &parsed.subparts {
+                collect_email_parts(subpart, plain_parts, html_parts)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn email_part_is_attachment(parsed: &mailparse::ParsedMail<'_>) -> bool {
+    use mailparse::MailHeaderMap;
+
+    parsed
+        .get_headers()
+        .get_first_value("Content-Disposition")
+        .map(|value| value.to_ascii_lowercase().contains("attachment"))
+        .unwrap_or(false)
+}
+
+fn extract_xml_tag_text(xml: &str, tag_name: &str) -> Option<String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_str(xml);
+    let mut inside_target = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                inside_target = local_xml_name(e.name().as_ref()) == tag_name.as_bytes();
+            }
+            Ok(Event::Text(e)) if inside_target => {
+                if let Ok(text) = e.unescape() {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+            Ok(Event::End(_)) => inside_target = false,
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+    }
+}
+
+fn local_xml_name(name: &[u8]) -> &[u8] {
+    match name.iter().position(|&b| b == b':') {
+        Some(pos) => &name[pos + 1..],
+        None => name,
+    }
 }
 
 /// Extract plain text from XML/OPML/RSS/Atom by collecting all text nodes.
@@ -1434,8 +1776,7 @@ mod tests {
         fs::create_dir_all(&nested).expect("create nested dirs");
         fs::write(root.join("top.json"), "{}").expect("write top-level json");
         fs::write(nested.join("guide.json"), "{}").expect("write nested json");
-        // .epub is explicitly deferred — should NOT be returned.
-        fs::write(nested.join("ignore.epub"), "nope").expect("write deferred extension");
+        fs::write(nested.join("book.epub"), "epub-bytes").expect("write epub");
 
         let paths = collect_indexable_paths(root);
         let rendered: Vec<String> = paths
@@ -1443,7 +1784,14 @@ mod tests {
             .map(|p| p.strip_prefix(root).unwrap().display().to_string())
             .collect();
 
-        assert_eq!(rendered, vec!["docs/get-started/guide.json", "top.json"]);
+        assert_eq!(
+            rendered,
+            vec![
+                "docs/get-started/book.epub",
+                "docs/get-started/guide.json",
+                "top.json"
+            ]
+        );
     }
 
     #[test]
@@ -1453,7 +1801,7 @@ mod tests {
         for ext in &[
             "json", "md", "txt", "log", "rst", "org", "yaml", "yml", "toml", "html", "htm",
             "ipynb", "pdf", "docx", "odt", "pptx", "jsonl", "xml", "opml", "vtt", "srt", "rss",
-            "atom",
+            "atom", "epub", "eml", "mbox",
         ] {
             let path = root.join(format!("file.{ext}"));
             fs::write(&path, "x").expect("write file");
@@ -1462,16 +1810,13 @@ mod tests {
     }
 
     #[test]
-    fn is_indexable_rejects_deferred_extensions() {
+    fn is_indexable_rejects_only_unsupported_extensions() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
-        for ext in &["epub", "eml", "mbox"] {
+        for ext in &["exe", "png", "bin"] {
             let path = root.join(format!("file.{ext}"));
             fs::write(&path, "x").expect("write file");
-            assert!(
-                !is_indexable(&path),
-                ".{ext} should NOT be indexable (deferred)"
-            );
+            assert!(!is_indexable(&path), ".{ext} should NOT be indexable");
         }
     }
 
@@ -1910,9 +2255,190 @@ mod tests {
         );
     }
 
+    fn build_minimal_epub(chapter_text: &str, title: &str) -> Vec<u8> {
+        let mimetype = b"application/epub+zip";
+        let container_xml = br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+        let opf = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>{title}</dc:title>
+  </metadata>
+  <manifest>
+    <item id="chapter1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chapter1"/>
+  </spine>
+</package>"#
+        );
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <h1>{title}</h1>
+    <p>{chapter_text}</p>
+  </body>
+</html>"#
+        );
+
+        let buf = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(buf);
+        let stored: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let deflated: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("mimetype", stored).expect("start mimetype");
+        zip.write_all(mimetype).expect("write mimetype");
+        zip.add_directory("META-INF/", deflated)
+            .expect("add META-INF");
+        zip.start_file("META-INF/container.xml", deflated)
+            .expect("start container");
+        zip.write_all(container_xml).expect("write container");
+        zip.add_directory("OEBPS/", deflated).expect("add OEBPS");
+        zip.start_file("OEBPS/content.opf", deflated)
+            .expect("start opf");
+        zip.write_all(opf.as_bytes()).expect("write opf");
+        zip.start_file("OEBPS/chapter1.xhtml", deflated)
+            .expect("start chapter");
+        zip.write_all(chapter.as_bytes()).expect("write chapter");
+        zip.finish().expect("finish epub").into_inner()
+    }
+
+    #[tokio::test]
+    async fn parse_file_epub_extracts_text_and_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let epub_bytes = build_minimal_epub("EPUB chapter body text.", "Sample EPUB");
+        let path = tmp.path().join("book.epub");
+        fs::write(&path, &epub_bytes).expect("write epub");
+
+        let result = parse_file(&path, epub_bytes)
+            .await
+            .expect("parse .epub should succeed");
+
+        assert_eq!(result.metadata.source_type.as_deref(), Some("file"));
+        assert_eq!(result.metadata.title.as_deref(), Some("Sample EPUB"));
+        assert!(
+            result.content.markdown.contains("EPUB chapter body text."),
+            "epub markdown should include chapter text, got: {:?}",
+            result.content.markdown
+        );
+        assert!(
+            result
+                .metadata
+                .url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("file://")),
+            "epub url should be file://"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_file_eml_extracts_headers_and_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let eml = b"From: Alice <alice@example.com>\r\n\
+Subject: Sprint update\r\n\
+Date: Tue, 14 Apr 2026 10:00:00 -0400\r\n\
+Content-Type: multipart/alternative; boundary=\"boundary42\"\r\n\
+\r\n\
+--boundary42\r\n\
+Content-Type: text/plain; charset=UTF-8\r\n\
+\r\n\
+Plain email body text.\r\n\
+--boundary42\r\n\
+Content-Type: text/html; charset=UTF-8\r\n\
+\r\n\
+<html><body><p>HTML email body</p></body></html>\r\n\
+--boundary42--\r\n";
+        let result = run_parse_file(tmp.path(), "message.eml", eml)
+            .await
+            .expect("parse .eml");
+
+        assert_eq!(result.metadata.source_type.as_deref(), Some("email"));
+        assert_eq!(
+            result.metadata.author.as_deref(),
+            Some("Alice <alice@example.com>")
+        );
+        assert_eq!(result.metadata.title.as_deref(), Some("Sprint update"));
+        assert!(
+            result.content.markdown.contains("Plain email body text.")
+                || result.content.markdown.contains("HTML email body"),
+            "email markdown should contain message body, got: {:?}",
+            result.content.markdown
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_file_eml_skips_text_attachment_parts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let eml = b"From: Alice <alice@example.com>\r\n\
+Subject: Attachment test\r\n\
+Date: Tue, 14 Apr 2026 10:00:00 -0400\r\n\
+Content-Type: multipart/mixed; boundary=\"boundary99\"\r\n\
+\r\n\
+--boundary99\r\n\
+Content-Type: text/plain; charset=UTF-8\r\n\
+\r\n\
+This is the real body.\r\n\
+--boundary99\r\n\
+Content-Type: text/plain; charset=UTF-8\r\n\
+Content-Disposition: attachment; filename=\"notes.txt\"\r\n\
+\r\n\
+ATTACHMENT SHOULD NOT BE INDEXED\r\n\
+--boundary99--\r\n";
+        let result = run_parse_file(tmp.path(), "attachment.eml", eml)
+            .await
+            .expect("parse .eml");
+
+        assert!(result.content.markdown.contains("This is the real body."));
+        assert!(
+            !result
+                .content
+                .markdown
+                .contains("ATTACHMENT SHOULD NOT BE INDEXED"),
+            "attachment text should not be treated as body content: {:?}",
+            result.content.markdown
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_file_mbox_combines_multiple_messages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mbox = b"From alice@example.com Tue Apr 14 10:00:00 2026\n\
+From: Alice <alice@example.com>\n\
+Subject: First message\n\
+\n\
+First body.\n\
+\n\
+From bob@example.com Tue Apr 14 11:00:00 2026\n\
+From: Bob <bob@example.com>\n\
+Subject: Second message\n\
+Content-Type: text/plain; charset=UTF-8\n\
+\n\
+Second body.\n";
+        let result = run_parse_file(tmp.path(), "mailbox.mbox", mbox)
+            .await
+            .expect("parse .mbox");
+
+        assert_eq!(result.metadata.source_type.as_deref(), Some("email"));
+        assert!(
+            result.content.markdown.contains("First message"),
+            "mbox markdown should include the first subject, got: {:?}",
+            result.content.markdown
+        );
+        assert!(
+            result.content.markdown.contains("Second body."),
+            "mbox markdown should include the second body, got: {:?}",
+            result.content.markdown
+        );
+    }
+
     // ─── PDF test ──────────────────────────────────────────────────────────────
-    // NOTE: EPUB is explicitly deferred in is_indexable() — no .epub arm in parse_file().
-    // Skipping .epub test per bead instructions.
 
     #[tokio::test]
     async fn parse_file_pdf_produces_non_empty_content_from_valid_fixture() {

@@ -297,11 +297,10 @@ impl FilesystemContentStore {
                 // Offload CPU-bound diff to spawn_blocking to avoid blocking the executor.
                 let prev = existing.current.clone();
                 let curr = to_store.clone();
-                let content_diff = tokio::task::spawn_blocking(move || {
-                    noxa_core::diff::diff(&prev, &curr)
-                })
-                .await
-                .map_err(StoreError::TaskJoin)?;
+                let content_diff =
+                    tokio::task::spawn_blocking(move || noxa_core::diff::diff(&prev, &curr))
+                        .await
+                        .map_err(StoreError::TaskJoin)?;
                 let changed = content_diff.status == noxa_core::ChangeStatus::Changed;
                 let wc_delta = to_store.metadata.word_count as i64
                     - existing.current.metadata.word_count as i64;
@@ -624,7 +623,6 @@ mod tests {
 
     #[test]
     fn test_url_hash_matches_fnv1a() {
-        use crate::paths::url_to_store_path as _; // ensure url_hash is accessible via paths
         // Test via url_to_store_path behavior: URL with query gets a hash suffix.
         let p = url_to_store_path("https://example.com/page?q=test");
         assert!(p.to_string_lossy().contains('_'));

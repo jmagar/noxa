@@ -11,7 +11,7 @@ noxa/
                       # + ExtractionOptions (include/exclude CSS selectors)
                       # + diff engine (change tracking)
                       # + brand extraction (DOM/CSS analysis)
-    noxa-fetch/    # HTTP client via primp. Crawler. Sitemap discovery. Batch ops.
+    noxa-fetch/    # HTTP client via wreq (TLS fingerprinting). Crawler. Sitemap discovery.
                       # + proxy pool rotation (per-request)
                       # + PDF content-type detection
                       # + document parsing (DOCX, XLSX, CSV)
@@ -19,10 +19,12 @@ noxa/
                       # + JSON schema extraction (validated + retry), prompt extraction, summarization
     noxa-pdf/      # PDF text extraction via pdf-extract
     noxa-mcp/      # MCP server (Model Context Protocol) for AI agents
-    noxa-cli/  # CLI binary (produces `noxa` binary)
-    noxa-rag/  # RAG pipeline daemon (TEI embeddings + Qdrant vector store)
-                  # + multi-format ingestion (DOCX, XLSX, CSV, PDF, HTML, OPML)
-                  # + fs-watcher for automatic re-indexing
+    noxa-store/    # Filesystem persistence: per-URL .md + .json sidecar storage
+                      # + operations log (domain-level .ndjson append log)
+    noxa-cli/      # CLI binary (produces `noxa` binary)
+    noxa-rag/      # RAG pipeline daemon (TEI embeddings + Qdrant vector store)
+                      # + multi-format ingestion (DOCX, XLSX, CSV, PDF, HTML, OPML)
+                      # + fs-watcher for automatic re-indexing
 ```
 
 Three binaries: `noxa` (CLI), `noxa-mcp` (MCP server), `noxa-rag-daemon` (RAG pipeline).
@@ -32,29 +34,36 @@ Three binaries: `noxa` (CLI), `noxa-mcp` (MCP server), `noxa-rag-daemon` (RAG pi
 - `noise.rs` — Shared noise filter: tags, ARIA roles, class/ID patterns. Tailwind-safe.
 - `data_island.rs` — JSON data island extraction for React SPAs, Next.js, Contentful CMS
 - `markdown.rs` — HTML to markdown with URL resolution, asset collection
-- `llm.rs` — 9-step LLM optimization pipeline (image strip, emphasis strip, link dedup, stat merge, whitespace collapse)
+- `lib.rs` — 9-step LLM optimization pipeline (image strip, emphasis strip, link dedup, stat merge, whitespace collapse)
 - `domain.rs` — Domain detection from URL patterns + DOM heuristics
 - `metadata.rs` — OG, Twitter Card, standard meta tag extraction
 - `types.rs` — Core data structures (ExtractionResult, Metadata, Content)
-- `filter.rs` — CSS selector include/exclude filtering (ExtractionOptions)
+- `js_eval.rs` — JavaScript expression evaluation for data island extraction
+- `structured_data.rs` — Structured data (JSON-LD, microdata) extraction
+- `youtube.rs` — YouTube-specific content extraction
 - `diff.rs` — Content change tracking engine (snapshot diffing)
 - `brand.rs` — Brand identity extraction from DOM structure and CSS
 
 ### Fetch Modules (`noxa-fetch`)
-- `client.rs` — FetchClient with primp TLS impersonation
-- `browser.rs` — Browser profiles: Chrome (142/136/133/131), Firefox (144/135/133/128)
+- `client.rs` — FetchClient with wreq TLS impersonation
+- `browser.rs` — Browser profile user-agent strings
+- `tls.rs` — TLS fingerprint profiles: Chrome (142/136/133/131), Firefox (144/135/133/128)
 - `crawler.rs` — BFS same-origin crawler with configurable depth/concurrency/delay
 - `sitemap.rs` — Sitemap discovery and parsing (sitemap.xml, robots.txt)
-- `batch.rs` — Multi-URL concurrent extraction
 - `proxy.rs` — Proxy pool with per-request rotation
 - `document.rs` — Document parsing: DOCX, XLSX, CSV auto-detection and extraction
-- `search.rs` — Web search via Serper.dev with parallel result scraping
+- `search.rs` — Web search via SearXNG (self-hosted) with parallel result scraping
+- `linkedin.rs` — LinkedIn-specific content extraction
+- `reddit.rs` — Reddit-specific content extraction
 
 ### LLM Modules (`noxa-llm`)
-- Provider chain: Gemini CLI (primary) -> OpenAI -> Ollama -> Anthropic
-- Gemini CLI requires the `gemini` binary on PATH; `GEMINI_MODEL` env var controls model (default: `gemini-2.5-pro`)
-- JSON schema extraction with jsonschema validation; retries once with a correction prompt on both parse failures and schema mismatches.
-- Prompt-based extraction, summarization
+- `chain.rs` — Provider chain: Gemini CLI (primary) -> OpenAI -> Ollama -> Anthropic
+- `provider.rs` — `LlmProvider` trait every backend implements
+- `extract.rs` — JSON schema extraction with jsonschema validation + correction-prompt retry
+- `summarize.rs` — Content summarization via provider chain
+- `clean.rs` — Response cleaning (thinking tag stripping, etc.)
+- `testing.rs` — Test utilities for LLM integration tests
+- Gemini CLI requires `gemini` binary on PATH; `GEMINI_MODEL` env var controls model (default: `gemini-2.5-pro`)
 
 ### PDF Modules (`noxa-pdf`)
 - PDF text extraction via pdf-extract crate
@@ -65,10 +74,16 @@ Three binaries: `noxa` (CLI), `noxa-mcp` (MCP server), `noxa-rag-daemon` (RAG pi
 - Works with Claude Desktop, Claude Code, and any MCP client
 - Uses `rmcp` crate (official Rust MCP SDK)
 
+### Store Modules (`noxa-store`)
+- `content_store.rs` — Per-URL `.md` + `.json` sidecar filesystem storage
+- `operations_log.rs` — Domain-level `.operations.ndjson` append log
+- `paths.rs` — URL-to-path mapping, store root discovery
+- `types.rs` — `Op`, `OperationEntry`, `StoreResult`
+
 ### RAG Modules (`noxa-rag`)
 - `pipeline.rs` — End-to-end ingestion: fetch → chunk → embed → upsert to Qdrant
 - `chunker.rs` — Text chunking strategies for embedding
-- `embed/` — Embedding providers: TEI (local), OpenAI, VoyageAI
+- `embed/` — Embedding providers: TEI (local) with factory pattern
 - `store/` — Qdrant REST client (no gRPC)
 - `config.rs` — TOML config schema for the daemon
 - Produces `noxa-rag-daemon` binary for background indexing
@@ -84,12 +99,14 @@ Three binaries: `noxa` (CLI), `noxa-mcp` (MCP server), `noxa-rag-daemon` (RAG pi
 | `GEMINI_MODEL` | Gemini model override (default: `gemini-2.5-pro`) |
 | `OPENAI_API_KEY` | OpenAI API key for LLM provider chain |
 
+Use `config/config.example.json` as the template for `config.json`, `config/config.schema.json` for the JSON contract, and `config/.env.example` as the template for `.env`.
+
 ## Hard Rules
 
 - **Core has ZERO network dependencies** — takes `&str` HTML, returns structured output. Keep it WASM-compatible.
-- **primp requires `[patch.crates-io]`** for patched rustls/h2 forks at workspace level.
+- **noxa-fetch and noxa-mcp use wreq** (TLS fingerprinting). noxa-rag uses plain reqwest (no fingerprinting needed for TEI/Qdrant).
 - **RUSTFLAGS are set in `.cargo/config.toml`** — no need to pass manually.
-- **noxa-llm uses plain reqwest** (NOT primp-patched). LLM APIs don't need TLS fingerprinting.
+- **noxa-llm uses plain reqwest** (NOT wreq). LLM APIs don't need TLS fingerprinting.
 - **qwen3 thinking tags** (`<think>`) are stripped at both provider and consumer levels.
 
 ## Build & Test
@@ -104,68 +121,24 @@ cargo test -p noxa-llm       # LLM only
 ## CLI
 
 ```bash
-# Basic extraction
-noxa https://example.com
-noxa https://example.com --format llm
-
-# Content filtering
-noxa https://example.com --include "article" --exclude "nav,footer"
-noxa https://example.com --only-main-content
-
-# Batch + proxy rotation
-noxa url1 url2 url3 --proxy-file proxies.txt
-noxa --urls-file urls.txt --concurrency 10
-
-# Sitemap discovery
-noxa https://docs.example.com --map
-
-# Crawling (with sitemap seeding)
-noxa https://docs.example.com --crawl --depth 2 --max-pages 50 --sitemap
-
-# Change tracking
-noxa https://example.com -f json > snap.json
-noxa https://example.com --diff-with snap.json
-
-# Brand extraction
-noxa https://example.com --brand
-
-# LLM features (Gemini CLI primary; requires `gemini` on PATH)
-noxa https://example.com --summarize
-noxa https://example.com --extract-prompt "Get all pricing tiers"
-noxa https://example.com --extract-json '{"type":"object","properties":{"title":{"type":"string"}}}'
-
-# Force a specific LLM provider
-noxa https://example.com --llm-provider gemini --summarize
-noxa https://example.com --llm-provider openai --summarize
-
-# PDF (auto-detected via Content-Type)
-noxa https://example.com/report.pdf
-
-# Browser impersonation: chrome (default), firefox, random
-noxa https://example.com --browser firefox
-
-# Local file / stdin
-noxa --file page.html
-cat page.html | noxa --stdin
-
-# Interactive first-run setup (config, API keys, MCP registration)
-noxa setup
-
-# Web search via SearXNG or Noxa Cloud
-noxa --search "rust async runtime comparison" --num-results 20
-noxa --search "query" --no-scrape         # snippets only, skip URL scraping
-
-# Local doc store management
-noxa --list                               # all cached domains
-noxa --list docs.example.com             # docs for a specific domain
-noxa --retrieve https://example.com/docs # exact URL or fuzzy query
-noxa --grep "authentication"             # search cached docs with rg
-noxa --status docs.example.com          # background crawl status
-
-# Watch for changes
-noxa https://example.com --watch --watch-interval 60
-noxa https://example.com --watch --on-change "notify-send 'Changed!'"
+noxa <url>                          # Basic extraction
+noxa <url> --format llm             # LLM-optimized output
+noxa <url> --include "article" --exclude "nav,footer"  # CSS selector filtering
+noxa <url> --crawl --depth 2 --max-pages 50            # BFS crawl
+noxa <url> --map                    # Sitemap discovery
+noxa <url> --summarize              # LLM summarization
+noxa <url> --extract-json '<schema>'  # Structured JSON extraction
+noxa <url> --brand                  # Brand identity extraction
+noxa <url> --diff-with snap.json    # Change tracking
+noxa <url> --browser firefox        # TLS fingerprint: chrome (default), firefox, random
+noxa --search "query"               # SearXNG web search
+noxa --file page.html               # Local file
+noxa setup                          # Interactive first-run config
+noxa --list                         # Cached content store
+noxa --grep "pattern"               # Search cached docs
 ```
+
+Full flag reference: `noxa --help` or see clap derives in `crates/noxa-cli/src/`.
 
 ## Key Thresholds
 

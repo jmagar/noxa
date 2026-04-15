@@ -423,6 +423,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "charset"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1f927b07c74ba84c7e5fe4db2baeb3e996ab2688992e39ac68ce3220a677c7e"
+dependencies = [
+ "base64 0.22.1",
+ "encoding_rs",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2065,6 +2075,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
+name = "mailparse"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3da03d5980411a724e8aaf7b61a7b5e386ec55a7fb49ee3d0ff79efc7e5e7c7e"
+dependencies = [
+ "charset",
+ "data-encoding",
+ "quoted_printable",
+]
+
+[[package]]
 name = "markup5ever"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2229,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "clap",
@@ -2258,7 +2279,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "ego-tree",
  "once_cell",
@@ -2276,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-fetch"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "calamine",
@@ -2301,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-llm"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2315,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-mcp"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "dirs",
  "dotenvy",
@@ -2338,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-pdf"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "pdf-extract",
  "thiserror 2.0.18",
@@ -2347,12 +2368,13 @@ dependencies = [
 
 [[package]]
 name = "noxa-rag"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
  "clap",
  "dashmap",
+ "mailparse",
  "notify",
  "notify-debouncer-mini",
  "noxa-core",
@@ -2380,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-store"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -2849,6 +2871,12 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "quoted_printable"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
 
 [[package]]
 name = "r-efi"

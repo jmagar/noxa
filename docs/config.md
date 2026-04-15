@@ -10,6 +10,14 @@ This document explains how `noxa` loads configuration, how it merges `config.jso
 - Unknown keys in `config.json` are ignored.
 - `config.json` uses `snake_case` keys.
 
+## File Roles
+
+- `config/config.example.json` is the example you copy to `config.json`.
+- `config/config.schema.json` documents the accepted JSON keys and feeds editor/schema validation.
+- `config/.env.example` is the example you copy to `.env`.
+- `config.json` holds non-secret defaults only.
+- `.env` holds secrets plus runtime URLs that are loaded from environment variables.
+
 ## Load Order
 
 `noxa` resolves settings in this order:
@@ -66,6 +74,8 @@ Use `.env` for secrets, URLs, and a small number of runtime overrides:
 - `NOXA_LLM_BASE_URL`
 
 Those values are intentionally excluded from `config.json`.
+
+`SEARXNG_URL` belongs here because it is a runtime endpoint, not a `config.json` default. Set it in `.env` to enable local search without `NOXA_API_KEY`.
 
 If you run `setup.sh` or the Docker Compose stack, the generated `.env` may also include local deployment settings such as `NOXA_PORT`, `NOXA_HOST`, `NOXA_AUTH_KEY`, `NOXA_LOG`, `OLLAMA_HOST`, and `OLLAMA_MODEL`.
 
@@ -232,7 +242,7 @@ The following variables are not part of the `config.json` contract, but they sti
 
 ## Example
 
-`config/config.example.json` shows the recommended baseline:
+`config/config.example.json` shows the recommended baseline, and its `_doc` field points back to `config.json` plus the `.env` split:
 
 ```json
 {

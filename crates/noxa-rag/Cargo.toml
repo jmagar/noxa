@@ -19,6 +19,7 @@ noxa-fetch = { workspace = true }
 zip = "2"                         # DOCX, ODT, PPTX (ZIP archives) — matches noxa-fetch version
 quick-xml = "0.37"                # XML/OPML/RSS and DOCX word/document.xml — matches noxa-fetch version
 strip-ansi-escapes = "0.2"        # .log file preprocessing
+mailparse = "0.15"                # .eml / .mbox parsing
 
 # Async runtime
 tokio = { workspace = true }

@@ -875,8 +875,11 @@ fn parse_http_url(url: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
-/// Validate a URL provided by the operator (e.g. SEARXNG_URL). Only checks scheme and
-/// host presence; does NOT reject private/loopback addresses (operator-trusted config).
+/// Validate a URL provided by the operator (e.g. SEARXNG_URL).
+///
+/// This is operator-controlled configuration, not scraped input, so it only
+/// needs HTTP(S) syntax + host validation. Search result URLs are filtered by
+/// the stricter public-address validator before any fetch.
 fn validate_operator_url(url: &str) -> Result<(), String> {
     parse_http_url(url).map(|_| ())
 }
@@ -1667,6 +1670,12 @@ fn format_progress(page: &PageResult, index: usize, max_pages: usize) -> String 
 }
 
 fn crawl_status_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("NOXA_CRAWL_STATUS_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".noxa")
@@ -1848,9 +1857,8 @@ fn run_status(domain: &str) {
     let key_input = domain
         .strip_prefix("https://")
         .or_else(|| domain.strip_prefix("http://"))
-        .unwrap_or(domain)
-        .strip_prefix("www.")
         .unwrap_or(domain);
+    let key_input = key_input.strip_prefix("www.").unwrap_or(key_input);
     let key: String = key_input
         .chars()
         .map(|c| {
@@ -2598,12 +2606,15 @@ async fn run_watch_single(
                 &watch_ops_log,
                 url,
                 Op::Diff,
-                || serde_json::json!({
-                    "source": "watch",
-                    "interval_secs": cli.watch_interval
-                }),
+                || {
+                    serde_json::json!({
+                        "source": "watch",
+                        "interval_secs": cli.watch_interval
+                    })
+                },
                 || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
-            ).await;
+            )
+            .await;
 
             // is_initial_baseline suppresses --on-change on the first reconciliation
             // write when there was no stored snapshot (avoids spurious triggers on startup).
@@ -2768,13 +2779,16 @@ async fn run_watch_multi(
                         &multi_ops_log,
                         url,
                         Op::Diff,
-                        || serde_json::json!({
-                            "source": "watch",
-                            "interval_secs": cli.watch_interval,
-                            "check_number": check_number
-                        }),
+                        || {
+                            serde_json::json!({
+                                "source": "watch",
+                                "interval_secs": cli.watch_interval,
+                                "check_number": check_number
+                            })
+                        },
                         || entry.clone(),
-                    ).await;
+                    )
+                    .await;
                 }
             }
 
@@ -2844,14 +2858,19 @@ async fn run_diff(
 
     // Append diff result to ops log.
     let ops_log = build_ops_log(cli, resolved);
-    let url = cli.urls.first().map(|u| normalize_url(u)).unwrap_or_default();
+    let url = cli
+        .urls
+        .first()
+        .map(|u| normalize_url(u))
+        .unwrap_or_default();
     log_operation(
         &ops_log,
         &url,
         Op::Diff,
         || serde_json::json!({ "source": "file", "snapshot": snapshot_path }),
         || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
-    ).await;
+    )
+    .await;
 
     print_diff_output(&diff, &resolved.format);
     Ok(())
@@ -2872,7 +2891,8 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         Op::Brand,
         || serde_json::json!({}),
         || serde_json::to_value(&brand).unwrap_or(serde_json::Value::Null),
-    ).await;
+    )
+    .await;
 
     let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
     println!("{output}");
@@ -2980,14 +3000,17 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Extract,
-            || serde_json::json!({
-                "kind": "json",
-                "schema": schema,
-                "provider": provider.name(),
-                "model": model
-            }),
+            || {
+                serde_json::json!({
+                    "kind": "json",
+                    "schema": schema,
+                    "provider": provider.name(),
+                    "model": model
+                })
+            },
             || extracted.clone(),
-        ).await;
+        )
+        .await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(ref prompt) = cli.extract_prompt {
@@ -3006,14 +3029,17 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Extract,
-            || serde_json::json!({
-                "kind": "prompt",
-                "prompt": prompt,
-                "provider": provider.name(),
-                "model": model
-            }),
+            || {
+                serde_json::json!({
+                    "kind": "prompt",
+                    "prompt": prompt,
+                    "provider": provider.name(),
+                    "model": model
+                })
+            },
             || extracted.clone(),
-        ).await;
+        )
+        .await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(sentences) = cli.summarize {
@@ -3032,13 +3058,16 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Summarize,
-            || serde_json::json!({
-                "sentences": sentences,
-                "provider": provider.name(),
-                "model": model
-            }),
+            || {
+                serde_json::json!({
+                    "sentences": sentences,
+                    "provider": provider.name(),
+                    "model": model
+                })
+            },
             || serde_json::Value::String(summary.clone()),
-        ).await;
+        )
+        .await;
 
         Some(summary)
     } else {
@@ -4161,7 +4190,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_operator_url_allows_localhost() {
+    fn validate_operator_url_accepts_localhost() {
         assert!(validate_operator_url("http://127.0.0.1:8080").is_ok());
         assert!(validate_operator_url("https://localhost/search").is_ok());
     }

@@ -235,36 +235,6 @@ fn parse_collection_vector_size(vectors: serde_json::Value) -> Result<usize, Rag
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_collection_vector_size;
-
-    #[test]
-    fn parses_named_vector_collection_size() {
-        let payload = serde_json::json!({
-            "default": { "size": 1024 },
-            "title": { "size": 1024 }
-        });
-
-        let size = parse_collection_vector_size(payload).expect("named vectors should parse");
-        assert_eq!(size, 1024);
-    }
-
-    #[test]
-    fn rejects_mixed_named_vector_sizes() {
-        let payload = serde_json::json!({
-            "default": { "size": 1024 },
-            "title": { "size": 768 }
-        });
-
-        let err = parse_collection_vector_size(payload).expect_err("mixed sizes should fail");
-        assert!(
-            err.to_string().contains("mismatched sizes"),
-            "unexpected error: {err}"
-        );
-    }
-}
-
 #[async_trait]
 impl VectorStore for QdrantStore {
     /// PUT /collections/{name}/points?wait=true. Returns the number of points written.
@@ -671,4 +641,34 @@ pub(crate) fn normalize_url(url: &str) -> String {
     let path = parsed.path().trim_end_matches('/').to_string();
     parsed.set_path(&path);
     parsed.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_collection_vector_size;
+
+    #[test]
+    fn parses_named_vector_collection_size() {
+        let payload = serde_json::json!({
+            "default": { "size": 1024 },
+            "title": { "size": 1024 }
+        });
+
+        let size = parse_collection_vector_size(payload).expect("named vectors should parse");
+        assert_eq!(size, 1024);
+    }
+
+    #[test]
+    fn rejects_mixed_named_vector_sizes() {
+        let payload = serde_json::json!({
+            "default": { "size": 1024 },
+            "title": { "size": 768 }
+        });
+
+        let err = parse_collection_vector_size(payload).expect_err("mixed sizes should fail");
+        assert!(
+            err.to_string().contains("mismatched sizes"),
+            "unexpected error: {err}"
+        );
+    }
 }
