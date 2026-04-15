@@ -30,7 +30,7 @@ use noxa_store::{
     FilesystemContentStore, FilesystemOperationsLog, Op, OperationEntry, domain_from_url,
     url_to_store_path,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 /// Known anti-bot challenge page titles (case-insensitive prefix match).
@@ -358,6 +358,11 @@ struct Cli {
     /// Example: noxa --status code.claude.com
     #[arg(long)]
     status: Option<String>,
+
+    /// Re-fetch all cached docs for a stored domain.
+    /// Example: noxa --refresh docs.rust-lang.org
+    #[arg(long)]
+    refresh: Option<String>,
 
     /// Return a cached doc by exact URL or fuzzy query.
     /// Example: noxa --retrieve https://code.claude.com/docs/en/setup
@@ -1668,57 +1673,315 @@ fn format_progress(page: &PageResult, index: usize, max_pages: usize) -> String 
 
 fn crawl_status_dir() -> std::path::PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("crawls")
+        .map(|home| crawl_status_dir_from_home(&home))
+        .unwrap_or_else(|| crawl_status_dir_from_home(Path::new(".")))
 }
 
-fn crawl_status_path(url: &str) -> std::path::PathBuf {
-    let key = url_to_store_path(url)
-        .components()
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
+fn crawl_status_dir_from_home(home: &Path) -> PathBuf {
+    home.join(".noxa").join("crawls")
+}
+
+fn crawl_status_key(input: &str) -> String {
+    let normalized = normalize_url(input);
+    let host = url::Url::parse(&normalized)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
+        .or_else(|| {
+            input
+                .trim()
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_else(|| "unknown".to_string());
-    crawl_status_dir().join(format!("{key}.json"))
+    let sanitized: String = host
+        .strip_prefix("www.")
+        .unwrap_or(&host)
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn crawl_status_path_for_home(home: &Path, input: &str) -> PathBuf {
+    crawl_status_dir_from_home(home).join(format!("{}.json", crawl_status_key(input)))
+}
+
+fn crawl_status_path(input: &str) -> PathBuf {
+    crawl_status_dir().join(format!("{}.json", crawl_status_key(input)))
+}
+
+fn crawl_log_path_for_home(home: &Path, input: &str) -> PathBuf {
+    crawl_status_dir_from_home(home).join(format!("{}.log", crawl_status_key(input)))
+}
+
+fn crawl_log_path(input: &str) -> PathBuf {
+    crawl_status_dir().join(format!("{}.log", crawl_status_key(input)))
+}
+
+const CRAWL_STATUS_VERSION: u8 = 1;
+
+fn crawl_status_version() -> u8 {
+    CRAWL_STATUS_VERSION
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CrawlStatusPhase {
+    Running,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrawlStatusState {
+    Running,
+    Done,
+    Stale,
+    NeverStarted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct CrawlStatusRecord {
+    #[serde(default = "crawl_status_version")]
+    version: u8,
+    url: String,
+    #[serde(default)]
+    pid: u32,
+    phase: CrawlStatusPhase,
+    #[serde(default)]
+    pages_done: usize,
+    #[serde(default)]
+    pages_ok: usize,
+    #[serde(default)]
+    pages_errors: usize,
+    #[serde(default)]
+    max_pages: usize,
+    #[serde(default)]
+    last_url: Option<String>,
+    #[serde(default)]
+    elapsed_secs: f64,
+    #[serde(default)]
+    docs_dir: String,
+    #[serde(default)]
+    excluded: usize,
+    #[serde(default)]
+    total_words: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyCrawlStatusRecord {
+    url: String,
+    #[serde(default)]
+    pid: u32,
+    #[serde(default)]
+    pages_done: usize,
+    #[serde(default)]
+    pages_ok: usize,
+    #[serde(default)]
+    pages_errors: usize,
+    #[serde(default)]
+    max_pages: usize,
+    #[serde(default)]
+    last_url: Option<String>,
+    #[serde(default)]
+    done: bool,
+    #[serde(default)]
+    elapsed_secs: f64,
+    #[serde(default)]
+    docs_dir: String,
+    #[serde(default)]
+    excluded: usize,
+    #[serde(default)]
+    total_words: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CrawlStatusOnDisk {
+    Typed(CrawlStatusRecord),
+    Legacy(LegacyCrawlStatusRecord),
+}
+
+impl From<LegacyCrawlStatusRecord> for CrawlStatusRecord {
+    fn from(value: LegacyCrawlStatusRecord) -> Self {
+        Self {
+            version: crawl_status_version(),
+            url: value.url,
+            pid: value.pid,
+            phase: if value.done {
+                CrawlStatusPhase::Done
+            } else {
+                CrawlStatusPhase::Running
+            },
+            pages_done: value.pages_done,
+            pages_ok: value.pages_ok,
+            pages_errors: value.pages_errors,
+            max_pages: value.max_pages,
+            last_url: value.last_url,
+            elapsed_secs: value.elapsed_secs,
+            docs_dir: value.docs_dir,
+            excluded: value.excluded,
+            total_words: value.total_words,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_crawl_status(
-    path: &std::path::Path,
+fn build_crawl_status(
     url: &str,
+    pid: u32,
+    phase: CrawlStatusPhase,
     pages_done: usize,
     pages_ok: usize,
     pages_errors: usize,
     max_pages: usize,
     last_url: Option<&str>,
-    done: bool,
     elapsed_secs: f64,
     docs_dir: &str,
     excluded: usize,
     total_words: usize,
-) {
-    let pid = std::process::id();
-    let payload = serde_json::json!({
-        "url": url,
-        "pid": pid,
-        "pages_done": pages_done,
-        "pages_ok": pages_ok,
-        "pages_errors": pages_errors,
-        "max_pages": max_pages,
-        "last_url": last_url,
-        "done": done,
-        "elapsed_secs": (elapsed_secs * 10.0).round() / 10.0,
-        "docs_dir": docs_dir,
-        "excluded": excluded,
-        "total_words": total_words,
-    });
+) -> CrawlStatusRecord {
+    CrawlStatusRecord {
+        version: crawl_status_version(),
+        url: url.to_string(),
+        pid,
+        phase,
+        pages_done,
+        pages_ok,
+        pages_errors,
+        max_pages,
+        last_url: last_url.map(ToOwned::to_owned),
+        elapsed_secs: (elapsed_secs * 10.0).round() / 10.0,
+        docs_dir: docs_dir.to_string(),
+        excluded,
+        total_words,
+    }
+}
+
+fn crawl_status_tmp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("json.{}.tmp", std::process::id()))
+}
+
+fn encode_crawl_status(status: &CrawlStatusRecord) -> io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(status)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn write_crawl_status_sync(path: &Path, status: &CrawlStatusRecord) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    if let Ok(bytes) = serde_json::to_vec_pretty(&payload) && std::fs::write(&tmp, &bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
+    let tmp = crawl_status_tmp_path(path);
+    let bytes = encode_crawl_status(status)?;
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+async fn write_crawl_status_async(path: PathBuf, status: CrawlStatusRecord) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
     }
+    let tmp = crawl_status_tmp_path(&path);
+    let bytes = encode_crawl_status(&status)?;
+    tokio::fs::write(&tmp, &bytes).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+fn read_crawl_status(path: &Path) -> io::Result<CrawlStatusRecord> {
+    let content = std::fs::read_to_string(path)?;
+    let parsed = serde_json::from_str::<CrawlStatusOnDisk>(&content)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(match parsed {
+        CrawlStatusOnDisk::Typed(status) => status,
+        CrawlStatusOnDisk::Legacy(status) => status.into(),
+    })
+}
+
+fn classify_crawl_status(status: Option<&CrawlStatusRecord>, pid_running: bool) -> CrawlStatusState {
+    match status {
+        None => CrawlStatusState::NeverStarted,
+        Some(status) => match status.phase {
+            CrawlStatusPhase::Done => CrawlStatusState::Done,
+            CrawlStatusPhase::Running if pid_running => CrawlStatusState::Running,
+            CrawlStatusPhase::Running => CrawlStatusState::Stale,
+        },
+    }
+}
+
+fn kill_zero_probe(pid: libc::pid_t) -> io::Result<()> {
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn is_pid_running_with<F>(pid: u32, proc_root: Option<&Path>, kill_probe: F) -> bool
+where
+    F: Fn(libc::pid_t) -> io::Result<()>,
+{
+    if pid == 0 {
+        return false;
+    }
+    if let Some(root) = proc_root {
+        return root.join(pid.to_string()).exists();
+    }
+    match kill_probe(pid as libc::pid_t) {
+        Ok(()) => true,
+        Err(error) => matches!(error.raw_os_error(), Some(code) if code == libc::EPERM),
+    }
+}
+
+fn is_pid_running(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let proc_root = Path::new("/proc");
+        if proc_root.exists() {
+            return is_pid_running_with(pid, Some(proc_root), kill_zero_probe);
+        }
+    }
+
+    is_pid_running_with(pid, None, kill_zero_probe)
+}
+
+fn write_initial_crawl_status(
+    path: &Path,
+    url: &str,
+    pid: u32,
+    max_pages: usize,
+    docs_dir: &str,
+) -> io::Result<()> {
+    let status = build_crawl_status(
+        url,
+        pid,
+        CrawlStatusPhase::Running,
+        0,
+        0,
+        0,
+        max_pages,
+        None,
+        0.0,
+        docs_dir,
+        0,
+        0,
+    );
+    write_crawl_status_sync(path, &status)
 }
 
 fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
@@ -1840,76 +2103,238 @@ trait Pipe: Sized {
 }
 impl<T> Pipe for T {}
 
-fn run_status(domain: &str) {
-    // Accept domain with or without scheme, strip www.
-    let key_input = domain
-        .strip_prefix("https://")
-        .or_else(|| domain.strip_prefix("http://"))
-        .unwrap_or(domain)
-        .strip_prefix("www.")
-        .unwrap_or(domain);
-    let key: String = key_input
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+fn sidecar_url_from_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(url) = value["url"].as_str().filter(|s| !s.is_empty()) {
+        return Some(url.to_string());
+    }
+    if let Some(url) = value["current"]["metadata"]["url"].as_str() {
+        return Some(url.to_string());
+    }
+    value["metadata"]["url"].as_str().map(|url| url.to_string())
+}
 
-    let status_path = crawl_status_dir().join(format!("{key}.json"));
-    if !status_path.exists() {
-        eprintln!("{dim}no crawl status found for{reset} {bold}{domain}{reset}");
-        eprintln!("{dim}run:{reset} {cyan}noxa --crawl {domain}{reset}");
+fn refresh_domain_dir(store_root: &Path, domain: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_url(domain.trim());
+    let component = url_to_store_path(&normalized)
+        .components()
+        .next()
+        .map(|part| part.as_os_str().to_owned())
+        .ok_or_else(|| format!("invalid refresh domain: {domain}"))?;
+    Ok(store_root.join(component))
+}
+
+async fn read_refresh_sidecar_url(json_path: &Path) -> Result<Option<String>, String> {
+    let contents = tokio::fs::read_to_string(json_path)
+        .await
+        .map_err(|e| format!("failed to read {}: {e}", json_path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("failed to parse {}: {e}", json_path.display()))?;
+    Ok(sidecar_url_from_value(&value))
+}
+
+async fn collect_refresh_urls(store_root: &Path, domain: &str) -> Result<Vec<String>, String> {
+    if !tokio::fs::try_exists(store_root)
+        .await
+        .map_err(|e| format!("failed to inspect {}: {e}", store_root.display()))?
+    {
+        return Ok(Vec::new());
+    }
+
+    let domain_dir = refresh_domain_dir(store_root, domain)?;
+    if !tokio::fs::try_exists(&domain_dir)
+        .await
+        .map_err(|e| format!("failed to inspect {}: {e}", domain_dir.display()))?
+    {
+        return Ok(Vec::new());
+    }
+
+    let canonical_root = tokio::fs::canonicalize(store_root)
+        .await
+        .map_err(|e| format!("failed to canonicalize {}: {e}", store_root.display()))?;
+    let mut stack = vec![domain_dir];
+    let mut urls = Vec::new();
+
+    while let Some(dir) = stack.pop() {
+        let canonical_dir = tokio::fs::canonicalize(&dir)
+            .await
+            .map_err(|e| format!("failed to canonicalize {}: {e}", dir.display()))?;
+        if !canonical_dir.starts_with(&canonical_root) {
+            return Err(format!(
+                "refresh traversal escaped content-store root: {}",
+                dir.display()
+            ));
+        }
+
+        let mut entries = tokio::fs::read_dir(&dir)
+            .await
+            .map_err(|e| format!("failed to read {}: {e}", dir.display()))?;
+        let mut paths = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
+        {
+            paths.push(entry.path());
+        }
+        paths.sort();
+
+        for path in paths {
+            let metadata = tokio::fs::symlink_metadata(&path)
+                .await
+                .map_err(|e| format!("failed to inspect {}: {e}", path.display()))?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            match read_refresh_sidecar_url(&path).await {
+                Ok(Some(url)) => urls.push(url),
+                Ok(None) => {}
+                Err(error) => eprintln!("{yellow}warning:{reset} {error}"),
+            }
+        }
+    }
+
+    urls.sort();
+    urls.dedup();
+    Ok(urls)
+}
+
+async fn run_refresh(
+    domain: &str,
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+) -> Result<(), String> {
+    if cli.no_store {
+        return Err("--refresh requires the content store; rerun without --no-store".into());
+    }
+
+    let domain = domain.trim();
+    if domain.is_empty() {
+        return Err("--refresh requires a domain".into());
+    }
+
+    let store_root = content_store_root(resolved.output_dir.as_deref());
+    let urls = collect_refresh_urls(&store_root, domain).await?;
+    if urls.is_empty() {
+        eprintln!("{dim}no cached docs found for{reset} {bold}{domain}{reset}");
+        eprintln!("{dim}run:{reset} {cyan}noxa --list {domain}{reset}");
+        return Ok(());
+    }
+
+    let mut fetch_config = build_fetch_config(cli, resolved);
+    fetch_config.store = None;
+    let client = FetchClient::new(fetch_config).map_err(|e| format!("client error: {e}"))?;
+    let store = FilesystemContentStore::new(&store_root);
+    let options = build_extraction_options(resolved);
+
+    let mut unchanged = 0usize;
+    let mut changed = 0usize;
+    let mut failed = 0usize;
+
+    eprintln!(
+        "\n{bold}{cyan}refresh{reset}  {bold}{domain}{reset}  {dim}({} docs){reset}\n",
+        urls.len()
+    );
+
+    for url in &urls {
+        if let Err(error) = validate_url(url).await {
+            failed += 1;
+            eprintln!("  {yellow}skip{reset}  {url}  {dim}{error}{reset}");
+            continue;
+        }
+
+        let extraction = match client.fetch_and_extract_with_options(url, &options).await {
+            Ok(extraction) => extraction,
+            Err(error) => {
+                failed += 1;
+                eprintln!("  {yellow}error{reset}  {url}  {dim}{error}{reset}");
+                continue;
+            }
+        };
+
+        let result = store
+            .write(url, &extraction)
+            .await
+            .map_err(|e| format!("failed to store {url}: {e}"))?;
+
+        if result.changed {
+            changed += 1;
+            let direction = if result.word_count_delta > 0 {
+                format!("+{}", result.word_count_delta)
+            } else {
+                result.word_count_delta.to_string()
+            };
+            eprintln!("  {green}updated{reset}  {url}  {dim}{direction} words{reset}");
+        } else {
+            unchanged += 1;
+            eprintln!("  {dim}unchanged{reset}  {url}");
+        }
+    }
+
+    eprintln!(
+        "\n  {green}{bold}✓{reset} {bold}{changed}{reset} updated  {dim}{unchanged} unchanged{reset}  {}",
+        if failed > 0 {
+            format!("{yellow}{failed} failed{reset}")
+        } else {
+            format!("{dim}0 failed{reset}")
+        }
+    );
+
+    if failed > 0 {
+        Err(format!("{failed} refreshes failed"))
+    } else {
+        Ok(())
+    }
+}
+
+fn run_status(domain: &str) {
+    let status_path = crawl_status_path(domain);
+    let status = match read_crawl_status(&status_path) {
+        Ok(status) => Some(status),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!("error reading status: {error}");
+            return;
+        }
+    };
+    let pid_running = status.as_ref().is_some_and(|status| is_pid_running(status.pid));
+    let state = classify_crawl_status(status.as_ref(), pid_running);
+
+    if matches!(state, CrawlStatusState::NeverStarted) {
+        eprintln!("\n  {dim}crawl{reset}  {bold}{cyan}{domain}{reset}  {dim}never started{reset}\n");
+        eprintln!("  {dim}run:{reset}  {cyan}noxa --crawl {domain}{reset}\n");
         return;
     }
 
-    let content = match std::fs::read_to_string(&status_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error reading status: {e}");
-            return;
-        }
-    };
-    let v: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error parsing status: {e}");
-            return;
-        }
-    };
+    let status = status.expect("status should exist for non-never-started state");
+    let url = status.url.as_str();
+    let pages_done = status.pages_done;
+    let pages_ok = status.pages_ok;
+    let pages_errors = status.pages_errors;
+    let max_pages = status.max_pages;
+    let last_url = status.last_url.as_deref().unwrap_or("");
+    let elapsed = status.elapsed_secs;
+    let pid = status.pid;
+    let docs_dir = status.docs_dir.as_str();
+    let excluded = status.excluded;
+    let total_words = status.total_words;
 
-    let url = v["url"].as_str().unwrap_or(domain);
-    let pages_done = v["pages_done"].as_u64().unwrap_or(0);
-    let pages_ok = v["pages_ok"].as_u64().unwrap_or(0);
-    let pages_errors = v["pages_errors"].as_u64().unwrap_or(0);
-    let max_pages = v["max_pages"].as_u64().unwrap_or(0);
-    let last_url = v["last_url"].as_str().unwrap_or("");
-    let done_flag = v["done"].as_bool().unwrap_or(false);
-    let elapsed = v["elapsed_secs"].as_f64().unwrap_or(0.0);
-    let pid = v["pid"].as_u64().unwrap_or(0);
-    let docs_dir = v["docs_dir"].as_str().unwrap_or("");
-    let excluded = v["excluded"].as_u64().unwrap_or(0);
-    let total_words = v["total_words"].as_u64().unwrap_or(0);
-
-    // Check if process is still alive
-    let running =
-        !done_flag && pid > 0 && { std::path::Path::new(&format!("/proc/{pid}")).exists() };
-
-    // Also treat as done if pages_done hit the limit and process is no longer running
-    let done = done_flag || (!running && max_pages > 0 && pages_done >= max_pages);
-
-    let state_label = if done {
-        format!("{green}{bold}done{reset}")
-    } else if running {
-        format!("{yellow}{bold}running{reset}")
-    } else {
-        format!("{dim}stopped{reset}")
+    let state_label = match state {
+        CrawlStatusState::Done => format!("{green}{bold}done{reset}"),
+        CrawlStatusState::Running => format!("{yellow}{bold}running{reset}"),
+        CrawlStatusState::Stale => format!("{yellow}{bold}stale{reset}"),
+        CrawlStatusState::NeverStarted => unreachable!(),
     };
 
-    let pages_display = if done {
+    let done = matches!(state, CrawlStatusState::Done);
+    let pages_display = if done || max_pages == 0 {
         format!("{bold}{pages_done}{reset}")
     } else {
         format!("{bold}{pages_done}{reset}{dim}/{max_pages}{reset}")
@@ -1945,9 +2370,12 @@ fn run_status(domain: &str) {
     if !last_url.is_empty() && !done {
         eprintln!("  {dim}last{reset}     {pink}{last_url}{reset}");
     }
-    if running {
+    if matches!(state, CrawlStatusState::Running) {
         eprintln!("  {dim}pid{reset}      {dim}{pid}{reset}");
         eprintln!("\n  {dim}noxa --crawl {url} --wait{reset}  {dim}to stream live progress{reset}");
+    }
+    if matches!(state, CrawlStatusState::Stale) && pid > 0 {
+        eprintln!("  {dim}pid{reset}      {dim}{pid}{reset}");
     }
     if done {
         // Strip scheme for cleaner display in hints
@@ -1981,7 +2409,7 @@ fn spawn_crawl_background(cli: &Cli, resolved: &config::ResolvedConfig) {
 
     let url = cli.urls.first().map(|s| s.as_str()).unwrap_or("?");
     let status_path = crawl_status_path(&normalize_url(url));
-    let log_path = status_path.with_extension("log");
+    let log_path = crawl_log_path(&normalize_url(url));
     if let Some(p) = log_path.parent() {
         let _ = std::fs::create_dir_all(p);
     }
@@ -2022,6 +2450,15 @@ fn spawn_crawl_background(cli: &Cli, resolved: &config::ResolvedConfig) {
 
     match cmd.spawn() {
         Ok(child) => {
+            if let Err(error) = write_initial_crawl_status(
+                &status_path,
+                &normalize_url(url),
+                child.id(),
+                resolved.max_pages,
+                &domain_dir.to_string_lossy(),
+            ) {
+                eprintln!("warning: failed to write initial crawl status: {error}");
+            }
             eprintln!(
                 "\n  {green}{bold}✓ crawl started{reset}  {bold}{cyan}{url}{reset}\n\
                  \n\
@@ -2124,20 +2561,14 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
     // Status file: ~/.noxa/crawls/<domain>.json — updated each page
     let status_path = crawl_status_path(url);
     let start_time = std::time::Instant::now();
-    write_crawl_status(
+    write_initial_crawl_status(
         &status_path,
         url,
-        0,
-        0,
-        0,
+        std::process::id(),
         max_pages,
-        None,
-        false,
-        0.0,
         &docs_dir_str,
-        0,
-        0,
-    );
+    )
+    .map_err(|e| format!("failed to write crawl status: {e}"))?;
 
     let status_path_bg = status_path.clone();
     let url_for_status = url.to_string();
@@ -2159,20 +2590,23 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
             if print_progress {
                 eprintln!("{}", format_progress(&page, count, max_pages));
             }
-            write_crawl_status(
-                &status_path_bg,
+            let status = build_crawl_status(
                 &url_for_status,
+                std::process::id(),
+                CrawlStatusPhase::Running,
                 count,
                 ok,
                 errors,
                 max_pages,
                 Some(&page.url),
-                false,
                 start_time.elapsed().as_secs_f64(),
                 &docs_dir_bg,
                 0,
                 0,
             );
+            if let Err(error) = write_crawl_status_async(status_path_bg.clone(), status).await {
+                eprintln!("warning: failed to update crawl status: {error}");
+            }
         }
     });
 
@@ -2190,20 +2624,23 @@ async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         .filter_map(|p| p.extraction.as_ref())
         .map(|e| e.metadata.word_count)
         .sum();
-    write_crawl_status(
-        &status_path,
+    let final_status = build_crawl_status(
         url,
+        std::process::id(),
+        CrawlStatusPhase::Done,
         result.total,
         result.ok,
         result.errors,
         max_pages,
         None,
-        true,
         result.elapsed_secs,
         &docs_dir_str,
         result.excluded,
         final_words,
     );
+    write_crawl_status_async(status_path.clone(), final_status)
+        .await
+        .map_err(|e| format!("failed to finalize crawl status: {e}"))?;
 
     // If cancelled via Ctrl+C and --crawl-state is set, save state for resume
     let was_cancelled = cancel_flag.load(Ordering::Relaxed);
@@ -3823,6 +4260,14 @@ async fn main() {
         return;
     }
 
+    if let Some(ref domain) = cli.refresh {
+        if let Err(e) = run_refresh(domain, &cli, &resolved).await {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+        return;
+    }
+
     if let Some(ref query) = cli.retrieve {
         run_retrieve(query, content_store_root(resolved.output_dir.as_deref()));
         return;
@@ -4000,6 +4445,43 @@ async fn main() {
 mod tests {
     use super::*;
 
+    fn sample_extraction(url: &str, markdown: &str) -> ExtractionResult {
+        ExtractionResult {
+            metadata: Metadata {
+                title: Some("Example".to_string()),
+                description: None,
+                author: None,
+                published_date: None,
+                language: Some("en".to_string()),
+                url: Some(url.to_string()),
+                site_name: Some("Example".to_string()),
+                image: None,
+                favicon: None,
+                word_count: markdown.split_whitespace().count(),
+                content_hash: None,
+                source_type: None,
+                file_path: None,
+                last_modified: None,
+                is_truncated: None,
+                technologies: Vec::new(),
+                seed_url: None,
+                crawl_depth: None,
+                search_query: None,
+                fetched_at: None,
+            },
+            content: noxa_core::Content {
+                markdown: markdown.to_string(),
+                plain_text: markdown.to_string(),
+                links: Vec::new(),
+                images: Vec::new(),
+                code_blocks: Vec::new(),
+                raw_html: None,
+            },
+            domain_data: None,
+            structured_data: Vec::new(),
+        }
+    }
+
     #[test]
     fn url_to_filename_root() {
         assert_eq!(
@@ -4163,6 +4645,247 @@ mod tests {
         assert_eq!(clamp_search_scrape_concurrency(0), 1);
         assert_eq!(clamp_search_scrape_concurrency(50), 20);
         assert_eq!(clamp_search_scrape_concurrency(4), 4);
+    }
+
+    fn sample_crawl_status(phase: CrawlStatusPhase) -> CrawlStatusRecord {
+        CrawlStatusRecord {
+            version: 1,
+            url: "https://code.claude.com".to_string(),
+            pid: 4242,
+            phase,
+            pages_done: 7,
+            pages_ok: 6,
+            pages_errors: 1,
+            max_pages: 20,
+            last_url: Some("https://code.claude.com/docs".to_string()),
+            elapsed_secs: 12.3,
+            docs_dir: "/tmp/docs".to_string(),
+            excluded: 2,
+            total_words: 1234,
+        }
+    }
+
+    #[test]
+    fn refresh_flag_requires_a_domain_value() {
+        let parsed = Cli::try_parse_from(["noxa", "--refresh", "docs.rust-lang.org"]).unwrap();
+        assert_eq!(parsed.refresh.as_deref(), Some("docs.rust-lang.org"));
+
+        assert!(Cli::try_parse_from(["noxa", "--refresh"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn collect_refresh_urls_is_domain_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("content");
+        tokio::fs::create_dir_all(&store_root).await.unwrap();
+        let store = FilesystemContentStore::new(&store_root);
+        store
+            .write(
+                "https://docs.rust-lang.org/book/",
+                &sample_extraction("https://docs.rust-lang.org/book/", "Rust book"),
+            )
+            .await
+            .unwrap();
+        store
+            .write(
+                "https://example.com/",
+                &sample_extraction("https://example.com/", "Example"),
+            )
+            .await
+            .unwrap();
+
+        let urls = collect_refresh_urls(&store_root, "docs.rust-lang.org")
+            .await
+            .unwrap();
+        assert_eq!(urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collect_refresh_urls_skips_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("content");
+        let outside_dir = dir.path().join("outside");
+        tokio::fs::create_dir_all(&store_root).await.unwrap();
+        tokio::fs::create_dir_all(&outside_dir).await.unwrap();
+        let store = FilesystemContentStore::new(&store_root);
+        store
+            .write(
+                "https://docs.rust-lang.org/book/",
+                &sample_extraction("https://docs.rust-lang.org/book/", "Rust book"),
+            )
+            .await
+            .unwrap();
+        let domain_dir = refresh_domain_dir(&store_root, "docs.rust-lang.org").unwrap();
+        tokio::fs::write(
+            outside_dir.join("evil.json"),
+            serde_json::json!({
+                "url": "https://attacker.example/secret",
+                "current": { "metadata": { "url": "https://attacker.example/secret" } }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        symlink(&outside_dir, domain_dir.join("escape")).unwrap();
+
+        let urls = collect_refresh_urls(&store_root, "docs.rust-lang.org")
+            .await
+            .unwrap();
+        assert_eq!(urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
+    }
+
+    #[test]
+    fn crawl_status_lookup_normalizes_domain_scheme_and_www() {
+        let home = tempfile::tempdir().unwrap();
+        let expected = home
+            .path()
+            .join(".noxa/crawls")
+            .join("code_claude_com.json");
+
+        assert_eq!(
+            crawl_status_path_for_home(home.path(), "code.claude.com"),
+            expected
+        );
+        assert_eq!(
+            crawl_status_path_for_home(home.path(), "https://code.claude.com"),
+            expected
+        );
+        assert_eq!(
+            crawl_status_path_for_home(home.path(), "https://www.code.claude.com/docs"),
+            expected
+        );
+    }
+
+    #[test]
+    fn crawl_status_record_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let expected = sample_crawl_status(CrawlStatusPhase::Running);
+
+        write_crawl_status_sync(&path, &expected).unwrap();
+
+        let actual = read_crawl_status(&path).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn crawl_status_reader_accepts_legacy_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "url": "https://code.claude.com",
+                "pid": 99,
+                "pages_done": 3,
+                "pages_ok": 3,
+                "pages_errors": 0,
+                "max_pages": 12,
+                "last_url": "https://code.claude.com/docs",
+                "done": false,
+                "elapsed_secs": 4.2,
+                "docs_dir": "/tmp/docs",
+                "excluded": 1,
+                "total_words": 900,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let actual = read_crawl_status(&path).unwrap();
+        assert_eq!(actual.phase, CrawlStatusPhase::Running);
+        assert_eq!(actual.pid, 99);
+        assert_eq!(actual.pages_done, 3);
+        assert_eq!(actual.docs_dir, "/tmp/docs");
+    }
+
+    #[test]
+    fn crawl_status_classifier_covers_every_state() {
+        let running = sample_crawl_status(CrawlStatusPhase::Running);
+        let done = sample_crawl_status(CrawlStatusPhase::Done);
+
+        assert_eq!(classify_crawl_status(None, false), CrawlStatusState::NeverStarted);
+        assert_eq!(
+            classify_crawl_status(Some(&running), true),
+            CrawlStatusState::Running
+        );
+        assert_eq!(
+            classify_crawl_status(Some(&running), false),
+            CrawlStatusState::Stale
+        );
+        assert_eq!(
+            classify_crawl_status(Some(&done), false),
+            CrawlStatusState::Done
+        );
+    }
+
+    #[test]
+    fn linux_liveness_prefers_proc_when_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc_root = dir.path();
+        std::fs::create_dir_all(proc_root.join("777")).unwrap();
+
+        let called = std::cell::Cell::new(false);
+        let running = is_pid_running_with(777, Some(proc_root), |_pid| {
+            called.set(true);
+            Ok(())
+        });
+
+        assert!(running);
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn liveness_falls_back_to_signal_probe_without_proc() {
+        let running = is_pid_running_with(888, None, |pid| {
+            assert_eq!(pid, 888);
+            Ok(())
+        });
+        let stale = is_pid_running_with(999, None, |_pid| {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        });
+        let protected = is_pid_running_with(1000, None, |_pid| {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        });
+
+        assert!(running);
+        assert!(!stale);
+        assert!(protected);
+    }
+
+    #[test]
+    fn initial_background_status_write_is_running_and_log_path_is_preserved() {
+        let home = tempfile::tempdir().unwrap();
+        let status_path = crawl_status_path_for_home(home.path(), "https://code.claude.com");
+
+        write_initial_crawl_status(&status_path, "https://code.claude.com", 321, 50, "/tmp/docs")
+            .unwrap();
+
+        let actual = read_crawl_status(&status_path).unwrap();
+        assert_eq!(actual.phase, CrawlStatusPhase::Running);
+        assert_eq!(actual.pid, 321);
+        assert_eq!(
+            crawl_log_path_for_home(home.path(), "https://code.claude.com/docs"),
+            home.path().join(".noxa/crawls").join("code_claude_com.log")
+        );
+    }
+
+    #[tokio::test]
+    async fn async_crawl_status_write_persists_without_blocking_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let expected = sample_crawl_status(CrawlStatusPhase::Done);
+
+        write_crawl_status_async(path.clone(), expected.clone())
+            .await
+            .unwrap();
+
+        let actual = read_crawl_status(&path).unwrap();
+        assert_eq!(actual, expected);
     }
 }
 

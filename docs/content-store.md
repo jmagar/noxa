@@ -41,6 +41,8 @@
 
 - **Single canonical location** for all content, regardless of how it was obtained
   (scrape, crawl, batch, search, MCP).
+- **Domain-scoped refresh** — `noxa --refresh <domain>` re-fetches stored URLs for one
+  domain through the existing content-store write path; there is no implicit whole-store refresh.
 - **One document per URL** — re-fetching the same URL updates in place; never creates duplicates.
 - **Full history** — every fetch that changes content appends a `ContentDiff` entry to the
   per-URL sidecar. The sidecar is a master changelog, not a last-diff snapshot.

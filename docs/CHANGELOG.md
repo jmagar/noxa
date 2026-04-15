@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **`--refresh <domain>`**: re-fetch every cached document for one stored domain through the existing content-store write path. Refresh stays domain-scoped, validates sidecar URLs with the async URL validator, and does not imply a whole-store sweep.
+
+### Changed
+- **`--status` now uses a typed crawl-status model**: background crawl status supports `running`, `done`, `stale`, and `never-started`, normalizes scheme-bearing inputs consistently, and uses cross-platform liveness checks (`/proc` on Linux, `kill(pid, 0)` elsewhere).
+
 ---
 
 ## [0.5.0] — 2026-04-13

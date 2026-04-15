@@ -474,6 +474,9 @@ noxa --retrieve "rust async book"
 
 # Check background crawl status
 noxa --status docs.rust-lang.org
+
+# Re-fetch all cached docs for one stored domain
+noxa --refresh docs.rust-lang.org
 ```
 
 ### Save to Files
