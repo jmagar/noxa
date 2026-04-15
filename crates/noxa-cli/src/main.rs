@@ -1765,7 +1765,6 @@ fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
     let terms: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
 
     let mut scored: Vec<(usize, String, std::path::PathBuf)> = Vec::new();
-    collect_docs(&store_root, &store_root, &mut Vec::new());
 
     // Walk and score inline to avoid a second pass
     let mut all_docs: Vec<(String, std::path::PathBuf)> = Vec::new();
