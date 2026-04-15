@@ -5,8 +5,8 @@
 //! **Concurrency notes:**
 //! - `O_APPEND` guarantees the seek-to-end + write is atomic at the kernel
 //!   level (inode lock), but `write_all()` may issue multiple `write(2)`
-//!   syscalls for large buffers. If two writers (threads or processes) append
-//!   entries that each exceed the OS page size, partial lines can interleave.
+//!   syscalls for large buffers. If an entry is emitted via multiple
+//!   `write(2)` calls, concurrent writers can still interleave partial lines.
 //! - The `OUTPUT_SIZE_LIMIT` truncation keeps most entries small, but this
 //!   module does **not** guarantee corruption-free concurrent writes for
 //!   entries near that limit.
