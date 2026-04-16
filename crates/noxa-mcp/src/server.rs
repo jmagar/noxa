@@ -12,8 +12,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde_json::json;
+use noxa_store::{parse_http_url, validate_public_http_url};
 use tracing::{error, info, warn};
-use url::Url;
 
 use crate::cloud::{self, CloudClient, SmartFetchResult};
 use crate::tools::*;
@@ -37,124 +37,13 @@ fn parse_browser(browser: Option<&str>) -> noxa_fetch::BrowserProfile {
     }
 }
 
-/// Validate an operator-supplied base URL (for example `SEARXNG_URL`).
-/// This only enforces non-empty `http`/`https` URLs with a host present.
-/// Unlike fetched target URLs, localhost/private addresses are allowed.
-fn parse_http_url(url: &str) -> Result<Url, String> {
-    if url.is_empty() {
-        return Err("Invalid URL: must not be empty".into());
-    }
-
-    let parsed = Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        s => {
-            return Err(format!(
-                "Invalid URL: scheme '{s}' not allowed, must start with http:// or https://"
-            ));
-        }
-    }
-    parsed
-        .host_str()
-        .ok_or("Invalid URL: no host".to_string())?;
-    Ok(parsed)
-}
-
-/// Returns true if the IP address is loopback, private, link-local, or otherwise reserved.
-fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()                               // 127.0.0.0/8
-                || v4.is_unspecified()                     // 0.0.0.0
-                || v4.is_link_local()                      // 169.254.0.0/16 (IMDS)
-                || octets[0] == 10                         // 10.0.0.0/8
-                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) // 172.16-31.x
-                || (octets[0] == 192 && octets[1] == 168) // 192.168.0.0/16
-                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127) // 100.64.0.0/10 (Tailscale/CGNAT)
-        }
-        std::net::IpAddr::V6(v6) => {
-            // Unmap IPv4-mapped addresses (::ffff:x.x.x.x) and check as IPv4.
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_ip(std::net::IpAddr::V4(v4));
-            }
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()                         // ::1
-                || v6.is_unspecified()               // ::
-                || v6.is_multicast()                 // ff00::/8
-                || (seg0 & 0xffc0) == 0xfe80         // fe80::/10 link-local
-                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7  unique-local (ULA)
-        }
-    }
-}
-
 /// Validate that a URL is non-empty, has an http/https scheme, and does not target
 /// private/loopback/reserved hosts (SSRF prevention).
 ///
 /// For literal IP addresses the check is synchronous. For hostnames all A/AAAA
 /// records are resolved and rejected if any resolves to a private range.
 async fn validate_url(url: &str) -> Result<(), String> {
-    validate_url_impl(url, |host| async move {
-        tokio::net::lookup_host(host)
-            .await
-            .map(|iter| iter.collect::<Vec<_>>())
-    })
-    .await
-}
-
-/// Inner validation logic with an injectable resolver for deterministic testing.
-/// `resolve` receives `"host:80"` and returns the resolved socket addresses.
-async fn validate_url_impl<F, Fut>(url: &str, resolve: F) -> Result<(), String>
-where
-    F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
-{
-    if url.is_empty() {
-        return Err("Invalid URL: must not be empty".into());
-    }
-    let parsed = Url::parse(url)
-        .map_err(|e| format!("Invalid URL: {e}. Must start with http:// or https://"))?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(format!(
-            "Invalid URL: scheme '{}' not allowed, must start with http:// or https://",
-            parsed.scheme()
-        ));
-    }
-    let Some(host) = parsed.host_str() else {
-        return Ok(());
-    };
-    let lower = host.to_lowercase();
-
-    if lower == "localhost" || lower.ends_with(".localhost") {
-        return Err(format!(
-            "Invalid URL: host '{host}' is a private or reserved address"
-        ));
-    }
-
-    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
-        if is_private_ip(ip) {
-            return Err(format!(
-                "Invalid URL: host '{host}' is a private or reserved address"
-            ));
-        }
-    } else {
-        // Resolve hostname; reject if any resolved address is private (fail-closed).
-        match resolve(format!("{host}:80")).await {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_private_ip(addr.ip()) {
-                        return Err(format!(
-                            "Invalid URL: host '{host}' resolves to a private or reserved address"
-                        ));
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(format!("Invalid URL: could not resolve host '{host}': {e}"));
-            }
-        }
-    }
-    Ok(())
+    validate_public_http_url(url).await
 }
 
 /// Timeout for local fetch calls (prevents hanging on tarpitting servers).
@@ -1100,54 +989,6 @@ mod tests {
         // Uses a literal IP — no DNS needed, fast.
         assert!(validate_url("http://8.8.8.8/").await.is_ok());
         assert!(validate_url("http://1.1.1.1/").await.is_ok());
-    }
-
-    // Use validate_url_impl with a mock resolver to test the DNS path without
-    // hitting the network. This keeps hostname validation covered in all CI environments.
-
-    #[tokio::test]
-    async fn validate_accepts_hostname_resolving_to_public() {
-        let result = validate_url_impl("http://example.com/", |_| async {
-            // Simulate example.com → 93.184.216.34 (IANA-assigned, public)
-            Ok(vec![
-                "93.184.216.34:80".parse::<std::net::SocketAddr>().unwrap(),
-            ])
-        })
-        .await;
-        assert!(
-            result.is_ok(),
-            "hostname resolving to a public IP should be accepted"
-        );
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_hostname_resolving_to_private() {
-        let result = validate_url_impl("http://attacker.example/", |_| async {
-            // Simulate DNS rebinding: attacker.example → 192.168.1.1 (private)
-            Ok(vec![
-                "192.168.1.1:80".parse::<std::net::SocketAddr>().unwrap(),
-            ])
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "hostname resolving to a private IP should be rejected"
-        );
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_hostname_dns_failure() {
-        let result = validate_url_impl("http://nxdomain.example/", |_| async {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no such host",
-            ))
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "DNS failure should be rejected (fail-closed)"
-        );
     }
 
     #[tokio::test]
