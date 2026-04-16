@@ -416,7 +416,12 @@ mod tests {
                             "token_estimate": 123,
                             "file_path": "/tmp/report.md",
                             "last_modified": "2026-04-15T12:34:56Z",
-                            "git_branch": "main"
+                            "git_branch": "main",
+                            "email_to": ["team@example.com"],
+                            "email_message_id": "msg@example.com",
+                            "feed_url": "https://example.com/feed.xml",
+                            "pptx_slide_count": 12,
+                            "subtitle_source_file": "demo.mp4"
                         }
                     }
                 ]
@@ -460,6 +465,14 @@ mod tests {
             Some("2026-04-15T12:34:56Z")
         );
         assert_eq!(result.git_branch.as_deref(), Some("main"));
+        assert_eq!(result.email_to, vec!["team@example.com".to_string()]);
+        assert_eq!(result.email_message_id.as_deref(), Some("msg@example.com"));
+        assert_eq!(
+            result.feed_url.as_deref(),
+            Some("https://example.com/feed.xml")
+        );
+        assert_eq!(result.pptx_slide_count, Some(12));
+        assert_eq!(result.subtitle_source_file.as_deref(), Some("demo.mp4"));
     }
 
     #[tokio::test]
@@ -682,6 +695,39 @@ impl VectorStore for QdrantStore {
                 }
                 if let Some(v) = p.payload.crawl_depth {
                     payload.insert("crawl_depth".into(), json!(v));
+                }
+                if !p.payload.email_to.is_empty() {
+                    payload.insert("email_to".into(), json!(p.payload.email_to));
+                }
+                if let Some(v) = &p.payload.email_message_id {
+                    payload.insert("email_message_id".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.email_thread_id {
+                    payload.insert("email_thread_id".into(), json!(v));
+                }
+                if let Some(v) = p.payload.email_has_attachments {
+                    payload.insert("email_has_attachments".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.feed_url {
+                    payload.insert("feed_url".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.feed_item_id {
+                    payload.insert("feed_item_id".into(), json!(v));
+                }
+                if let Some(v) = p.payload.pptx_slide_count {
+                    payload.insert("pptx_slide_count".into(), json!(v));
+                }
+                if let Some(v) = p.payload.pptx_has_notes {
+                    payload.insert("pptx_has_notes".into(), json!(v));
+                }
+                if let Some(v) = p.payload.subtitle_start_s {
+                    payload.insert("subtitle_start_s".into(), json!(v));
+                }
+                if let Some(v) = p.payload.subtitle_end_s {
+                    payload.insert("subtitle_end_s".into(), json!(v));
+                }
+                if let Some(v) = &p.payload.subtitle_source_file {
+                    payload.insert("subtitle_source_file".into(), json!(v));
                 }
                 QdrantPoint {
                     id: p.id.to_string(),
@@ -949,6 +995,48 @@ impl VectorStore for QdrantStore {
                             .get("git_branch")
                             .and_then(|v| v.as_str())
                             .map(String::from);
+                        let email_to = payload
+                            .get("email_to")
+                            .and_then(|v| v.as_array())
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(|value| value.as_str().map(String::from))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let email_message_id = payload
+                            .get("email_message_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let email_thread_id = payload
+                            .get("email_thread_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let email_has_attachments = payload
+                            .get("email_has_attachments")
+                            .and_then(|v| v.as_bool());
+                        let feed_url = payload
+                            .get("feed_url")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let feed_item_id = payload
+                            .get("feed_item_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let pptx_slide_count = payload
+                            .get("pptx_slide_count")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|v| u32::try_from(v).ok());
+                        let pptx_has_notes =
+                            payload.get("pptx_has_notes").and_then(|v| v.as_bool());
+                        let subtitle_start_s =
+                            payload.get("subtitle_start_s").and_then(|v| v.as_f64());
+                        let subtitle_end_s = payload.get("subtitle_end_s").and_then(|v| v.as_f64());
+                        let subtitle_source_file = payload
+                            .get("subtitle_source_file")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         Some(SearchResult {
                             text,
                             url,
@@ -965,6 +1053,17 @@ impl VectorStore for QdrantStore {
                             file_path,
                             last_modified,
                             git_branch,
+                            email_to,
+                            email_message_id,
+                            email_thread_id,
+                            email_has_attachments,
+                            feed_url,
+                            feed_item_id,
+                            pptx_slide_count,
+                            pptx_has_notes,
+                            subtitle_start_s,
+                            subtitle_end_s,
+                            subtitle_source_file,
                         })
                     }
                     _ => {

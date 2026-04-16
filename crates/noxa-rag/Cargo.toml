@@ -18,6 +18,8 @@ noxa-fetch = { workspace = true }
 # Multi-format ingestion
 zip = "2"                         # DOCX, ODT, PPTX (ZIP archives) — matches noxa-fetch version
 quick-xml = "0.37"                # XML/OPML/RSS and DOCX word/document.xml — matches noxa-fetch version
+feed-rs = "2.3"                   # RSS / Atom parsing
+mailparse = "0.16"                # RFC 822 / MIME email parsing
 strip-ansi-escapes = "0.2"        # .log file preprocessing
 
 # Async runtime

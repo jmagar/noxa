@@ -80,6 +80,29 @@ pub struct PointPayload {
     pub search_query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crawl_depth: Option<u32>,
+    // ── Source-specific metadata ─────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email_to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_has_attachments: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pptx_slide_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pptx_has_notes: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_start_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_end_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_source_file: Option<String>,
 }
 
 /// A search result returned by VectorStore::search().
@@ -111,6 +134,28 @@ pub struct SearchResult {
     pub last_modified: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email_to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_has_attachments: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pptx_slide_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pptx_has_notes: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_start_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_end_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_source_file: Option<String>,
 }
 
 /// Narrow metadata filter for vector search.
@@ -157,6 +202,28 @@ pub struct IngestionContext {
     pub search_query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crawl_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email_to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_has_attachments: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pptx_slide_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pptx_has_notes: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_start_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_end_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_source_file: Option<String>,
 }
 
 #[cfg(test)]
@@ -173,7 +240,16 @@ mod tests {
             "token_estimate": 123,
             "file_path": "/tmp/report.md",
             "last_modified": "2026-04-15T12:34:56Z",
-            "git_branch": "main"
+            "git_branch": "main",
+            "email_to": ["team@example.com"],
+            "email_message_id": "<msg@example.com>",
+            "feed_url": "https://example.com/feed.xml",
+            "feed_item_id": "entry-1",
+            "pptx_slide_count": 12,
+            "pptx_has_notes": true,
+            "subtitle_start_s": 1.25,
+            "subtitle_end_s": 9.75,
+            "subtitle_source_file": "demo.mp4"
         });
 
         let result: SearchResult =
@@ -185,5 +261,20 @@ mod tests {
             Some("2026-04-15T12:34:56Z")
         );
         assert_eq!(result.git_branch.as_deref(), Some("main"));
+        assert_eq!(result.email_to, vec!["team@example.com".to_string()]);
+        assert_eq!(
+            result.email_message_id.as_deref(),
+            Some("<msg@example.com>")
+        );
+        assert_eq!(
+            result.feed_url.as_deref(),
+            Some("https://example.com/feed.xml")
+        );
+        assert_eq!(result.feed_item_id.as_deref(), Some("entry-1"));
+        assert_eq!(result.pptx_slide_count, Some(12));
+        assert_eq!(result.pptx_has_notes, Some(true));
+        assert_eq!(result.subtitle_start_s, Some(1.25));
+        assert_eq!(result.subtitle_end_s, Some(9.75));
+        assert_eq!(result.subtitle_source_file.as_deref(), Some("demo.mp4"));
     }
 }

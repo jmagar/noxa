@@ -477,7 +477,7 @@ impl Pipeline {
 /// We check existence because rename events (vim/emacs atomic saves) may fire for
 /// temp files that are gone by the time we process them.
 ///
-/// Deferred (no confirmed use case, would add new crate deps): .epub, .eml, .mbox
+/// Deferred (no confirmed use case, would add new crate deps): .epub, .mbox
 fn is_indexable(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
@@ -500,6 +500,8 @@ fn is_indexable(path: &Path) -> bool {
         | "vtt" | "srt"
         // RSS / Atom
         | "rss" | "atom"
+        // RFC 822 email
+        | "eml"
     ) && path.exists()
 }
 
@@ -630,6 +632,28 @@ struct IngestionProvenance {
     search_query: Option<String>,
     #[serde(default)]
     crawl_depth: Option<u32>,
+    #[serde(default)]
+    email_to: Vec<String>,
+    #[serde(default)]
+    email_message_id: Option<String>,
+    #[serde(default)]
+    email_thread_id: Option<String>,
+    #[serde(default)]
+    email_has_attachments: Option<bool>,
+    #[serde(default)]
+    feed_url: Option<String>,
+    #[serde(default)]
+    feed_item_id: Option<String>,
+    #[serde(default)]
+    pptx_slide_count: Option<u32>,
+    #[serde(default)]
+    pptx_has_notes: Option<bool>,
+    #[serde(default)]
+    subtitle_start_s: Option<f64>,
+    #[serde(default)]
+    subtitle_end_s: Option<f64>,
+    #[serde(default)]
+    subtitle_source_file: Option<String>,
 }
 
 fn json_string(value: &serde_json::Value) -> Option<String> {
@@ -664,6 +688,7 @@ fn extract_ingestion_provenance(value: &serde_json::Value) -> IngestionProvenanc
         crawl_depth: top_value("crawl_depth")
             .and_then(json_u32)
             .or_else(|| metadata_value("crawl_depth").and_then(json_u32)),
+        ..IngestionProvenance::default()
     }
 }
 
@@ -683,6 +708,17 @@ fn merge_provenance(
             .clone()
             .or_else(|| metadata.search_query.clone()),
         crawl_depth: provenance.crawl_depth.or(metadata.crawl_depth),
+        email_to: provenance.email_to.clone(),
+        email_message_id: provenance.email_message_id.clone(),
+        email_thread_id: provenance.email_thread_id.clone(),
+        email_has_attachments: provenance.email_has_attachments,
+        feed_url: provenance.feed_url.clone(),
+        feed_item_id: provenance.feed_item_id.clone(),
+        pptx_slide_count: provenance.pptx_slide_count,
+        pptx_has_notes: provenance.pptx_has_notes,
+        subtitle_start_s: provenance.subtitle_start_s,
+        subtitle_end_s: provenance.subtitle_end_s,
+        subtitle_source_file: provenance.subtitle_source_file.clone(),
     }
 }
 
@@ -718,6 +754,17 @@ fn build_point_payload(
         seed_url: provenance.seed_url,
         search_query: provenance.search_query,
         crawl_depth: provenance.crawl_depth,
+        email_to: provenance.email_to,
+        email_message_id: provenance.email_message_id,
+        email_thread_id: provenance.email_thread_id,
+        email_has_attachments: provenance.email_has_attachments,
+        feed_url: provenance.feed_url,
+        feed_item_id: provenance.feed_item_id,
+        pptx_slide_count: provenance.pptx_slide_count,
+        pptx_has_notes: provenance.pptx_has_notes,
+        subtitle_start_s: provenance.subtitle_start_s,
+        subtitle_end_s: provenance.subtitle_end_s,
+        subtitle_source_file: provenance.subtitle_source_file,
     }
 }
 
@@ -737,8 +784,8 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError>
     match ext {
         // ── JSON ExtractionResult ──────────────────────────────────────────────
         "json" => {
-            let value: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|e| RagError::Parse(format!("JSON parse failed: {e}")))?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|e| RagError::Parse(format!("JSON parse failed: {e}")))?;
             let extraction = serde_json::from_value::<ExtractionResult>(value.clone())
                 .map_err(|e| RagError::Parse(format!("JSON parse failed: {e}")))?;
             Ok(ParsedFile {
@@ -833,27 +880,33 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError>
             }),
 
         // ── Office binary formats (ZIP-based) ─────────────────────────────────
-        "docx" => tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "docx"))
-            .await
-            .map_err(|e| RagError::Parse(format!("DOCX spawn_blocking: {e}")))?
-            .map(|extraction| ParsedFile {
-                extraction,
-                provenance: IngestionProvenance::default(),
-            }),
-        "odt" => tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "odt"))
-            .await
-            .map_err(|e| RagError::Parse(format!("ODT spawn_blocking: {e}")))?
-            .map(|extraction| ParsedFile {
-                extraction,
-                provenance: IngestionProvenance::default(),
-            }),
-        "pptx" => tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "pptx"))
-            .await
-            .map_err(|e| RagError::Parse(format!("PPTX spawn_blocking: {e}")))?
-            .map(|extraction| ParsedFile {
-                extraction,
-                provenance: IngestionProvenance::default(),
-            }),
+        "docx" => {
+            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "docx"))
+                .await
+                .map_err(|e| RagError::Parse(format!("DOCX spawn_blocking: {e}")))?
+                .map(|(extraction, provenance)| ParsedFile {
+                    extraction,
+                    provenance,
+                })
+        }
+        "odt" => {
+            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "odt"))
+                .await
+                .map_err(|e| RagError::Parse(format!("ODT spawn_blocking: {e}")))?
+                .map(|(extraction, provenance)| ParsedFile {
+                    extraction,
+                    provenance,
+                })
+        }
+        "pptx" => {
+            tokio::task::spawn_blocking(move || parse_office_zip(&bytes, file_url, title, "pptx"))
+                .await
+                .map_err(|e| RagError::Parse(format!("PPTX spawn_blocking: {e}")))?
+                .map(|(extraction, provenance)| ParsedFile {
+                    extraction,
+                    provenance,
+                })
+        }
 
         // ── Structured text (.jsonl .xml .opml .rss .atom) ────────────────────
         "jsonl" => {
@@ -881,7 +934,7 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError>
                 provenance: IngestionProvenance::default(),
             })
         }
-        "xml" | "opml" | "rss" | "atom" => {
+        "xml" | "opml" => {
             let content = as_text(&bytes);
             let text = extract_xml_text(&content);
             let word_count = text.split_whitespace().count();
@@ -897,11 +950,29 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError>
                 provenance: IngestionProvenance::default(),
             })
         }
+        "rss" | "atom" => {
+            let content = as_text(&bytes);
+            let (extraction, provenance) = parse_feed_file(&content, file_url, title)?;
+            Ok(ParsedFile {
+                extraction,
+                provenance,
+            })
+        }
+
+        // ── Email (.eml) ──────────────────────────────────────────────────────
+        "eml" => {
+            let (extraction, provenance) = parse_email_file(&bytes, file_url, title)?;
+            Ok(ParsedFile {
+                extraction,
+                provenance,
+            })
+        }
 
         // ── Subtitle / transcript (.vtt .srt) ─────────────────────────────────
         "vtt" | "srt" => {
             let content = as_text(&bytes);
             let text = strip_subtitle_timestamps(&content);
+            let provenance = subtitle_provenance(&content);
             let word_count = text.split_whitespace().count();
             Ok(ParsedFile {
                 extraction: make_text_result(
@@ -912,7 +983,7 @@ async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError>
                     "file",
                     word_count,
                 ),
-                provenance: IngestionProvenance::default(),
+                provenance,
             })
         }
 
@@ -966,6 +1037,302 @@ fn make_text_result(
         domain_data: None,
         structured_data: Vec::new(),
     }
+}
+
+fn parse_email_file(
+    bytes: &[u8],
+    file_url: String,
+    title: String,
+) -> Result<(ExtractionResult, IngestionProvenance), RagError> {
+    use mailparse::{MailHeaderMap, addrparse_header, parse_mail};
+
+    let parsed = parse_mail(bytes).map_err(|e| RagError::Parse(format!("EML parse: {e}")))?;
+    let headers = parsed.get_headers();
+
+    let subject = headers
+        .get_first_value("Subject")
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| Some(title.clone()));
+    let to = parsed
+        .headers
+        .get_first_header("To")
+        .and_then(|header| addrparse_header(header).ok())
+        .map(|addresses| {
+            addresses
+                .iter()
+                .flat_map(flatten_mail_addrs)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let message_id = headers
+        .get_first_value("Message-ID")
+        .map(|value| normalize_message_id(&value));
+    let thread_id = email_thread_id(&headers);
+    let published_date = headers
+        .get_first_value("Date")
+        .and_then(|value| mailparse::dateparse(&value).ok())
+        .and_then(|timestamp| chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0))
+        .map(|dt| dt.to_rfc3339());
+    let body = collect_email_body(&parsed);
+    let author = parsed
+        .headers
+        .get_first_header("From")
+        .and_then(|header| addrparse_header(header).ok())
+        .and_then(|addresses| addresses.iter().flat_map(flatten_mail_addrs).next());
+    let has_attachments = parsed.parts().skip(1).any(|part| {
+        part.get_content_disposition().disposition == mailparse::DispositionType::Attachment
+            || part
+                .get_content_disposition()
+                .params
+                .contains_key("filename")
+    });
+    let word_count = body.split_whitespace().count();
+
+    let mut extraction =
+        make_text_result(body.clone(), body, file_url, subject, "email", word_count);
+    extraction.metadata.author = author;
+    extraction.metadata.published_date = published_date;
+
+    Ok((
+        extraction,
+        IngestionProvenance {
+            external_id: message_id.clone(),
+            email_to: to,
+            email_message_id: message_id,
+            email_thread_id: thread_id,
+            email_has_attachments: Some(has_attachments),
+            ..IngestionProvenance::default()
+        },
+    ))
+}
+
+fn parse_feed_file(
+    content: &str,
+    file_url: String,
+    title: String,
+) -> Result<(ExtractionResult, IngestionProvenance), RagError> {
+    let feed = feed_rs::parser::parse(content.as_bytes())
+        .map_err(|e| RagError::Parse(format!("feed parse: {e}")))?;
+
+    let feed_title = feed
+        .title
+        .as_ref()
+        .map(|value| value.content.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| Some(title.clone()));
+    let primary_entry = feed.entries.first();
+    let entry_title = primary_entry
+        .and_then(|entry| entry.title.as_ref())
+        .map(|value| value.content.clone())
+        .filter(|value| !value.is_empty());
+    let primary_author = primary_entry
+        .and_then(|entry| entry.authors.first())
+        .map(|author| author.name.clone())
+        .or_else(|| feed.authors.first().map(|author| author.name.clone()));
+    let published_date = primary_entry
+        .and_then(|entry| entry.published.or(entry.updated))
+        .or(feed.published.or(feed.updated))
+        .map(|dt| dt.to_rfc3339());
+    let feed_url = feed
+        .links
+        .first()
+        .map(|link| link.href.clone())
+        .or_else(|| {
+            primary_entry
+                .and_then(|entry| entry.links.first())
+                .map(|link| link.href.clone())
+        });
+    let feed_item_id = primary_entry
+        .map(|entry| entry.id.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let mut parts = Vec::new();
+    for entry in &feed.entries {
+        if let Some(value) = entry
+            .title
+            .as_ref()
+            .map(|text| text.content.trim())
+            .filter(|v| !v.is_empty())
+        {
+            parts.push(value.to_string());
+        }
+        if let Some(value) = entry
+            .summary
+            .as_ref()
+            .map(|text| text.content.trim())
+            .filter(|v| !v.is_empty())
+        {
+            parts.push(value.to_string());
+        }
+        if let Some(value) = entry
+            .content
+            .as_ref()
+            .and_then(|content| content.body.as_ref())
+            .map(|body| body.trim())
+            .filter(|v| !v.is_empty())
+        {
+            parts.push(value.to_string());
+        }
+    }
+    if parts.is_empty() {
+        parts.push(extract_xml_text(content));
+    }
+    let text = parts.join("\n\n");
+    let word_count = text.split_whitespace().count();
+
+    let mut extraction = make_text_result(
+        text.clone(),
+        text,
+        file_url,
+        entry_title.or_else(|| feed_title.clone()),
+        "file",
+        word_count,
+    );
+    extraction.metadata.author = primary_author;
+    extraction.metadata.published_date = published_date;
+    extraction.metadata.site_name = feed_title;
+    extraction.metadata.language = feed.language.clone();
+
+    Ok((
+        extraction,
+        IngestionProvenance {
+            external_id: feed_item_id.clone().or_else(|| {
+                let id = feed.id.trim();
+                (!id.is_empty()).then(|| id.to_string())
+            }),
+            feed_url,
+            feed_item_id,
+            ..IngestionProvenance::default()
+        },
+    ))
+}
+
+fn flatten_mail_addrs(addrs: &mailparse::MailAddr) -> Vec<String> {
+    match addrs {
+        mailparse::MailAddr::Single(info) => vec![info.addr.clone()],
+        mailparse::MailAddr::Group(group) => group
+            .addrs
+            .iter()
+            .map(|info| info.addr.clone())
+            .collect::<Vec<_>>(),
+    }
+}
+
+fn normalize_message_id(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_string()
+}
+
+fn email_thread_id(headers: &mailparse::headers::Headers<'_>) -> Option<String> {
+    use mailparse::MailHeaderMap;
+
+    fn parse_first_message_id(value: &str) -> Option<String> {
+        mailparse::msgidparse(value)
+            .ok()
+            .and_then(|ids| ids.first().cloned())
+            .map(|value| normalize_message_id(&value))
+    }
+
+    headers
+        .get_first_header("References")
+        .and_then(|header| parse_first_message_id(&header.get_value()))
+        .or_else(|| {
+            headers
+                .get_first_header("In-Reply-To")
+                .and_then(|header| parse_first_message_id(&header.get_value()))
+        })
+}
+
+fn collect_email_body(parsed: &mailparse::ParsedMail<'_>) -> String {
+    let mut plain_parts = Vec::new();
+    let mut html_parts = Vec::new();
+    for part in parsed.parts() {
+        if part.ctype.mimetype == "text/plain" {
+            if let Ok(body) = part.get_body() {
+                let trimmed = body.trim();
+                if !trimmed.is_empty() {
+                    plain_parts.push(trimmed.to_string());
+                }
+            }
+        } else if part.ctype.mimetype == "text/html"
+            && let Ok(body) = part.get_body()
+        {
+            let trimmed = body.trim();
+            if !trimmed.is_empty() {
+                html_parts.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if !plain_parts.is_empty() {
+        plain_parts.join("\n\n")
+    } else if !html_parts.is_empty() {
+        html_parts.join("\n\n")
+    } else {
+        parsed.get_body().unwrap_or_default()
+    }
+}
+
+fn subtitle_provenance(content: &str) -> IngestionProvenance {
+    let mut start_s = None;
+    let mut end_s = None;
+    let mut source_file = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("NOTE source:")
+            .or_else(|| trimmed.strip_prefix("NOTE Source:"))
+            .or_else(|| trimmed.strip_prefix("SOURCE FILE:"))
+        {
+            let value = rest.trim();
+            if !value.is_empty() {
+                source_file = Some(value.to_string());
+            }
+        }
+
+        if let Some((start, end)) = parse_subtitle_range(trimmed) {
+            start_s = Some(start_s.map_or(start, |current: f64| current.min(start)));
+            end_s = Some(end_s.map_or(end, |current: f64| current.max(end)));
+        }
+    }
+
+    IngestionProvenance {
+        subtitle_start_s: start_s,
+        subtitle_end_s: end_s,
+        subtitle_source_file: source_file,
+        ..IngestionProvenance::default()
+    }
+}
+
+fn parse_subtitle_range(line: &str) -> Option<(f64, f64)> {
+    let (start, end) = line.split_once("-->")?;
+    let start_s = parse_subtitle_timestamp(start.trim())?;
+    let end_token = end.split_whitespace().next()?;
+    let end_s = parse_subtitle_timestamp(end_token.trim())?;
+    Some((start_s, end_s))
+}
+
+fn parse_subtitle_timestamp(value: &str) -> Option<f64> {
+    let value = value.replace(',', ".");
+    let parts: Vec<&str> = value.split(':').collect();
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [hours, minutes, seconds] => (
+            hours.parse::<f64>().ok()?,
+            minutes.parse::<f64>().ok()?,
+            seconds.parse::<f64>().ok()?,
+        ),
+        [minutes, seconds] => (
+            0.0,
+            minutes.parse::<f64>().ok()?,
+            seconds.parse::<f64>().ok()?,
+        ),
+        _ => return None,
+    };
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
 /// Parse a Jupyter Notebook (.ipynb) — must run in spawn_blocking.
@@ -1042,7 +1409,7 @@ fn parse_office_zip(
     url: String,
     title: String,
     ext: &str,
-) -> Result<ExtractionResult, RagError> {
+) -> Result<(ExtractionResult, IngestionProvenance), RagError> {
     use std::io::Read;
 
     const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024; // 100 MiB decompressed
@@ -1084,7 +1451,7 @@ fn parse_office_zip(
         if r.metadata.title.is_none() {
             r.metadata.title = Some(title);
         }
-        return Ok(r);
+        return Ok((r, IngestionProvenance::default()));
     }
 
     // ODT and PPTX: scan all XML entries for text nodes.
@@ -1096,6 +1463,8 @@ fn parse_office_zip(
     };
 
     let mut text_parts: Vec<String> = Vec::new();
+    let mut slide_count = 0u32;
+    let mut has_notes = false;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -1112,6 +1481,12 @@ fn parse_office_zip(
         let name = entry.name().to_string();
         if !name.ends_with(".xml") {
             continue;
+        }
+        if ext == "pptx" && name.contains("ppt/slides/slide") {
+            slide_count += 1;
+        }
+        if ext == "pptx" && name.contains("ppt/notesSlides/notesSlide") {
+            has_notes = true;
         }
         if !target_prefix.is_empty() && !name.contains(target_prefix) {
             continue;
@@ -1131,14 +1506,17 @@ fn parse_office_zip(
 
     let text = text_parts.join("\n\n");
     let word_count = text.split_whitespace().count();
-    Ok(make_text_result(
-        text.clone(),
-        text,
-        url,
-        Some(title),
-        "file",
-        word_count,
-    ))
+    let extraction = make_text_result(text.clone(), text, url, Some(title), "file", word_count);
+    let provenance = if ext == "pptx" {
+        IngestionProvenance {
+            pptx_slide_count: Some(slide_count),
+            pptx_has_notes: Some(has_notes),
+            ..IngestionProvenance::default()
+        }
+    } else {
+        IngestionProvenance::default()
+    };
+    Ok((extraction, provenance))
 }
 
 /// Extract plain text from XML/OPML/RSS/Atom by collecting all text nodes.
@@ -1558,12 +1936,12 @@ async fn process_job(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_point_payload, collect_indexable_paths, detect_git_branch, is_indexable, parse_file,
-        validate_url_scheme, IngestionProvenance,
+        IngestionProvenance, build_point_payload, collect_indexable_paths, detect_git_branch,
+        is_indexable, parse_file, validate_url_scheme,
     };
+    use serde_json::json;
     use std::fs;
     use std::io::Write;
-    use serde_json::json;
 
     #[test]
     fn collect_indexable_paths_finds_nested_supported_files() {
@@ -1592,7 +1970,7 @@ mod tests {
         for ext in &[
             "json", "md", "txt", "log", "rst", "org", "yaml", "yml", "toml", "html", "htm",
             "ipynb", "pdf", "docx", "odt", "pptx", "jsonl", "xml", "opml", "vtt", "srt", "rss",
-            "atom",
+            "atom", "eml",
         ] {
             let path = root.join(format!("file.{ext}"));
             fs::write(&path, "x").expect("write file");
@@ -1604,7 +1982,7 @@ mod tests {
     fn is_indexable_rejects_deferred_extensions() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
-        for ext in &["epub", "eml", "mbox"] {
+        for ext in &["epub", "mbox"] {
             let path = root.join(format!("file.{ext}"));
             fs::write(&path, "x").expect("write file");
             assert!(
@@ -1703,7 +2081,10 @@ mod tests {
             parsed.extraction.metadata.search_query.as_deref(),
             Some("rust agent")
         );
-        assert_eq!(parsed.provenance.external_id.as_deref(), Some("linkding:42"));
+        assert_eq!(
+            parsed.provenance.external_id.as_deref(),
+            Some("linkding:42")
+        );
         assert_eq!(
             parsed.provenance.platform_url.as_deref(),
             Some("https://platform.example/items/42")
@@ -1717,6 +2098,81 @@ mod tests {
             Some("rust agent")
         );
         assert_eq!(parsed.provenance.crawl_depth, Some(2));
+    }
+
+    #[tokio::test]
+    async fn parse_file_json_keeps_crawler_provenance_in_point_payload() {
+        // Matches the noxa-fetch crawler shape: it stamps seed_url and crawl_depth
+        // onto ExtractionResult::metadata before serializing the page to JSON.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("crawl.json");
+        let body = json!({
+            "metadata": {
+                "title": "Crawled page",
+                "description": null,
+                "author": "Crawler",
+                "published_date": null,
+                "language": "en",
+                "url": "https://example.com/articles/42",
+                "site_name": "Example",
+                "image": null,
+                "favicon": null,
+                "word_count": 6,
+                "content_hash": null,
+                "source_type": "web",
+                "file_path": null,
+                "last_modified": null,
+                "is_truncated": null,
+                "technologies": [],
+                "seed_url": "https://seed.example/",
+                "crawl_depth": 2,
+                "search_query": null,
+                "fetched_at": null
+            },
+            "content": {
+                "markdown": "alpha beta gamma delta epsilon zeta",
+                "plain_text": "alpha beta gamma delta epsilon zeta",
+                "links": [],
+                "images": [],
+                "code_blocks": [],
+                "raw_html": null
+            },
+            "domain_data": null,
+            "structured_data": []
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize json");
+        fs::write(&path, &bytes).expect("write file");
+
+        let parsed = parse_file(&path, bytes).await.expect("parse json");
+        let url = parsed
+            .extraction
+            .metadata
+            .url
+            .as_deref()
+            .expect("parser should set file url");
+        let chunk = crate::types::Chunk {
+            text: parsed.extraction.content.markdown.clone(),
+            source_url: url.to_string(),
+            domain: "example.com".to_string(),
+            chunk_index: 0,
+            total_chunks: 1,
+            char_offset: 0,
+            token_estimate: 6,
+        };
+
+        let payload =
+            build_point_payload(&chunk, &parsed.extraction, None, &parsed.provenance, url);
+        let json = serde_json::to_value(&payload).expect("serialize payload");
+
+        assert_eq!(
+            json.get("seed_url").and_then(|v| v.as_str()),
+            Some("https://seed.example/")
+        );
+        assert_eq!(json.get("crawl_depth").and_then(|v| v.as_u64()), Some(2));
+        assert!(
+            json.get("search_query").is_none(),
+            "crawler provenance should not invent a search query"
+        );
     }
 
     #[test]
@@ -1770,15 +2226,21 @@ mod tests {
             seed_url: None,
             search_query: None,
             crawl_depth: None,
+            email_to: vec!["team@example.com".to_string()],
+            email_message_id: Some("msg@example.com".to_string()),
+            email_thread_id: Some("thread@example.com".to_string()),
+            email_has_attachments: Some(true),
+            feed_url: Some("https://example.com/feed.xml".to_string()),
+            feed_item_id: Some("entry-1".to_string()),
+            pptx_slide_count: Some(12),
+            pptx_has_notes: Some(true),
+            subtitle_start_s: Some(1.25),
+            subtitle_end_s: Some(9.75),
+            subtitle_source_file: Some("demo.mp4".to_string()),
         };
 
-        let payload = build_point_payload(
-            &chunk,
-            &extraction,
-            None,
-            &provenance,
-            &chunk.source_url,
-        );
+        let payload =
+            build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url);
         let json = serde_json::to_value(&payload).expect("serialize payload");
 
         assert_eq!(
@@ -1798,6 +2260,28 @@ mod tests {
             Some("rust agent")
         );
         assert_eq!(json.get("crawl_depth").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            json.get("email_to")
+                .and_then(|v| v.as_array())
+                .map(|values| values.len()),
+            Some(1)
+        );
+        assert_eq!(
+            json.get("email_message_id").and_then(|v| v.as_str()),
+            Some("msg@example.com")
+        );
+        assert_eq!(
+            json.get("feed_url").and_then(|v| v.as_str()),
+            Some("https://example.com/feed.xml")
+        );
+        assert_eq!(
+            json.get("pptx_slide_count").and_then(|v| v.as_u64()),
+            Some(12)
+        );
+        assert_eq!(
+            json.get("subtitle_source_file").and_then(|v| v.as_str()),
+            Some("demo.mp4")
+        );
     }
 
     // ─── validate_url_scheme ────────────────────────────────────────────────────
@@ -2015,12 +2499,7 @@ mod tests {
                 !result.extraction.content.markdown.is_empty(),
                 "{filename}: markdown should not be empty"
             );
-            let url = result
-                .extraction
-                .metadata
-                .url
-                .as_deref()
-                .expect("url set");
+            let url = result.extraction.metadata.url.as_deref().expect("url set");
             assert!(
                 url.starts_with("file://"),
                 "{filename}: url should be file://"
@@ -2182,6 +2661,57 @@ mod tests {
         cursor.into_inner()
     }
 
+    fn build_minimal_pptx(slides: &[&str], include_notes: bool) -> Vec<u8> {
+        let buf = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(buf);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        for (index, text) in slides.iter().enumerate() {
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:txBody>
+          <a:p><a:r><a:t>{text}</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"#
+            );
+            zip.start_file(format!("ppt/slides/slide{}.xml", index + 1), options)
+                .expect("start pptx slide");
+            zip.write_all(xml.as_bytes()).expect("write pptx slide xml");
+        }
+
+        if include_notes {
+            let notes = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+         xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:txBody>
+          <a:p><a:r><a:t>Speaker notes</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:notes>"#;
+            zip.start_file("ppt/notesSlides/notesSlide1.xml", options)
+                .expect("start pptx notes");
+            zip.write_all(notes.as_bytes())
+                .expect("write pptx notes xml");
+        }
+
+        let cursor = zip.finish().expect("finish pptx zip");
+        cursor.into_inner()
+    }
+
     #[tokio::test]
     async fn parse_file_docx_produces_non_empty_content() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2228,6 +2758,160 @@ mod tests {
         assert!(
             text.contains("Open document text paragraph"),
             "ODT text should contain paragraph content, got: {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_file_pptx_extracts_slide_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pptx_bytes = build_minimal_pptx(&["Slide one", "Slide two"], true);
+        let path = tmp.path().join("deck.pptx");
+        fs::write(&path, &pptx_bytes).expect("write pptx");
+
+        let result = parse_file(&path, pptx_bytes).await.expect("parse .pptx");
+
+        assert!(result.extraction.content.markdown.contains("Slide one"));
+        assert_eq!(result.provenance.pptx_slide_count, Some(2));
+        assert_eq!(result.provenance.pptx_has_notes, Some(true));
+    }
+
+    #[tokio::test]
+    async fn parse_file_eml_extracts_message_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let eml = concat!(
+            "From: Sender <sender@example.com>\r\n",
+            "To: Alpha <alpha@example.com>, beta@example.com\r\n",
+            "Subject: Demo email\r\n",
+            "Date: Sun, 02 Oct 2016 07:06:22 -0700\r\n",
+            "Message-ID: <msg-1@example.com>\r\n",
+            "References: <thread-root@example.com> <older@example.com>\r\n",
+            "Content-Type: multipart/mixed; boundary=frontier\r\n",
+            "\r\n",
+            "--frontier\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Hello from the body.\r\n",
+            "--frontier\r\n",
+            "Content-Type: application/octet-stream\r\n",
+            "Content-Disposition: attachment; filename=\"demo.txt\"\r\n",
+            "\r\n",
+            "ZmlsZQ==\r\n",
+            "--frontier--\r\n"
+        );
+
+        let result = run_parse_file(tmp.path(), "message.eml", eml.as_bytes())
+            .await
+            .expect("parse .eml");
+
+        assert_eq!(
+            result.extraction.metadata.source_type.as_deref(),
+            Some("email")
+        );
+        assert_eq!(
+            result.extraction.metadata.title.as_deref(),
+            Some("Demo email")
+        );
+        assert_eq!(
+            result.extraction.metadata.author.as_deref(),
+            Some("sender@example.com")
+        );
+        assert!(
+            result
+                .extraction
+                .content
+                .markdown
+                .contains("Hello from the body.")
+        );
+        assert_eq!(
+            result.provenance.email_to,
+            vec![
+                "alpha@example.com".to_string(),
+                "beta@example.com".to_string()
+            ]
+        );
+        assert_eq!(
+            result.provenance.email_message_id.as_deref(),
+            Some("msg-1@example.com")
+        );
+        assert_eq!(
+            result.provenance.email_thread_id.as_deref(),
+            Some("thread-root@example.com")
+        );
+        assert_eq!(result.provenance.email_has_attachments, Some(true));
+        assert_eq!(
+            result.provenance.external_id.as_deref(),
+            Some("msg-1@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_file_rss_extracts_feed_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rss = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Feed</title>
+    <link>https://example.com/</link>
+    <language>en-us</language>
+    <item>
+      <title>Entry One</title>
+      <description>Interesting entry text.</description>
+      <link>https://example.com/posts/1</link>
+      <guid>entry-1</guid>
+      <pubDate>Sun, 06 Sep 2009 16:20:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>"#;
+
+        let result = run_parse_file(tmp.path(), "feed.rss", rss.as_bytes())
+            .await
+            .expect("parse .rss");
+
+        assert_eq!(
+            result.extraction.metadata.site_name.as_deref(),
+            Some("Example Feed")
+        );
+        assert_eq!(
+            result.extraction.metadata.title.as_deref(),
+            Some("Entry One")
+        );
+        assert!(
+            result
+                .extraction
+                .content
+                .markdown
+                .contains("Interesting entry text.")
+        );
+        assert_eq!(
+            result.provenance.feed_url.as_deref(),
+            Some("https://example.com/")
+        );
+        assert_eq!(result.provenance.feed_item_id.as_deref(), Some("entry-1"));
+        assert_eq!(result.provenance.external_id.as_deref(), Some("entry-1"));
+    }
+
+    #[tokio::test]
+    async fn parse_file_vtt_extracts_subtitle_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vtt = concat!(
+            "WEBVTT\n\n",
+            "NOTE source: demo.mp4\n\n",
+            "00:00:01.250 --> 00:00:03.500\n",
+            "Hello there.\n\n",
+            "00:00:04.000 --> 00:00:09.750\n",
+            "General Kenobi.\n"
+        );
+
+        let result = run_parse_file(tmp.path(), "captions.vtt", vtt.as_bytes())
+            .await
+            .expect("parse .vtt");
+
+        assert!(result.extraction.content.markdown.contains("Hello there."));
+        assert_eq!(result.provenance.subtitle_start_s, Some(1.25));
+        assert_eq!(result.provenance.subtitle_end_s, Some(9.75));
+        assert_eq!(
+            result.provenance.subtitle_source_file.as_deref(),
+            Some("demo.mp4")
         );
     }
 
