@@ -54,6 +54,7 @@ pub struct NoxaConfig {
     pub cloud: Option<CloudConfig>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct CloudConfig {
     pub provider: Option<String>,
@@ -191,6 +192,7 @@ pub struct ResolvedConfig {
     pub output_dir: Option<PathBuf>,
 
     // Cloud
+    #[allow(dead_code)]
     pub cloud: Option<CloudConfig>,
 }
 
