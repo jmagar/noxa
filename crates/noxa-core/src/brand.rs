@@ -18,9 +18,9 @@ mod tests;
 use colors::extract_colors;
 use css::collect_css;
 use fonts::extract_fonts;
-use logos::{extract_brand_name, find_all_logos, find_favicon, find_logo, find_og_image};
 #[cfg(test)]
 pub(crate) use fonts::{extract_font_name_from_url, extract_google_fonts_from_url};
+use logos::{extract_brand_name, find_all_logos, find_favicon, find_logo, find_og_image};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrandColor {

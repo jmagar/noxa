@@ -1,18 +1,16 @@
 use std::collections::HashSet;
 
 use ego_tree::NodeId;
-use scraper::node::Node;
 use scraper::ElementRef;
+use scraper::node::Node;
 use url::Url;
 
 use crate::noise;
 use crate::types::{CodeBlock, Image, Link};
 
-use super::assets::{
-    collect_assets_from_noise, extract_language_from_class, pick_best_srcset,
-};
+use super::assets::{collect_assets_from_noise, extract_language_from_class, pick_best_srcset};
 use super::blocks::{cell_has_block_content, list_items, table_to_md};
-use super::{resolve_url, CODE_SELECTOR, ConvertedAssets, MAX_DOM_DEPTH};
+use super::{CODE_SELECTOR, ConvertedAssets, MAX_DOM_DEPTH, resolve_url};
 
 pub(super) fn node_to_md(
     element: ElementRef<'_>,

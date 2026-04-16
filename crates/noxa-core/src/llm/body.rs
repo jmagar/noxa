@@ -13,12 +13,12 @@ use blocks::{
     dedup_comma_lists, dedup_content_blocks, dedup_lines, merge_stat_lines, strip_empty_code_blocks,
 };
 use headings::{
-    dedup_duplicate_headings, dedup_heading_paragraph, dedup_text_against_headings, strip_empty_headings,
-    strip_trailing_empty_headings,
+    dedup_duplicate_headings, dedup_heading_paragraph, dedup_text_against_headings,
+    strip_empty_headings, strip_trailing_empty_headings,
 };
-use repeated::dedup_repeated_phrases;
 #[cfg(test)]
 pub(crate) use repeated::collapse_repeated_in_line;
+use repeated::dedup_repeated_phrases;
 
 pub(crate) struct ProcessedBody {
     pub text: String,

@@ -297,8 +297,7 @@ fn social_avatar_labels_stripped() {
 
 #[test]
 fn repeated_brand_list_stripped() {
-    let input =
-        "Supabase DB, Supabase Auth, Supabase Functions, Supabase Storage, Supabase Vector";
+    let input = "Supabase DB, Supabase Auth, Supabase Functions, Supabase Storage, Supabase Vector";
     assert_eq!(strip_alt_text_noise(input), "");
 }
 

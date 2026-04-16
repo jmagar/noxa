@@ -9,12 +9,12 @@ use url::Url;
 use crate::markdown;
 use crate::types::{Content, ExtractionOptions};
 
+#[cfg(test)]
+mod form_integration_tests;
 mod include;
 mod recovery;
 mod scoring;
 mod selectors;
-#[cfg(test)]
-mod form_integration_tests;
 #[cfg(test)]
 mod tests;
 
@@ -24,8 +24,8 @@ use recovery::{
     recover_section_headings,
 };
 use scoring::find_best_node;
-use selectors::build_exclude_set;
 pub use scoring::word_count;
+use selectors::build_exclude_set;
 
 static CANDIDATE_SELECTOR: Lazy<Selector> =
     Lazy::new(|| Selector::parse("article, main, [role='main'], div, section, td").unwrap());

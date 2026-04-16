@@ -27,7 +27,8 @@ pub(crate) fn collapse_word_lists(input: &str) -> String {
             let dump_len = words.len() - start_idx;
             if dump_len > 20 {
                 let prose_part: Vec<&str> = words[..start_idx].to_vec();
-                let dump_preview: Vec<&str> = words[start_idx..start_idx + 3.min(dump_len)].to_vec();
+                let dump_preview: Vec<&str> =
+                    words[start_idx..start_idx + 3.min(dump_len)].to_vec();
                 if prose_part.is_empty() {
                     out.push_str(&format!(
                         "{} ... and {} more",

@@ -115,7 +115,8 @@ pub(crate) fn dedup_duplicate_headings(input: &str) -> String {
             let dup_following = collect_following_content(&lines, dup_idx);
             for (offset, dup_line) in dup_following.iter().enumerate() {
                 if offset < first_following.len()
-                    && normalize_heading_key(dup_line) == normalize_heading_key(&first_following[offset])
+                    && normalize_heading_key(dup_line)
+                        == normalize_heading_key(&first_following[offset])
                 {
                     let actual_idx = find_content_line_index(&lines, dup_idx, offset);
                     skip.insert(actual_idx);

@@ -3,7 +3,7 @@ use url::Url;
 
 use crate::types::{Image, Link};
 
-use super::{resolve_url, ConvertedAssets};
+use super::{ConvertedAssets, resolve_url};
 
 const KNOWN_LANGS: &[&str] = &[
     "javascript",

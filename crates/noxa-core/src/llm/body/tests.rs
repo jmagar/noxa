@@ -18,8 +18,7 @@ fn collapse_repeated_phrase_triple() {
 
 #[test]
 fn dedup_duplicate_headings_removes() {
-    let input =
-        "## Features\n\nGreat stuff\n\n## Other\n\nMore\n\n## Features\n\nGreat stuff\n";
+    let input = "## Features\n\nGreat stuff\n\n## Other\n\nMore\n\n## Features\n\nGreat stuff\n";
     let result = dedup_duplicate_headings(input);
     assert_eq!(result.matches("## Features").count(), 1);
     assert!(result.starts_with("## Features"));
@@ -41,8 +40,7 @@ fn dedup_duplicate_headings_no_dupes() {
 
 #[test]
 fn dedup_duplicate_headings_removes_following_content() {
-    let input =
-        "## Setup\n\nStep 1\nStep 2\n\n## Other\n\nStuff\n\n## Setup\n\nStep 1\nStep 2\n";
+    let input = "## Setup\n\nStep 1\nStep 2\n\n## Other\n\nStuff\n\n## Setup\n\nStep 1\nStep 2\n";
     let result = dedup_duplicate_headings(input);
     assert_eq!(result.matches("## Setup").count(), 1);
     assert_eq!(result.matches("Step 1").count(), 1);

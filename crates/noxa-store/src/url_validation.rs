@@ -105,9 +105,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_http_url, validate_public_http_url, validate_public_http_url_with_resolver,
-    };
+    use super::{parse_http_url, validate_public_http_url, validate_public_http_url_with_resolver};
 
     #[tokio::test]
     async fn validate_public_http_url_accepts_hostname_resolving_to_public() {

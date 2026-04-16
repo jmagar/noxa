@@ -4,8 +4,8 @@ use ego_tree::NodeId;
 use scraper::ElementRef;
 use url::Url;
 
-use super::render::{children_to_md, inline_text, node_to_md};
 use super::ConvertedAssets;
+use super::render::{children_to_md, inline_text, node_to_md};
 
 pub(super) fn list_items(
     list_el: ElementRef<'_>,

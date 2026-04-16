@@ -5,10 +5,10 @@ use url::Url;
 use crate::markdown;
 use crate::types::Link;
 
+use super::scoring::is_inside_structural_noise;
 use super::{
     A_SELECTOR, ANNOUNCEMENT_SELECTOR, FOOTER_HEADING_SELECTOR, FOOTER_SELECTOR, H2_SELECTOR,
 };
-use super::scoring::is_inside_structural_noise;
 
 pub(super) fn recover_announcements(
     doc: &Html,

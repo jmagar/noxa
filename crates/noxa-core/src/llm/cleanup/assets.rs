@@ -46,7 +46,14 @@ pub(crate) fn is_asset_label(line: &str) -> bool {
     }
     let words: Vec<&str> = line.split_whitespace().collect();
     if words.len() >= 3 && words.len() <= 12 {
-        let label_keywords = ["Art Card", "ArtCard", "Card Image", "Cover Image", "1x1", "SEO"];
+        let label_keywords = [
+            "Art Card",
+            "ArtCard",
+            "Card Image",
+            "Cover Image",
+            "1x1",
+            "SEO",
+        ];
         if label_keywords.iter().any(|kw| line.contains(kw)) {
             return true;
         }

@@ -79,7 +79,10 @@ fn is_social_avatar_label(line: &str) -> bool {
     if lower.matches("twitter image").count() >= 3 {
         return true;
     }
-    let handle_count = line.split_whitespace().filter(|w| w.starts_with('@')).count();
+    let handle_count = line
+        .split_whitespace()
+        .filter(|w| w.starts_with('@'))
+        .count();
     let avatar_count = lower.matches("avatar").count();
     handle_count >= 3 && avatar_count >= 2
 }
@@ -109,7 +112,9 @@ fn is_repeated_brand_list(line: &str) -> bool {
             *first_words.entry(fw).or_insert(0) += 1;
         }
     }
-    first_words.values().any(|&count| count * 2 > multi_word.len())
+    first_words
+        .values()
+        .any(|&count| count * 2 > multi_word.len())
 }
 
 pub(crate) fn strip_long_alt_descriptions(input: &str) -> String {
