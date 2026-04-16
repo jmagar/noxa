@@ -101,6 +101,11 @@ pub async fn build_vector_store(
                     dims = existing_dims,
                     "collection already exists with matching dimensions"
                 );
+                store.reconcile_landed_file_metadata_indexes().await?;
+                tracing::info!(
+                    collection = %collection,
+                    "reconciled landed file metadata indexes"
+                );
             } else {
                 tracing::info!(collection = %collection, dims = embed_dims, "creating collection");
                 store.create_collection(embed_dims).await?;

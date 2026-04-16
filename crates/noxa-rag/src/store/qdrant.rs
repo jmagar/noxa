@@ -7,6 +7,12 @@ use crate::error::RagError;
 use crate::store::VectorStore;
 use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
+const FILE_METADATA_INDEXES: &[(&str, &str)] = &[
+    ("file_path", "keyword"),
+    ("last_modified", "keyword"),
+    ("git_branch", "keyword"),
+];
+
 // ── REST request/response shapes ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -179,6 +185,26 @@ impl QdrantStore {
         ];
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
         for (field, schema_type) in indexes {
+            let idx_body = json!({ "field_name": field, "field_schema": schema_type });
+            let r = self.client.put(&idx_url).json(&idx_body).send().await?;
+            if !r.status().is_success() {
+                let text = r.text().await.unwrap_or_default();
+                let preview: String = text.chars().take(512).collect();
+                return Err(RagError::Store(format!(
+                    "create_field_index({field}) failed: {preview}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reconcile the landed file-metadata indexes on an already-existing collection.
+    ///
+    /// PUT to `/index` is idempotent in Qdrant, so this is safe to run on startup.
+    pub(crate) async fn reconcile_landed_file_metadata_indexes(&self) -> Result<(), RagError> {
+        let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
+        for (field, schema_type) in FILE_METADATA_INDEXES {
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {
@@ -467,6 +493,127 @@ mod tests {
         assert!(!index_fields.contains(&"seed_url".to_string()));
         assert!(!index_fields.contains(&"search_query".to_string()));
         assert!(!index_fields.contains(&"crawl_depth".to_string()));
+    }
+
+    #[tokio::test]
+    async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metadata_filter() {
+        use crate::config::{
+            ChunkerConfig, EmbedProviderConfig, PipelineConfig, RagConfig, SourceConfig,
+            VectorStoreConfig,
+        };
+        use crate::factory::build_vector_store;
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tempfile::tempdir;
+
+        let phase = Arc::new(AtomicUsize::new(0));
+        let responder_phase = Arc::clone(&phase);
+        let (base_url, requests, handle) = spawn_test_server(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/collections/noxa-test") => {
+                    let call = responder_phase.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        "{}".to_string()
+                    } else {
+                        serde_json::json!({
+                            "result": {
+                                "config": {
+                                    "params": {
+                                        "vectors": { "size": 1536 }
+                                    }
+                                }
+                            }
+                        })
+                        .to_string()
+                    }
+                }
+                ("PUT", path) if path == "/collections/noxa-test/index" => "{}".to_string(),
+                ("POST", "/collections/noxa-test/points/search") => serde_json::json!({
+                    "result": [
+                        {
+                            "score": 0.91,
+                            "payload": {
+                                "text": "chunk text",
+                                "url": "file:///tmp/report.md",
+                                "chunk_index": 2,
+                                "token_estimate": 123,
+                                "file_path": "/tmp/report.md",
+                                "last_modified": "2026-04-15T12:34:56Z",
+                                "git_branch": "main"
+                            }
+                        }
+                    ]
+                })
+                .to_string(),
+                other => panic!("unexpected request: {:?}", other),
+            }
+        })
+        .await;
+
+        let watch_dir = tempdir().expect("temp watch dir");
+        let config = RagConfig {
+            source: SourceConfig::FsWatcher {
+                watch_dir: watch_dir.path().to_path_buf(),
+                debounce_ms: 500,
+            },
+            embed_provider: EmbedProviderConfig::Tei {
+                url: "http://tei.invalid".to_string(),
+                model: "dummy".to_string(),
+                local_path: Some(PathBuf::from("/tmp/tokenizer")),
+            },
+            vector_store: VectorStoreConfig::Qdrant {
+                url: base_url.clone(),
+                collection: "noxa-test".to_string(),
+                api_key: None,
+            },
+            chunker: ChunkerConfig::default(),
+            pipeline: PipelineConfig::default(),
+            uuid_namespace: uuid::Uuid::nil(),
+        };
+
+        let store = build_vector_store(&config, 1536)
+            .await
+            .expect("build vector store");
+
+        let filter = SearchMetadataFilter {
+            file_path: Some("/tmp/report.md".to_string()),
+            last_modified: None,
+            git_branch: None,
+        };
+        let results = store
+            .search(&[0.25, 0.75], 3, Some(&filter))
+            .await
+            .expect("search");
+
+        handle.abort();
+
+        let recorded = requests.lock().unwrap();
+        let index_fields: Vec<String> = recorded
+            .iter()
+            .filter(|req| req.method == "PUT" && req.path.ends_with("/index"))
+            .map(|req| {
+                let body: serde_json::Value = serde_json::from_str(&req.body).expect("json");
+                body["field_name"].as_str().unwrap_or_default().to_string()
+            })
+            .collect();
+        assert!(index_fields.contains(&"file_path".to_string()));
+        assert!(index_fields.contains(&"last_modified".to_string()));
+        assert!(index_fields.contains(&"git_branch".to_string()));
+
+        let search_request = recorded
+            .iter()
+            .find(|req| req.method == "POST" && req.path == "/collections/noxa-test/points/search")
+            .expect("search request recorded");
+        let body: serde_json::Value = serde_json::from_str(&search_request.body).expect("json");
+        assert_eq!(body["filter"]["must"][0]["key"], "file_path");
+        assert_eq!(
+            body["filter"]["must"][0]["match"]["value"],
+            "/tmp/report.md"
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path.as_deref(), Some("/tmp/report.md"));
+        assert_eq!(results[0].git_branch.as_deref(), Some("main"));
     }
 }
 
