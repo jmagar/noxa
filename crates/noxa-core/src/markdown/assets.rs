@@ -1,9 +1,15 @@
+use once_cell::sync::Lazy;
 use scraper::{ElementRef, Selector};
 use url::Url;
 
 use crate::types::{Image, Link};
 
 use super::{ConvertedAssets, resolve_url};
+
+static IMG_ALT_SEL: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("img[alt]").unwrap());
+static A_HREF_SEL: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("a[href]").unwrap());
 
 const KNOWN_LANGS: &[&str] = &[
     "javascript",
@@ -150,7 +156,7 @@ pub(super) fn collect_assets_from_noise(
     assets: &mut ConvertedAssets,
 ) {
     // Collect images with alt text
-    for img in element.select(&Selector::parse("img[alt]").unwrap()) {
+    for img in element.select(&IMG_ALT_SEL) {
         let alt = img.value().attr("alt").unwrap_or("").to_string();
         let src = img
             .value()
@@ -163,14 +169,17 @@ pub(super) fn collect_assets_from_noise(
     }
 
     // Collect links
-    for link in element.select(&Selector::parse("a[href]").unwrap()) {
+    for link in element.select(&A_HREF_SEL) {
         let href = link
             .value()
             .attr("href")
             .map(|h| resolve_url(h, base_url))
             .unwrap_or_default();
         let text: String = link.text().collect::<String>().trim().to_string();
-        if !href.is_empty() && !text.is_empty() && href.starts_with("http") {
+        // Accept http://, https://, and protocol-relative // URLs
+        if !href.is_empty() && !text.is_empty()
+            && (href.starts_with("http") || href.starts_with("//"))
+        {
             assets.links.push(Link { text, href });
         }
     }

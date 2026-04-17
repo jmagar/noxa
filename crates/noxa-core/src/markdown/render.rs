@@ -107,8 +107,11 @@ pub(super) fn node_to_md(
                 .or_else(|| element.value().attr("data-original"))
                 .unwrap_or("");
 
-            // Skip base64 data URIs and blob URLs (they bloat markdown)
-            let src = if raw_src.starts_with("data:") || raw_src.starts_with("blob:") {
+            // Skip base64 data URIs and blob URLs (they bloat markdown).
+            // Use case-insensitive checks per RFC 3986 (schemes are case-insensitive).
+            let src = if raw_src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:"))
+                || raw_src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("blob:"))
+            {
                 String::new()
             } else {
                 resolve_url(raw_src, base_url)
@@ -210,7 +213,20 @@ pub(super) fn node_to_md(
             });
 
             let fence_lang = lang.as_deref().unwrap_or("");
-            format!("\n\n```{fence_lang}\n{code}\n```\n\n")
+            // If the code body contains backtick runs, use a longer fence to avoid
+            // premature termination of the fenced block.
+            let max_backticks = code
+                .chars()
+                .fold((0usize, 0usize), |(max, run), c| {
+                    if c == '`' {
+                        (max.max(run + 1), run + 1)
+                    } else {
+                        (max, 0)
+                    }
+                })
+                .0;
+            let fence = "`".repeat(max_backticks.max(2) + 1);
+            format!("\n\n{fence}{fence_lang}\n{code}\n{fence}\n\n")
         }
 
         // Blockquote

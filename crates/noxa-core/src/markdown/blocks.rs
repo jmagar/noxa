@@ -78,6 +78,7 @@ pub(super) fn list_items(
 
                 if !nested_lists.is_empty() {
                     out.push_str(&nested_lists);
+                    out.push('\n');
                 }
             }
         }
@@ -120,6 +121,29 @@ pub(super) fn cell_has_block_content(cell: ElementRef<'_>) -> bool {
     false
 }
 
+/// Collect `<tr>` rows that belong directly to `table`, not to nested tables.
+/// Recursively walks children but stops descending when a nested `<table>` is found.
+fn collect_table_rows<'a>(
+    node: ElementRef<'a>,
+    rows: &mut Vec<ElementRef<'a>>,
+    is_root: bool,
+) {
+    for child in node.children().filter_map(ElementRef::wrap) {
+        match child.value().name() {
+            "table" if !is_root => {
+                // Nested table — do not descend
+                continue;
+            }
+            "table" => {
+                // Root table itself: descend into it
+                collect_table_rows(child, rows, false);
+            }
+            "tr" => rows.push(child),
+            _ => collect_table_rows(child, rows, false),
+        }
+    }
+}
+
 pub(super) fn table_to_md(
     table_el: ElementRef<'_>,
     base_url: Option<&Url>,
@@ -127,40 +151,40 @@ pub(super) fn table_to_md(
     exclude: &HashSet<NodeId>,
     depth: usize,
 ) -> String {
-    // Collect all <td>/<th> cells grouped by row, and detect layout tables
+    // Collect <tr> rows belonging only to this table (not nested tables)
+    let mut tr_elements: Vec<ElementRef<'_>> = Vec::new();
+    collect_table_rows(table_el, &mut tr_elements, true);
+
     let mut raw_rows: Vec<Vec<ElementRef<'_>>> = Vec::new();
-    let mut has_header = false;
     let mut is_layout = false;
 
-    for child in table_el.descendants() {
-        if let Some(el) = ElementRef::wrap(child) {
-            if exclude.contains(&el.id()) {
-                continue;
-            }
-            if el.value().name() == "tr" {
-                let cells: Vec<ElementRef<'_>> = el
-                    .children()
-                    .filter_map(ElementRef::wrap)
-                    .filter(|c| {
-                        !exclude.contains(&c.id())
-                            && (c.value().name() == "th" || c.value().name() == "td")
-                    })
-                    .inspect(|&c| {
-                        if c.value().name() == "th" {
-                            has_header = true;
-                        }
-                        if !is_layout && cell_has_block_content(c) {
-                            is_layout = true;
-                        }
-                    })
-                    .collect();
-
-                if !cells.is_empty() {
-                    raw_rows.push(cells);
+    for tr in tr_elements {
+        if exclude.contains(&tr.id()) {
+            continue;
+        }
+        let cells: Vec<ElementRef<'_>> = tr
+            .children()
+            .filter_map(ElementRef::wrap)
+            .filter(|c| {
+                !exclude.contains(&c.id())
+                    && (c.value().name() == "th" || c.value().name() == "td")
+            })
+            .inspect(|&c| {
+                if !is_layout && cell_has_block_content(c) {
+                    is_layout = true;
                 }
-            }
+            })
+            .collect();
+
+        if !cells.is_empty() {
+            raw_rows.push(cells);
         }
     }
+
+    // Detect header: first row contains <th> elements
+    let first_row_has_th = raw_rows
+        .first()
+        .is_some_and(|row| row.iter().any(|c| c.value().name() == "th"));
 
     if raw_rows.is_empty() {
         return String::new();
@@ -220,8 +244,8 @@ pub(super) fn table_to_md(
     out.push_str(&(0..cols).map(|_| "---").collect::<Vec<_>>().join(" | "));
     out.push_str(" |\n");
 
-    // Data rows (skip first if it was a header)
-    let start = if has_header { 1 } else { 0 };
+    // Data rows (skip first row only if it was actually a header row with <th> cells)
+    let start = if first_row_has_th { 1 } else { 0 };
     for row in &rows[start..] {
         out.push_str("| ");
         out.push_str(&row.join(" | "));

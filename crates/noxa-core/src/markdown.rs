@@ -101,26 +101,24 @@ fn collapse_whitespace(s: &str) -> String {
 }
 
 fn strip_markdown(md: &str) -> String {
-    let table_syntax_removed = md
-        .replace("```", "")
-        .replace(['#', '*', '`', '[', ']', '<', '>'], "")
-        .replace("](", " ")
-        .replace(['|'], " ");
-
-    let mut result = String::with_capacity(table_syntax_removed.len());
+    let mut result = String::with_capacity(md.len());
     let mut in_code_fence = false;
-    for line in table_syntax_removed.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
+    for line in md.lines() {
+        if line.trim_start().starts_with("```") {
             in_code_fence = !in_code_fence;
+            // Drop the fence marker line itself
             continue;
         }
         if in_code_fence {
+            // Preserve code verbatim inside fences
             result.push_str(line);
-            result.push('\n');
-            continue;
+        } else {
+            let stripped = line
+                .replace(['#', '*', '`', '[', ']', '<', '>'], "")
+                .replace("](", " ")
+                .replace('|', " ");
+            result.push_str(&stripped);
         }
-        result.push_str(line);
         result.push('\n');
     }
     result.trim().to_string()

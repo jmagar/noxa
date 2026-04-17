@@ -55,12 +55,18 @@ pub(super) fn extract_fonts(decls: &[css::CssDecl]) -> Vec<String> {
 
 pub(crate) fn extract_font_name_from_url(url: &str) -> Option<String> {
     let filename = url.rsplit('/').next()?;
-    let stem = filename.split('.').next()?;
+    // Use rsplit_once to strip only the last extension, preserving dots in stem
+    let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
     let clean = stem
         .split('-')
         .take_while(|part| {
+            let lower = part.to_lowercase();
+            // Skip version tokens like v12, v3, etc.
+            if lower.starts_with('v') && lower[1..].chars().all(|c| c.is_ascii_digit()) && lower.len() > 1 {
+                return false;
+            }
             !matches!(
-                part.to_lowercase().as_str(),
+                lower.as_str(),
                 "regular"
                     | "bold"
                     | "italic"
@@ -96,12 +102,37 @@ pub(crate) fn extract_google_fonts_from_url(url: &str) -> Vec<String> {
             continue;
         };
         let name = family.split(':').next().unwrap_or(family);
-        let clean = name.replace('+', " ");
+        // Replace + with space first, then percent-decode %HH sequences
+        let with_spaces = name.replace('+', " ");
+        let clean = percent_decode(&with_spaces);
         if !clean.is_empty() {
             fonts.push(clean);
         }
     }
     fonts
+}
+
+/// Decode percent-encoded sequences (%HH) in a string.
+/// Used for Google Fonts URLs that may contain %20 instead of + for spaces.
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((hi * 16 + lo) as u8 as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 fn is_junk_font_name(name: &str) -> bool {

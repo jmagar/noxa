@@ -4,24 +4,63 @@ use regex::Regex;
 use crate::noise;
 
 pub(crate) fn strip_css_artifacts(input: &str) -> String {
-    static CSS_INLINE_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"@(?:keyframes|font-face|media|supports|layer)\s*[^{]*\{[^}]*\}?").unwrap()
-    });
-
     let mut out = String::with_capacity(input.len());
     for line in input.lines() {
         let trimmed = line.trim();
         if is_css_artifact_line(trimmed) {
             continue;
         }
-        let cleaned = CSS_INLINE_RE.replace_all(line, "");
-        let cleaned = cleaned.trim_end();
+        let cleaned = strip_css_at_rules(line);
+        let cleaned = cleaned.trim_end().to_string();
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(cleaned);
+        out.push_str(&cleaned);
     }
     out
+}
+
+/// Remove CSS at-rule blocks (`@keyframes`, `@font-face`, etc.) from a line,
+/// handling nested braces so that `@media { .a { color: red; } }` is fully removed.
+fn strip_css_at_rules(line: &str) -> String {
+    static CSS_AT_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"@(?:keyframes|font-face|media|supports|layer)\s*[^{]*").unwrap()
+    });
+
+    let mut result = line.to_string();
+    // Iteratively remove at-rule blocks with balanced brace handling
+    loop {
+        let Some(m) = CSS_AT_RE.find(&result) else {
+            break;
+        };
+        let start = m.start();
+        // Find the matching closing brace after the at-rule header
+        let after_header = m.end();
+        let bytes = result.as_bytes();
+        let Some(first_brace) = bytes[after_header..].iter().position(|&b| b == b'{') else {
+            // No opening brace — just remove the at-rule token
+            result.replace_range(start..after_header, "");
+            break;
+        };
+        let brace_start = after_header + first_brace;
+        let mut depth = 0usize;
+        let mut end = brace_start;
+        for (i, &b) in bytes[brace_start..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = brace_start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        result.replace_range(start..end, "");
+    }
+    result
 }
 
 pub(crate) fn is_css_artifact_line(trimmed: &str) -> bool {
@@ -67,6 +106,9 @@ pub(crate) fn strip_css_class_lines(input: &str) -> String {
         if !is_structural {
             let cleaned = strip_trailing_css_classes(trimmed);
             if !cleaned.is_empty() {
+                // Preserve original leading whitespace from `line`
+                let leading = &line[..line.len() - line.trim_start().len()];
+                out.push_str(leading);
                 out.push_str(&cleaned);
                 out.push('\n');
                 continue;

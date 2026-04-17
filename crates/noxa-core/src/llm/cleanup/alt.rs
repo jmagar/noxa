@@ -118,8 +118,10 @@ fn is_repeated_brand_list(line: &str) -> bool {
 }
 
 pub(crate) fn strip_long_alt_descriptions(input: &str) -> String {
+    // Anchored to line start (after optional whitespace) so we don't strip
+    // prose that merely contains this substring mid-sentence.
     static ELEMENT_DESC_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"This element contains [^.]*\.[^.]*\.(?:\s*[^.]*\.)*").unwrap());
+        Lazy::new(|| Regex::new(r"(?m)^\s*This element contains [^.]*\.[^.]*\.(?:\s*[^.]*\.)*").unwrap());
 
     let mut out = String::with_capacity(input.len());
     for line in input.lines() {

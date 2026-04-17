@@ -75,8 +75,16 @@ pub(super) fn extract_colors(decls: &[css::CssDecl]) -> Vec<BrandColor> {
         .into_iter()
         .map(|(hex, usage_map)| {
             let total: usize = usage_map.values().sum();
-            let usage = usage_map
+            // Fixed priority on ties for reproducibility: Background > Text > Accent > Unknown
+            let priority = [
+                ColorUsage::Background,
+                ColorUsage::Text,
+                ColorUsage::Accent,
+                ColorUsage::Unknown,
+            ];
+            let usage = priority
                 .into_iter()
+                .filter_map(|u| usage_map.get(&u).copied().map(|c| (u, c)))
                 .max_by_key(|(_, c)| *c)
                 .map(|(u, _)| u)
                 .unwrap_or(ColorUsage::Unknown);
@@ -88,7 +96,7 @@ pub(super) fn extract_colors(decls: &[css::CssDecl]) -> Vec<BrandColor> {
         })
         .collect();
 
-    colors.sort_by(|a, b| b.count.cmp(&a.count));
+    colors.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.hex.cmp(&b.hex)));
 
     let mut assigned_primary = colors.iter().any(|c| c.usage == ColorUsage::Primary);
     let mut assigned_secondary = colors.iter().any(|c| c.usage == ColorUsage::Secondary);
@@ -137,16 +145,16 @@ fn parse_colors_from_value(value: &str) -> Vec<String> {
     }
 
     for cap in RGB_COLOR.captures_iter(value) {
-        let r: u8 = cap[1].parse().unwrap_or(0);
-        let g: u8 = cap[2].parse().unwrap_or(0);
-        let b: u8 = cap[3].parse().unwrap_or(0);
+        let r = cap[1].parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+        let g = cap[2].parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+        let b = cap[3].parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
         colors.push(format!("#{:02X}{:02X}{:02X}", r, g, b));
     }
 
     for cap in RGBA_COLOR.captures_iter(value) {
-        let r: u8 = cap[1].parse().unwrap_or(0);
-        let g: u8 = cap[2].parse().unwrap_or(0);
-        let b: u8 = cap[3].parse().unwrap_or(0);
+        let r = cap[1].parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+        let g = cap[2].parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
+        let b = cap[3].parse::<i32>().unwrap_or(0).clamp(0, 255) as u8;
         colors.push(format!("#{:02X}{:02X}{:02X}", r, g, b));
     }
 

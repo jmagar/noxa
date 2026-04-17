@@ -81,7 +81,7 @@ pub(crate) fn collapse_repeated_in_line(line: &str) -> String {
         return line.to_string();
     }
 
-    if words.len() > 100
+    if words.len() >= 100
         && let Some(deduped) = detect_long_line_cycle(&words)
     {
         return deduped;

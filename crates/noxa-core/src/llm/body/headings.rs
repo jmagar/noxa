@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -87,13 +87,14 @@ pub(crate) fn dedup_text_against_headings(input: &str) -> String {
 pub(crate) fn dedup_duplicate_headings(input: &str) -> String {
     let lines: Vec<&str> = input.lines().collect();
 
-    let mut heading_positions: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut heading_positions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, line) in lines.iter().enumerate() {
         if let Some(caps) = HEADING_RE.captures(line.trim()) {
             let level = caps.get(1).unwrap().as_str();
             let text = caps.get(2).unwrap().as_str().trim();
-            let key = format!("{} {}", level, normalize_heading_key(text));
-            if !key.is_empty() {
+            let normalized = normalize_heading_key(text);
+            if !normalized.is_empty() {
+                let key = format!("{} {}", level, normalized);
                 heading_positions.entry(key).or_default().push(i);
             }
         }
@@ -210,10 +211,10 @@ pub(crate) fn strip_trailing_empty_headings(input: &str) -> String {
 
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if !trimmed.starts_with('#') {
+        let Some(caps) = HEADING_RE.captures(trimmed) else {
             continue;
-        }
-        let level = trimmed.chars().take_while(|&c| c == '#').count();
+        };
+        let level = caps.get(1).unwrap().as_str().len();
 
         let mut next_content = None;
         for (j, line_j) in lines.iter().enumerate().skip(i + 1) {
@@ -227,8 +228,8 @@ pub(crate) fn strip_trailing_empty_headings(input: &str) -> String {
             None => remove[i] = true,
             Some(j) => {
                 let next = lines[j].trim();
-                if next.starts_with('#') {
-                    let next_level = next.chars().take_while(|&c| c == '#').count();
+                if let Some(next_caps) = HEADING_RE.captures(next) {
+                    let next_level = next_caps.get(1).unwrap().as_str().len();
                     if next_level <= level {
                         remove[i] = true;
                     }

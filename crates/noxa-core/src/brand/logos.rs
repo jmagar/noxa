@@ -30,10 +30,10 @@ pub(super) fn find_logo(doc: &Html, base_url: Option<&Url>) -> Option<String> {
         }
     }
 
-    for el in doc.select(selector!("a[href='/'] img, a[href] img")) {
+    for el in doc.select(selector!("a[href] img")) {
         if let Some(parent) = el.parent().and_then(|p| p.value().as_element()) {
             let href = parent.attr("href").unwrap_or("");
-            if (href == "/" || href.ends_with(".com") || href.ends_with(".com/"))
+            if is_home_link(href, base_url)
                 && let Some(src) = el.value().attr("src")
             {
                 return Some(resolve_url(src, base_url));
@@ -91,19 +91,24 @@ fn clean_title_to_brand(title: &str) -> String {
             let left = title[..pos].trim();
             let right = title[pos + sep.len()..].trim();
             let page_suffixes = ["home", "homepage", "official", "welcome"];
+            // If left segment is a generic page name (e.g. "Home"), use right (the brand)
             if page_suffixes
                 .iter()
                 .any(|s| left.to_lowercase().ends_with(s))
             {
-                return left.to_string();
+                return right.to_string();
             }
+            // If right segment is a generic page name, use left (the brand)
             if page_suffixes
                 .iter()
                 .any(|s| right.to_lowercase().ends_with(s))
             {
                 return left.to_string();
             }
-            if right.len() < left.len() && right.len() >= 2 {
+            // Prefer the shorter segment as it's likely the brand name
+            let left_chars = left.chars().count();
+            let right_chars = right.chars().count();
+            if right_chars < left_chars && right_chars >= 2 {
                 return right.to_string();
             }
             return left.to_string();
@@ -164,7 +169,7 @@ pub(super) fn find_all_logos(doc: &Html, base_url: Option<&Url>) -> Vec<LogoVari
             && let Some(parent) = el.parent().and_then(|p| p.value().as_element())
             && parent
                 .attr("href")
-                .is_some_and(|h| h == "/" || h.ends_with(".com") || h.ends_with(".com/"))
+                .is_some_and(|h| is_home_link(h, base_url))
         {
             logos.push(LogoVariant {
                 url: "(inline-svg)".to_string(),
@@ -198,6 +203,43 @@ pub(super) fn find_og_image(doc: &Html, base_url: Option<&Url>) -> Option<String
 
 fn contains_ci(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+/// Check if an href looks like a home/root link.
+/// Accepts "/" (root path) or any URL whose resolved host matches the base host.
+/// Also accepts URLs that look like site roots (e.g., "https://example.org").
+fn is_home_link(href: &str, base_url: Option<&Url>) -> bool {
+    if href == "/" || href.is_empty() {
+        return true;
+    }
+    // If base URL is available, compare hosts
+    if let Some(base) = base_url {
+        if let Ok(resolved) = base.join(href) {
+            // Same host and path is "/" = home link
+            if resolved.host_str() == base.host_str() {
+                let path = resolved.path();
+                if path == "/" || path.is_empty() {
+                    return true;
+                }
+            }
+        }
+        // Absolute URL with same host (e.g., "https://example.com")
+        if let Ok(parsed) = Url::parse(href) {
+            if parsed.host_str() == base.host_str() {
+                let path = parsed.path();
+                return path == "/" || path.is_empty();
+            }
+        }
+    }
+    // Fallback: href looks like a root URL for any TLD
+    // (href == "/" already handled above; here catch "https://example.org/" etc.)
+    if href.starts_with("http://") || href.starts_with("https://") {
+        if let Ok(parsed) = Url::parse(href) {
+            let path = parsed.path();
+            return path == "/" || path.is_empty();
+        }
+    }
+    false
 }
 
 fn resolve_url(src: &str, base_url: Option<&Url>) -> String {

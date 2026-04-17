@@ -29,9 +29,18 @@ pub(super) fn extract_with_include(
         None
     };
 
+    let mut seen: HashSet<NodeId> = HashSet::new();
     for selector in &selectors {
         for el in doc.select(selector) {
             if exclude.contains(&el.id()) {
+                continue;
+            }
+            // Skip if this exact node was already emitted
+            if !seen.insert(el.id()) {
+                continue;
+            }
+            // Skip if an ancestor was already emitted (avoids duplicate nested content)
+            if el.ancestors().any(|a| seen.contains(&a.id())) {
                 continue;
             }
 

@@ -46,19 +46,21 @@ pub(crate) fn decode_html_entities(input: &str) -> String {
 }
 
 pub(crate) fn strip_invisible_unicode(input: &str) -> String {
-    if !input.contains('\u{200B}')
-        && !input.contains('\u{200C}')
-        && !input.contains('\u{200D}')
-        && !input.contains('\u{200E}')
-        && !input.contains('\u{200F}')
-        && !input.contains('\u{FEFF}')
-        && !input.contains('\u{00AD}')
-        && !input.contains('\u{2060}')
-        && !input.contains('\u{2062}')
-        && !input.contains('\u{2063}')
-        && !input.contains('\u{2064}')
-        && !input.contains('\u{034F}')
-    {
+    if !input.chars().any(|c| matches!(
+        c,
+        '\u{200B}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{FEFF}'
+            | '\u{00AD}'
+            | '\u{2060}'
+            | '\u{2062}'
+            | '\u{2063}'
+            | '\u{2064}'
+            | '\u{034F}'
+    )) {
         return input.to_string();
     }
 
@@ -89,18 +91,17 @@ pub(crate) fn strip_leaked_js(input: &str) -> String {
 
     let mut out = String::with_capacity(input.len());
     let mut in_code_fence = false;
-    for line in input.lines() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
 
+    for line in input.lines() {
         if line.trim().starts_with("```") {
             in_code_fence = !in_code_fence;
             out.push_str(line);
+            out.push('\n');
             continue;
         }
         if in_code_fence {
             out.push_str(line);
+            out.push('\n');
             continue;
         }
 
@@ -109,12 +110,19 @@ pub(crate) fn strip_leaked_js(input: &str) -> String {
                 let cleaned = line[..idx].trim_end();
                 if !cleaned.is_empty() {
                     out.push_str(cleaned);
+                    out.push('\n');
                 }
             }
         } else {
             out.push_str(line);
+            out.push('\n');
         }
     }
+
+    if !input.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+
     out
 }
 
@@ -217,9 +225,14 @@ pub(crate) fn collapse_whitespace(input: &str) -> String {
     out.trim().to_string()
 }
 
-static BOLD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]+)\*\*|__([^_]+)__").unwrap());
-static ITALIC_STAR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*([^*]+)\*").unwrap());
-static ITALIC_UNDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b_([^_]+)_\b").unwrap());
+// Bold: **text** or __text__ — only when surrounded by non-word context or start/end of string
+static BOLD_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?:^|(?<=\W))\*\*([^*\n]+)\*\*(?:$|(?=\W))|(?:^|(?<=\W))__([^_\n]+)__(?:$|(?=\W))").unwrap());
+// Italic *text* — require surrounding non-word chars (prevents star-in-math or glob patterns)
+static ITALIC_STAR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?:^|(?<=\W))\*([^*\n]+)\*(?:$|(?=\W))").unwrap());
+// Italic _text_ — keep existing word-boundary requirement
+static ITALIC_UNDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b_([^_\n]+)_\b").unwrap());
 
 pub(crate) fn strip_emphasis(input: &str) -> String {
     let mut out = String::with_capacity(input.len());

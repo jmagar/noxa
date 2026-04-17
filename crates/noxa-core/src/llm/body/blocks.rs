@@ -1,5 +1,9 @@
 use std::collections::HashSet;
 
+fn is_fence_line(trimmed: &str) -> bool {
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
 pub(crate) fn merge_stat_lines(input: &str) -> String {
     let lines: Vec<&str> = input.lines().collect();
     let mut out = String::with_capacity(input.len());
@@ -9,7 +13,7 @@ pub(crate) fn merge_stat_lines(input: &str) -> String {
     while i < lines.len() {
         let trimmed = lines[i].trim();
 
-        if trimmed.starts_with("```") {
+        if is_fence_line(trimmed) {
             in_code_block = !in_code_block;
             out.push_str(lines[i]);
             out.push('\n');
@@ -57,7 +61,25 @@ fn is_structural_line(line: &str) -> bool {
         || line.starts_with("- ")
         || line.starts_with("* ")
         || line.starts_with("```")
+        || line.starts_with("~~~")
         || line.starts_with("> ")
+        || is_ordered_list_item(line)
+}
+
+fn is_ordered_list_item(line: &str) -> bool {
+    let mut chars = line.chars();
+    // Match `\d+[.)]\s`
+    let has_digit = chars.next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+    if !has_digit {
+        return false;
+    }
+    for c in line.chars().skip(1) {
+        if c.is_ascii_digit() {
+            continue;
+        }
+        return (c == '.' || c == ')') && line.contains(' ');
+    }
+    false
 }
 
 const DEDUP_MIN_CHARS: usize = 20;
@@ -95,11 +117,11 @@ pub(crate) fn dedup_content_blocks(input: &str) -> String {
     let mut in_code_block = false;
 
     for block in &blocks {
-        let has_fence = block.lines().any(|l| l.trim_start().starts_with("```"));
+        let has_fence = block.lines().any(|l| is_fence_line(l.trim_start()));
         if in_code_block || has_fence {
             kept.push(block.to_string());
             for line in block.lines() {
-                if line.trim_start().starts_with("```") {
+                if is_fence_line(line.trim_start()) {
                     in_code_block = !in_code_block;
                 }
             }
@@ -137,11 +159,11 @@ pub(crate) fn dedup_lines(input: &str) -> String {
     let mut in_code_block = false;
 
     for block in blocks {
-        let has_fence = block.lines().any(|l| l.trim_start().starts_with("```"));
+        let has_fence = block.lines().any(|l| is_fence_line(l.trim_start()));
         if in_code_block || has_fence {
             out.push(block.to_string());
             for line in block.lines() {
-                if line.trim_start().starts_with("```") {
+                if is_fence_line(line.trim_start()) {
                     in_code_block = !in_code_block;
                 }
             }
@@ -184,7 +206,8 @@ pub(crate) fn dedup_comma_lists(input: &str) -> String {
     input
         .lines()
         .map(|line| {
-            let items: Vec<&str> = line.split(", ").map(|s| s.trim()).collect();
+            // Split on comma with optional surrounding whitespace, then trim each item
+            let items: Vec<&str> = line.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
             if items.len() < 2 {
                 return line.to_string();
             }
@@ -196,7 +219,7 @@ pub(crate) fn dedup_comma_lists(input: &str) -> String {
                     }
                     let pattern = &items[..cycle_len];
                     let all_match = items.chunks(cycle_len).all(|chunk| chunk == pattern);
-                    if all_match && items.len() / cycle_len >= 2 {
+                    if all_match {
                         return pattern.join(", ");
                     }
                 }
@@ -228,11 +251,11 @@ pub(crate) fn strip_empty_code_blocks(input: &str) -> String {
 
     while i < lines.len() {
         let trimmed = lines[i].trim();
-        if trimmed.starts_with("```") {
+        if is_fence_line(trimmed) {
             let mut j = i + 1;
             let mut all_blank = true;
             while j < lines.len() {
-                if lines[j].trim().starts_with("```") {
+                if is_fence_line(lines[j].trim()) {
                     break;
                 }
                 if !lines[j].trim().is_empty() {

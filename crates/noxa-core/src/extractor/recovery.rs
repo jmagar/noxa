@@ -64,8 +64,9 @@ pub(super) fn recover_hero_paragraph(h1: ElementRef<'_>, markdown: &mut String) 
             continue;
         };
 
-        // Search all <p> descendants of this container
-        for descendant in parent_el.descendants() {
+        // Search <p> descendants of this container, limited to close proximity
+        // (direct children and grandchildren only) to avoid pulling in unrelated paragraphs
+        for descendant in parent_el.descendants().take(50) {
             let Some(el) = ElementRef::wrap(descendant) else {
                 continue;
             };
@@ -265,6 +266,9 @@ pub(super) fn recover_footer_cta(
             }
 
             debug!(heading = h2_text.as_str(), "recovered footer CTA heading");
+            // Normalize leading newlines to avoid buildup (e.g. after recover_footer_sitemap)
+            let trimmed_tail = markdown.trim_end_matches('\n');
+            markdown.truncate(trimmed_tail.len());
             markdown.push_str(&format!("\n\n## {h2_text}\n\n"));
         }
 
@@ -359,7 +363,8 @@ pub(super) fn recover_footer_sitemap(
 }
 
 /// Collect links from the same container as a heading element.
-/// Walks up the DOM to find the nearest ancestor that contains <a> elements.
+/// Limits to links that are siblings of the heading (direct children of the parent,
+/// or inside sibling list elements), avoiding mixing in links from adjacent categories.
 fn collect_sibling_links(heading: ElementRef<'_>, base_url: Option<&Url>) -> Vec<(String, String)> {
     let mut node = heading.parent();
     // Try up to 2 levels (parent, grandparent) to find a link container
@@ -369,7 +374,33 @@ fn collect_sibling_links(heading: ElementRef<'_>, base_url: Option<&Url>) -> Vec
             node = parent.parent();
             continue;
         };
-        let a_elements: Vec<_> = parent_el.select(&A_SELECTOR).collect();
+        // Collect only links that are direct children of parent, or inside
+        // direct-child list/div elements (i.e. first-level descendants only).
+        // This prevents mixing links from adjacent categories in the same footer row.
+        let mut a_elements: Vec<_> = Vec::new();
+        for sibling in parent_el.children().filter_map(ElementRef::wrap) {
+            if sibling == heading {
+                continue;
+            }
+            let tag = sibling.value().name();
+            if tag == "a" {
+                a_elements.push(sibling);
+            } else if matches!(tag, "ul" | "ol" | "div" | "nav" | "p") {
+                // Collect links from first-level containers only
+                for child in sibling.children().filter_map(ElementRef::wrap) {
+                    let ctag = child.value().name();
+                    if ctag == "a" {
+                        a_elements.push(child);
+                    } else if ctag == "li" {
+                        for li_child in child.children().filter_map(ElementRef::wrap) {
+                            if li_child.value().name() == "a" {
+                                a_elements.push(li_child);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if a_elements.len() >= 2 {
             return a_elements
                 .into_iter()
@@ -448,22 +479,14 @@ fn find_content_position(markdown: &str, needle: &str) -> Option<usize> {
 
 /// Check if a position in markdown falls inside `![...](...)` image syntax.
 fn is_inside_image_syntax(markdown: &str, pos: usize) -> bool {
-    // Walk backwards from pos to find the nearest unmatched `![`
     let before = &markdown[..pos];
-    // Find the last `![` that hasn't been closed by `](`
-    let mut i = before.len();
-    while i > 0 {
-        i -= 1;
-        if i > 0 && before.as_bytes()[i - 1] == b'!' && before.as_bytes()[i] == b'[' {
-            // Found `![` — check if there's a matching `](` after pos
-            let after = &markdown[pos..];
-            if after.contains("](") {
-                return true;
-            }
-        }
-        // If we hit a `)` that closes a previous image, stop searching
-        if before.as_bytes()[i] == b')' {
-            break;
+    // Find the last `![` before pos
+    if let Some(open) = before.rfind("![") {
+        let between = &markdown[open + 2..pos];
+        // If there's no `](` between the `![` and pos, and there is a `](`
+        // somewhere after pos, then pos is inside the alt-text of an image.
+        if !between.contains("](") && markdown[pos..].contains("](") {
+            return true;
         }
     }
     false
