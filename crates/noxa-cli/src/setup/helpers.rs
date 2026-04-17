@@ -6,7 +6,7 @@ pub(super) fn ollama_running() -> bool {
 }
 
 pub(super) fn check_ollama_model(model: &str) -> bool {
-    // Hit /api/tags and look for the model name.
+    // Hit /api/tags and compare exact model names from the response JSON.
     let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:11434") else {
         return false;
     };
@@ -17,7 +17,16 @@ pub(super) fn check_ollama_model(model: &str) -> bool {
     }
     let mut buf = String::new();
     let _ = stream.read_to_string(&mut buf);
-    buf.contains(model)
+    let body = buf.split("\r\n\r\n").nth(1).unwrap_or("");
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["name"].as_str())
+        .any(|name| name == model)
 }
 
 pub(super) fn generate_hex_key(bytes: usize) -> String {

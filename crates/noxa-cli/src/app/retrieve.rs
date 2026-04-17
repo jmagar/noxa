@@ -49,6 +49,8 @@ pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
     let mut all_docs: Vec<(String, std::path::PathBuf)> = Vec::new();
     collect_docs(&store_root, &store_root, &mut all_docs);
 
+    let total_docs = all_docs.len();
+
     for (url, path) in all_docs {
         let url_lower = url.to_lowercase();
         // Also pull title from JSON sidecar if present.
@@ -90,7 +92,7 @@ pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
         eprintln!(
             "{dim}best match ({}/{} docs scored):{reset}\n",
             scored.len(),
-            scored.len()
+            total_docs
         );
         for (score, url, _) in scored.iter().take(5) {
             eprintln!("  {dim}{score} match(es){reset}  {cyan}{url}{reset}");

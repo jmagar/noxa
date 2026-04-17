@@ -50,6 +50,22 @@ pub(crate) fn write_to_file(dir: &Path, filename: &str, content: &str) -> Result
                 "filename escapes output directory via symlink: {filename}"
             ));
         }
+
+        let final_name = dest
+            .file_name()
+            .ok_or_else(|| format!("invalid filename: {filename}"))?;
+        let canonical_dest = canonical_parent.join(final_name);
+        if let Ok(meta) = canonical_dest.symlink_metadata()
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!(
+                "filename escapes output directory via symlink: {filename}"
+            ));
+        }
+
+        std::fs::write(&canonical_dest, content)
+            .map_err(|e| format!("failed to write {}: {e}", canonical_dest.display()))?;
+        return Ok(());
     }
 
     std::fs::write(&dest, content)

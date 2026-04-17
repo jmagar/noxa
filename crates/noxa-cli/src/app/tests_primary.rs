@@ -130,33 +130,30 @@ mod tests {
 
     #[test]
     fn write_to_file_creates_dirs() {
-        let dir = std::env::temp_dir().join("noxa_test_output_dir");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().to_path_buf();
         write_to_file(&dir, "nested/deep/file.md", "hello").unwrap();
         let content = std::fs::read_to_string(dir.join("nested/deep/file.md")).unwrap();
         assert_eq!(content, "hello");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_write_to_file_rejects_traversal() {
-        let dir = std::env::temp_dir().join("noxa_sec_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         assert!(write_to_file(&dir, "../escaped.md", "x").is_err());
         assert!(write_to_file(&dir, "/abs.md", "x").is_err());
         assert!(write_to_file(&dir, "..\\windows.md", "x").is_err());
         assert!(write_to_file(&dir, "null\0byte.md", "x").is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_write_to_file_allows_nested() {
-        let dir = std::env::temp_dir().join("noxa_sec_test2");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         assert!(write_to_file(&dir, "sub/file.md", "hello").is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

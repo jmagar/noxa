@@ -199,7 +199,7 @@ pub(crate) async fn enrich_html_with_stylesheets(html: &str, base_url: &str) -> 
         return html.to_string();
     }
 
-    if let Some(pos) = html.to_lowercase().find("</head>") {
+    if let Some(pos) = find_ascii_case_insensitive(html, "</head>") {
         let mut enriched = String::with_capacity(html.len() + extra_css.len());
         enriched.push_str(&html[..pos]);
         enriched.push_str(&extra_css);
@@ -208,4 +208,12 @@ pub(crate) async fn enrich_html_with_stylesheets(html: &str, base_url: &str) -> 
     } else {
         format!("{extra_css}{html}")
     }
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    let needle_len = needle.len();
+    haystack
+        .as_bytes()
+        .windows(needle_len)
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }

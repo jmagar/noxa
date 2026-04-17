@@ -65,8 +65,8 @@ pub(crate) use fetching::storage::{
     print_save_hint, validate_operator_url, validate_url_sync, write_to_file,
 };
 pub(crate) use formatting::{
-    clamp_search_scrape_concurrency, format_cloud_output, format_frontmatter, format_map_output,
-    format_output, format_progress, raw_html_or_markdown,
+    clamp_search_scrape_concurrency, format_cloud_output, format_map_output, format_output,
+    format_progress, raw_html_or_markdown,
 };
 pub(crate) use llm::{has_llm_flags, run_batch_llm, run_llm};
 pub(crate) use logging::{build_ops_log, init_logging, init_mcp_logging, log_operation};

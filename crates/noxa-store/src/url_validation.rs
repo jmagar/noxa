@@ -30,6 +30,7 @@ pub fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
             v4.is_loopback()
                 || v4.is_unspecified()
                 || v4.is_link_local()
+                || v4.is_multicast()
                 || octets[0] == 10
                 || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
                 || (octets[0] == 192 && octets[1] == 168)
@@ -66,8 +67,7 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
 {
-    let parsed =
-        parse_http_url(url).map_err(|e| format!("{e}. Must start with http:// or https://"))?;
+    let parsed = parse_http_url(url).map_err(append_scheme_hint)?;
     let Some(host) = parsed.host_str() else {
         return Ok(());
     };
@@ -100,6 +100,14 @@ where
             Ok(())
         }
         Err(e) => Err(format!("Invalid URL: could not resolve host '{host}': {e}")),
+    }
+}
+
+fn append_scheme_hint(message: String) -> String {
+    if message.contains("scheme '") || message.contains("relative URL without a base") {
+        format!("{message}. Must start with http:// or https://")
+    } else {
+        message
     }
 }
 

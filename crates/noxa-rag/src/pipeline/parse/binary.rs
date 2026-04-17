@@ -64,6 +64,7 @@ pub(crate) fn parse_office_zip_file(
 ) -> Result<ParsedFile, RagError> {
     const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
     const MAX_ENTRIES: usize = 1_000;
+    const MAX_TOTAL_UNCOMPRESSED_SIZE: u64 = 250 * 1024 * 1024;
 
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)
@@ -76,16 +77,25 @@ pub(crate) fn parse_office_zip_file(
         )));
     }
 
+    let mut total_uncompressed_size = 0u64;
+
     if ext == "docx" {
         for i in 0..archive.len() {
-            if let Ok(entry) = archive.by_index(i)
-                && entry.size() > MAX_ENTRY_SIZE
-            {
-                return Err(RagError::Parse(format!(
-                    "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
-                    entry.name(),
-                    entry.size()
-                )));
+            if let Ok(entry) = archive.by_index(i) {
+                total_uncompressed_size = total_uncompressed_size.saturating_add(entry.size());
+                if total_uncompressed_size > MAX_TOTAL_UNCOMPRESSED_SIZE {
+                    return Err(RagError::Parse(
+                        "docx: archive expands to more than 250 MiB — possible zip bomb"
+                            .to_string(),
+                    ));
+                }
+                if entry.size() > MAX_ENTRY_SIZE {
+                    return Err(RagError::Parse(format!(
+                        "docx: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
+                        entry.name(),
+                        entry.size()
+                    )));
+                }
             }
         }
         let result =
@@ -116,6 +126,12 @@ pub(crate) fn parse_office_zip_file(
         let mut entry = archive
             .by_index(i)
             .map_err(|e| RagError::Parse(format!("{ext} entry {i}: {e}")))?;
+        total_uncompressed_size = total_uncompressed_size.saturating_add(entry.size());
+        if total_uncompressed_size > MAX_TOTAL_UNCOMPRESSED_SIZE {
+            return Err(RagError::Parse(format!(
+                "{ext}: archive expands to more than 250 MiB — possible zip bomb"
+            )));
+        }
 
         if entry.size() > MAX_ENTRY_SIZE {
             return Err(RagError::Parse(format!(
@@ -144,7 +160,7 @@ pub(crate) fn parse_office_zip_file(
             .read_to_string(&mut xml_buf)
             .map_err(|e| RagError::Parse(format!("{ext} read '{name}': {e}")))?;
 
-        let fragment = super::extract_xml_text(&xml_buf);
+        let fragment = super::extract_xml_text(&xml_buf).unwrap_or_else(|_| xml_buf.clone());
         if !fragment.trim().is_empty() {
             text_parts.push(fragment);
         }

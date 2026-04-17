@@ -196,11 +196,7 @@ pub(crate) async fn run() {
         Ok(FetchOutput::Local(result)) => {
             print_output(&result, &resolved.format, resolved.metadata);
             if !cli.no_store {
-                let url = cli
-                    .urls
-                    .first()
-                    .map(|u| normalize_url(u))
-                    .unwrap_or_default();
+                let url = primary_input_url(&cli);
                 let content = format_output(&result, &resolved.format, resolved.metadata);
                 let store_root = content_store_root(resolved.output_dir.as_deref());
                 let dest = store_root
@@ -212,11 +208,7 @@ pub(crate) async fn run() {
         Ok(FetchOutput::Cloud(resp)) => {
             print_cloud_output(&resp, &resolved.format);
             if !cli.no_store {
-                let url = cli
-                    .urls
-                    .first()
-                    .map(|u| normalize_url(u))
-                    .unwrap_or_default();
+                let url = primary_input_url(&cli);
                 let content = format_cloud_output(&resp, &resolved.format);
                 let store_root = content_store_root(resolved.output_dir.as_deref());
                 let dest = store_root
@@ -230,4 +222,11 @@ pub(crate) async fn run() {
             process::exit(1);
         }
     }
+}
+
+fn primary_input_url(cli: &Cli) -> String {
+    collect_urls(cli)
+        .ok()
+        .and_then(|entries| entries.into_iter().next().map(|(url, _)| url))
+        .unwrap_or_default()
 }

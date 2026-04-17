@@ -27,13 +27,27 @@ pub(crate) fn build_ops_log(
     resolved: &config::ResolvedConfig,
 ) -> Option<Arc<FilesystemOperationsLog>> {
     if cli.no_store
-        || std::env::var("NOXA_NO_OPERATIONS_LOG").is_ok()
-        || std::env::var("NOXA_NO_STORE").is_ok()
+        || env_flag_enabled("NOXA_NO_OPERATIONS_LOG")
+        || env_flag_enabled("NOXA_NO_STORE")
     {
         return None;
     }
     let root = content_store_root(resolved.output_dir.as_deref());
     Some(Arc::new(FilesystemOperationsLog::new(root)))
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty()
+                || matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+        })
+        .unwrap_or(false)
 }
 
 /// Append an entry to the operations log if one is configured.

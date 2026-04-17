@@ -5,7 +5,11 @@ use crate::error::RagError;
 use super::QdrantStore;
 use super::http::{CollectionInfoResponse, parse_collection_vector_size};
 
-const FILE_METADATA_INDEXES: &[(&str, &str)] = &[
+const BASE_COLLECTION_INDEXES: &[(&str, &str)] = &[
+    ("url", "keyword"),
+    ("domain", "keyword"),
+    ("source_type", "keyword"),
+    ("language", "keyword"),
     ("file_path", "keyword"),
     ("last_modified", "keyword"),
     ("git_branch", "keyword"),
@@ -47,17 +51,8 @@ impl QdrantStore {
             )));
         }
 
-        let indexes: &[(&str, &str)] = &[
-            ("url", "keyword"),
-            ("domain", "keyword"),
-            ("source_type", "keyword"),
-            ("language", "keyword"),
-            ("file_path", "keyword"),
-            ("last_modified", "keyword"),
-            ("git_branch", "keyword"),
-        ];
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
-        for (field, schema_type) in indexes {
+        for (field, schema_type) in BASE_COLLECTION_INDEXES {
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {
@@ -75,7 +70,10 @@ impl QdrantStore {
     /// Reconcile the landed file-metadata indexes on an already-existing collection.
     pub(crate) async fn reconcile_landed_file_metadata_indexes(&self) -> Result<(), RagError> {
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
-        for (field, schema_type) in FILE_METADATA_INDEXES {
+        for (field, schema_type) in BASE_COLLECTION_INDEXES
+            .iter()
+            .filter(|(field, _)| matches!(*field, "file_path" | "last_modified" | "git_branch"))
+        {
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {

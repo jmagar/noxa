@@ -1,36 +1,7 @@
 use super::*;
 
 pub(crate) fn print_output(result: &ExtractionResult, format: &OutputFormat, show_metadata: bool) {
-    match format {
-        OutputFormat::Markdown => {
-            if show_metadata {
-                print!("{}", format_frontmatter(&result.metadata));
-            }
-            println!("{}", result.content.markdown);
-            if !result.structured_data.is_empty() {
-                println!(
-                    "\n## Structured Data\n\n```json\n{}\n```",
-                    serde_json::to_string_pretty(&result.structured_data).unwrap_or_default()
-                );
-            }
-        }
-        OutputFormat::Json => {
-            // serde_json::to_string_pretty won't fail on our types
-            println!(
-                "{}",
-                serde_json::to_string_pretty(result).expect("serialization failed")
-            );
-        }
-        OutputFormat::Text => {
-            println!("{}", result.content.plain_text);
-        }
-        OutputFormat::Llm => {
-            println!("{}", to_llm_text(result, result.metadata.url.as_deref()));
-        }
-        OutputFormat::Html => {
-            println!("{}", raw_html_or_markdown(result));
-        }
-    }
+    println!("{}", format_output(result, format, show_metadata));
 }
 
 /// Print cloud API response in the requested format.
@@ -155,13 +126,7 @@ pub(crate) fn print_crawl_output(result: &CrawlResult, format: &OutputFormat, sh
                 let Some(ref extraction) = page.extraction else {
                     continue;
                 };
-                println!("---");
-                println!("# Page: {}\n", page.url);
-                if show_metadata {
-                    print!("{}", format_frontmatter(&extraction.metadata));
-                }
-                println!("{}", extraction.content.markdown);
-                println!();
+                print_page_section(&page.url, extraction, format, show_metadata);
             }
         }
         OutputFormat::Text => {
@@ -169,10 +134,7 @@ pub(crate) fn print_crawl_output(result: &CrawlResult, format: &OutputFormat, sh
                 let Some(ref extraction) = page.extraction else {
                     continue;
                 };
-                println!("---");
-                println!("# Page: {}\n", page.url);
-                println!("{}", extraction.content.plain_text);
-                println!();
+                print_page_section(&page.url, extraction, format, show_metadata);
             }
         }
         OutputFormat::Llm => {
@@ -180,9 +142,7 @@ pub(crate) fn print_crawl_output(result: &CrawlResult, format: &OutputFormat, sh
                 let Some(ref extraction) = page.extraction else {
                     continue;
                 };
-                println!("---");
-                println!("{}", to_llm_text(extraction, Some(page.url.as_str())));
-                println!();
+                print_page_section(&page.url, extraction, format, show_metadata);
             }
         }
         OutputFormat::Html => {
@@ -190,10 +150,7 @@ pub(crate) fn print_crawl_output(result: &CrawlResult, format: &OutputFormat, sh
                 let Some(ref extraction) = page.extraction else {
                     continue;
                 };
-                println!("---");
-                println!("<!-- Page: {} -->\n", page.url);
-                println!("{}", raw_html_or_markdown(extraction));
-                println!();
+                print_page_section(&page.url, extraction, format, show_metadata);
             }
         }
     }
@@ -229,13 +186,7 @@ pub(crate) fn print_batch_output(
             for r in results {
                 match &r.result {
                     Ok(extraction) => {
-                        println!("---");
-                        println!("# {}\n", r.url);
-                        if show_metadata {
-                            print!("{}", format_frontmatter(&extraction.metadata));
-                        }
-                        println!("{}", extraction.content.markdown);
-                        println!();
+                        print_page_section(&r.url, extraction, format, show_metadata);
                     }
                     Err(e) => {
                         eprintln!("error: {} -- {}", r.url, e);
@@ -247,10 +198,7 @@ pub(crate) fn print_batch_output(
             for r in results {
                 match &r.result {
                     Ok(extraction) => {
-                        println!("---");
-                        println!("# {}\n", r.url);
-                        println!("{}", extraction.content.plain_text);
-                        println!();
+                        print_page_section(&r.url, extraction, format, show_metadata);
                     }
                     Err(e) => {
                         eprintln!("error: {} -- {}", r.url, e);
@@ -262,9 +210,7 @@ pub(crate) fn print_batch_output(
             for r in results {
                 match &r.result {
                     Ok(extraction) => {
-                        println!("---");
-                        println!("{}", to_llm_text(extraction, Some(r.url.as_str())));
-                        println!();
+                        print_page_section(&r.url, extraction, format, show_metadata);
                     }
                     Err(e) => {
                         eprintln!("error: {} -- {}", r.url, e);
@@ -276,10 +222,7 @@ pub(crate) fn print_batch_output(
             for r in results {
                 match &r.result {
                     Ok(extraction) => {
-                        println!("---");
-                        println!("<!-- {} -->\n", r.url);
-                        println!("{}", raw_html_or_markdown(extraction));
-                        println!();
+                        print_page_section(&r.url, extraction, format, show_metadata);
                     }
                     Err(e) => {
                         eprintln!("error: {} -- {}", r.url, e);
@@ -292,4 +235,34 @@ pub(crate) fn print_batch_output(
 
 pub(crate) fn print_map_output(entries: &[SitemapEntry], format: &OutputFormat) {
     println!("{}", format_map_output(entries, format));
+}
+
+fn print_page_section(
+    url: &str,
+    extraction: &ExtractionResult,
+    format: &OutputFormat,
+    show_metadata: bool,
+) {
+    println!("---");
+    match format {
+        OutputFormat::Markdown => {
+            println!("# {url}\n");
+            print!("{}", format_output(extraction, format, show_metadata));
+        }
+        OutputFormat::Text => {
+            println!("# {url}\n");
+            println!("{}", extraction.content.plain_text);
+        }
+        OutputFormat::Llm => {
+            println!("{}", to_llm_text(extraction, Some(url)));
+        }
+        OutputFormat::Html => {
+            println!("<!-- {url} -->\n");
+            println!("{}", raw_html_or_markdown(extraction));
+        }
+        OutputFormat::Json => {
+            println!("{}", format_output(extraction, format, show_metadata));
+        }
+    }
+    println!();
 }

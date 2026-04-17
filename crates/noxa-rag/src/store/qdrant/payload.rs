@@ -2,22 +2,27 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::error::RagError;
 use crate::types::{Point, PointPayload, SearchMetadataFilter, SearchResult};
 
-pub(crate) fn point_payload_to_map(payload: &PointPayload) -> HashMap<String, serde_json::Value> {
-    serde_json::to_value(payload)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .map(|map| map.into_iter().collect())
-        .unwrap_or_default()
+pub(crate) fn point_payload_to_map(
+    payload: &PointPayload,
+) -> Result<HashMap<String, serde_json::Value>, RagError> {
+    let value = serde_json::to_value(payload)
+        .map_err(|error| RagError::Store(format!("point payload serialization failed: {error}")))?;
+    let map = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RagError::Store("point payload is not a JSON object".to_string()))?;
+    Ok(map.into_iter().collect())
 }
 
-pub(crate) fn point_to_qdrant_payload(point: &Point) -> super::http::QdrantPoint {
-    super::http::QdrantPoint {
+pub(crate) fn point_to_qdrant_payload(point: &Point) -> Result<super::http::QdrantPoint, RagError> {
+    Ok(super::http::QdrantPoint {
         id: point.id.to_string(),
         vector: point.vector.clone(),
-        payload: point_payload_to_map(&point.payload),
-    }
+        payload: point_payload_to_map(&point.payload)?,
+    })
 }
 
 pub(crate) fn search_filter(filter: Option<&SearchMetadataFilter>) -> Option<serde_json::Value> {

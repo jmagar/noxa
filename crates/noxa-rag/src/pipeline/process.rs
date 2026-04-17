@@ -18,14 +18,36 @@ use super::{IndexJob, JobStats};
 
 fn is_private_ip(host: &str) -> bool {
     if let Ok(addr) = host.parse::<IpAddr>() {
-        return match addr {
-            IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
-            IpAddr::V6(ip) => {
-                ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
-            }
-        };
+        return is_private_or_reserved_ip(addr);
     }
     false
+}
+
+fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || octets[0] == 10
+                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+                || (octets[0] == 192 && octets[1] == 168)
+                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_or_reserved_ip(IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg0 & 0xffc0) == 0xfe80
+                || (seg0 & 0xfe00) == 0xfc00
+        }
+    }
 }
 
 pub(crate) fn validate_url_scheme(url: &str) -> Result<(), RagError> {
@@ -106,10 +128,6 @@ pub(crate) async fn process_job(
     let job_start = std::time::Instant::now();
 
     let t0 = std::time::Instant::now();
-    let mut file = tokio::fs::File::open(&job.path).await?;
-    let file_meta = file.metadata().await?;
-    let size = file_meta.len();
-
     let canonical = tokio::fs::canonicalize(&job.path).await.map_err(|e| {
         RagError::Generic(format!(
             "canonicalize failed for {}: {e}",
@@ -127,6 +145,9 @@ pub(crate) async fn process_job(
             upsert_ms: 0,
         });
     }
+    let mut file = tokio::fs::File::open(&canonical).await?;
+    let file_meta = file.metadata().await?;
+    let size = file_meta.len();
 
     const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
     if size > MAX_FILE_SIZE_BYTES {
@@ -157,7 +178,7 @@ pub(crate) async fn process_job(
     let mut result = parsed.extraction;
 
     if result.metadata.file_path.is_none() {
-        result.metadata.file_path = Some(job.path.to_string_lossy().into_owned());
+        result.metadata.file_path = Some(canonical.to_string_lossy().into_owned());
     }
     if result.metadata.last_modified.is_none()
         && let Ok(mtime) = file_meta.modified()
@@ -167,7 +188,11 @@ pub(crate) async fn process_job(
     }
     let git_branch = detect_git_branch(&job.path);
 
-    let raw_url = result.metadata.url.as_deref().unwrap_or("").to_string();
+    let raw_url = result.metadata.url.clone().unwrap_or_else(|| {
+        url::Url::from_file_path(&canonical)
+            .map(|url| url.to_string())
+            .unwrap_or_else(|_| canonical.to_string_lossy().into_owned())
+    });
     if let Err(e) = validate_url_scheme(&raw_url) {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
         return Ok(JobStats {

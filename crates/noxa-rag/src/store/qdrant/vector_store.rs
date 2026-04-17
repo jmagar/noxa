@@ -20,7 +20,10 @@ impl VectorStore for QdrantStore {
             self.base_url, self.collection
         );
 
-        let qdrant_points = points.iter().map(point_to_qdrant_payload).collect();
+        let qdrant_points = points
+            .iter()
+            .map(point_to_qdrant_payload)
+            .collect::<Result<Vec<_>, _>>()?;
 
         let resp = self
             .client
@@ -124,7 +127,19 @@ impl VectorStore for QdrantStore {
                 .ok()
                 .and_then(|v| v["result"]["count"].as_u64())
                 .unwrap_or(0),
-            _ => 0,
+            Ok(r) => {
+                let status = r.status();
+                let text = r.text().await.unwrap_or_default();
+                let preview: String = text.chars().take(512).collect();
+                return Err(RagError::Store(format!(
+                    "delete_stale_by_url count failed with HTTP {status}: {preview}"
+                )));
+            }
+            Err(e) => {
+                return Err(RagError::Store(format!(
+                    "delete_stale_by_url count request failed: {e}"
+                )));
+            }
         };
 
         if stale_count == 0 {

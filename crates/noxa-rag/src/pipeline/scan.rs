@@ -10,6 +10,9 @@ use crate::error::RagError;
 ///
 /// Deferred (no confirmed use case, would add new crate deps): .epub, .mbox
 pub(crate) fn is_indexable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
@@ -138,8 +141,8 @@ pub(crate) fn path_is_within_watch_root(canonical_path: &Path, watch_root: &Path
 pub(crate) fn detect_git_branch(file_path: &Path) -> Option<String> {
     let mut dir = file_path.parent()?;
     loop {
-        let head = dir.join(".git").join("HEAD");
-        if head.exists() {
+        let git_entry = dir.join(".git");
+        if let Some(head) = git_head_path(&git_entry) {
             let content = std::fs::read_to_string(&head).ok()?;
             return content
                 .trim()
@@ -148,6 +151,23 @@ pub(crate) fn detect_git_branch(file_path: &Path) -> Option<String> {
         }
         dir = dir.parent()?;
     }
+}
+
+fn git_head_path(git_entry: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::symlink_metadata(git_entry).ok()?;
+    if metadata.is_dir() {
+        let head = git_entry.join("HEAD");
+        return head.exists().then_some(head);
+    }
+
+    if metadata.is_file() {
+        let contents = std::fs::read_to_string(git_entry).ok()?;
+        let gitdir = contents.trim().strip_prefix("gitdir:")?.trim();
+        let head = git_entry.parent()?.join(gitdir).join("HEAD");
+        return head.exists().then_some(head);
+    }
+
+    None
 }
 
 #[cfg(test)]

@@ -60,16 +60,18 @@ pub(crate) struct IngestionProvenance {
 }
 
 pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("json");
-    let file_url = url::Url::from_file_path(path)
-        .map(|u| u.to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_else(|| "json".to_string());
+    let file_url = file_url_for_path(path);
     let title = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    match ext {
+    match ext.as_str() {
         "json" => parse_json_file(&bytes, file_url, title),
         "md" => Ok(parse_markdown_file(bytes, file_url, title)),
         "rst" | "org" => Ok(parse_markdown_file(bytes, file_url, title)),
@@ -91,6 +93,19 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
             "unsupported file extension: .{other}"
         ))),
     }
+}
+
+fn file_url_for_path(path: &Path) -> String {
+    url::Url::from_file_path(path)
+        .or_else(|_| {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.join(path))
+                .and_then(|abs| url::Url::from_file_path(abs).ok())
+                .ok_or(())
+        })
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
 
 fn json_string(value: &serde_json::Value) -> Option<String> {

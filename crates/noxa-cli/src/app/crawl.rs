@@ -44,15 +44,7 @@ pub(crate) fn spawn_crawl_background(cli: &Cli, resolved: &config::ResolvedConfi
         });
     }
 
-    let store_root = content_store_root(resolved.output_dir.as_deref());
-    let domain_dir = url::Url::parse(&normalize_url(url))
-        .ok()
-        .and_then(|u| {
-            u.host_str()
-                .map(|h| h.strip_prefix("www.").unwrap_or(h).replace('.', "_"))
-        })
-        .map(|d| store_root.join(d))
-        .unwrap_or(store_root);
+    let domain_dir = crawl_domain_dir(url, resolved.output_dir.as_deref());
 
     match cmd.spawn() {
         Ok(child) => {
@@ -153,15 +145,7 @@ pub(crate) async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> R
     let completed_offset = resume_state.as_ref().map_or(0, |s| s.completed_pages);
 
     // Compute docs dir once — used for status file and final summary
-    let store_root = content_store_root(resolved.output_dir.as_deref());
-    let domain_dir = url::Url::parse(&normalize_url(url))
-        .ok()
-        .and_then(|u| {
-            u.host_str()
-                .map(|h| h.strip_prefix("www.").unwrap_or(h).replace('.', "_"))
-        })
-        .map(|d| store_root.join(d))
-        .unwrap_or(store_root);
+    let domain_dir = crawl_domain_dir(url, resolved.output_dir.as_deref());
     let docs_dir_str = domain_dir.to_string_lossy().to_string();
 
     // Status file: ~/.noxa/crawls/<domain>.json — updated each page
@@ -186,7 +170,15 @@ pub(crate) async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> R
         let mut count = completed_offset;
         let mut ok = 0usize;
         let mut errors = 0usize;
-        while let Ok(page) = progress_rx.recv().await {
+        loop {
+            let page = match progress_rx.recv().await {
+                Ok(page) => page,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    eprintln!("warning: crawl progress consumer lagged; skipped {skipped} updates");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             count += 1;
             if page.error.is_some() {
                 errors += 1;
@@ -382,4 +374,16 @@ pub(crate) async fn run_map(cli: &Cli, resolved: &config::ResolvedConfig) -> Res
 
     print_map_output(&entries, &resolved.format);
     Ok(())
+}
+
+fn crawl_domain_dir(url: &str, output_dir: Option<&Path>) -> PathBuf {
+    let store_root = content_store_root(output_dir);
+    url::Url::parse(&normalize_url(url))
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.strip_prefix("www.").unwrap_or(h).replace('.', "_"))
+        })
+        .map(|domain| store_root.join(domain))
+        .unwrap_or(store_root)
 }

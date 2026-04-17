@@ -4,13 +4,20 @@ use super::{IngestionProvenance, ParsedFile, extract_ingestion_provenance, make_
 
 pub(crate) fn parse_json_file(
     bytes: &[u8],
-    _file_url: String,
-    _title: String,
+    file_url: String,
+    title: String,
 ) -> Result<ParsedFile, RagError> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|e| RagError::Parse(format!("JSON parse failed: {e}")))?;
-    let extraction = serde_json::from_value::<noxa_core::types::ExtractionResult>(value.clone())
+    let extraction = serde_json::from_slice::<noxa_core::types::ExtractionResult>(bytes)
         .map_err(|e| RagError::Parse(format!("JSON parse failed: {e}")))?;
+    let mut extraction = extraction;
+    if extraction.metadata.url.is_none() {
+        extraction.metadata.url = Some(file_url);
+    }
+    if extraction.metadata.title.is_none() && !title.is_empty() {
+        extraction.metadata.title = Some(title);
+    }
     Ok(ParsedFile {
         extraction,
         provenance: extract_ingestion_provenance(&value),
@@ -118,7 +125,10 @@ pub(crate) fn parse_jsonl_file(bytes: Vec<u8>, file_url: String, title: String) 
 
 pub(crate) fn parse_xml_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    let text = extract_xml_text(&content);
+    let text = extract_xml_text(&content).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "xml text extraction failed; falling back to raw text");
+        content.clone()
+    });
     let word_count = text.split_whitespace().count();
     ParsedFile {
         extraction: make_text_result(
@@ -133,8 +143,8 @@ pub(crate) fn parse_xml_file(bytes: Vec<u8>, file_url: String, title: String) ->
     }
 }
 
-/// Extract plain text from XML/OPML/RSS/Atom by collecting all text nodes.
-pub(crate) fn extract_xml_text(xml: &str) -> String {
+/// Extract plain text from XML/OPML/RSS/Atom by collecting all text and CDATA nodes.
+pub(crate) fn extract_xml_text(xml: &str) -> Result<String, RagError> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
 
@@ -151,10 +161,18 @@ pub(crate) fn extract_xml_text(xml: &str) -> String {
                     }
                 }
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::CData(e)) => {
+                let text = String::from_utf8_lossy(e.as_ref());
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(RagError::Parse(format!("XML parse failed: {e}"))),
             _ => {}
         }
     }
 
-    parts.join("\n")
+    Ok(parts.join("\n"))
 }

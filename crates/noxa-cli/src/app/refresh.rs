@@ -4,10 +4,16 @@ pub(crate) fn sidecar_url_from_value(value: &serde_json::Value) -> Option<String
     if let Some(url) = value["url"].as_str().filter(|s| !s.is_empty()) {
         return Some(url.to_string());
     }
-    if let Some(url) = value["current"]["metadata"]["url"].as_str() {
+    if let Some(url) = value["current"]["metadata"]["url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
         return Some(url.to_string());
     }
-    value["metadata"]["url"].as_str().map(|url| url.to_string())
+    value["metadata"]["url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|url| url.to_string())
 }
 
 pub(crate) fn refresh_domain_dir(store_root: &Path, domain: &str) -> Result<PathBuf, String> {

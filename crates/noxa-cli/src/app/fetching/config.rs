@@ -67,7 +67,13 @@ pub(crate) fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -
         // canonicalize it.  A fresh output_dir would otherwise cause all writes to
         // fail silently because std::fs::canonicalize returns an error for a
         // non-existent path.
-        std::fs::create_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap_or_else(|e| {
+            eprintln!(
+                "error: failed to initialize content store at {}: {e}",
+                root.display()
+            );
+            process::exit(1);
+        });
         Some(FilesystemContentStore::new(root))
     };
 
@@ -96,6 +102,12 @@ pub(crate) fn parse_cookie_file(path: &str) -> Result<String, String> {
     let pairs: Vec<String> = cookies
         .iter()
         .filter_map(|c| {
+            let secure = c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false);
+            let domain = c.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+            let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("/");
+            if secure || !domain.is_empty() || path != "/" {
+                return None;
+            }
             let name = c.get("name")?.as_str()?;
             let value = c.get("value")?.as_str()?;
             Some(format!("{name}={value}"))

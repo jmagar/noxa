@@ -214,8 +214,6 @@ pub(crate) async fn run_batch_llm(
     let total = entries.len();
     let mut ok = 0usize;
     let mut errors = 0usize;
-    let mut all_results: Vec<serde_json::Value> = Vec::with_capacity(total);
-
     for (i, (url, _)) in entries.iter().enumerate() {
         let idx = i + 1;
         eprint!("[{idx}/{total}] {url} ");
@@ -227,7 +225,6 @@ pub(crate) async fn run_batch_llm(
                 errors += 1;
                 let msg = format!("fetch failed: {e}");
                 eprintln!("-> error: {msg}");
-                all_results.push(serde_json::json!({ "url": url, "error": msg }));
                 continue;
             }
         };
@@ -257,16 +254,11 @@ pub(crate) async fn run_batch_llm(
             Ok(output) => {
                 ok += 1;
 
-                let (output_str, result_json) = match &output {
+                let output_str = match &output {
                     LlmOutput::Json(v) => {
-                        let s = serde_json::to_string_pretty(v).expect("serialization failed");
-                        let j = serde_json::json!({ "url": url, "result": v });
-                        (s, j)
+                        serde_json::to_string_pretty(v).expect("serialization failed")
                     }
-                    LlmOutput::Text(s) => {
-                        let j = serde_json::json!({ "url": url, "result": s });
-                        (s.clone(), j)
-                    }
+                    LlmOutput::Text(s) => s.clone(),
                 };
 
                 // Count top-level fields/items for progress display
@@ -320,14 +312,11 @@ pub(crate) async fn run_batch_llm(
                 println!("--- {url}");
                 println!("{output_str}");
                 println!();
-
-                all_results.push(result_json);
             }
             Err(e) => {
                 errors += 1;
                 let msg = format!("LLM extraction failed: {e}");
                 eprintln!("-> error: {msg}");
-                all_results.push(serde_json::json!({ "url": url, "error": msg }));
             }
         }
     }

@@ -35,7 +35,8 @@ pub(crate) fn format_output(
             }
             out
         }
-        OutputFormat::Json => serde_json::to_string_pretty(result).expect("serialization failed"),
+        OutputFormat::Json => serde_json::to_string_pretty(result)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
         OutputFormat::Text => result.content.plain_text.clone(),
         OutputFormat::Llm => to_llm_text(result, result.metadata.url.as_deref()),
         OutputFormat::Html => raw_html_or_markdown(result).to_string(),
@@ -52,14 +53,18 @@ pub(crate) fn default_search_dir() -> PathBuf {
 
 pub(crate) fn format_cloud_output(resp: &serde_json::Value, format: &OutputFormat) -> String {
     match format {
-        OutputFormat::Json => serde_json::to_string_pretty(resp).expect("serialization failed"),
+        OutputFormat::Json => serde_json::to_string_pretty(resp)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
         OutputFormat::Markdown => resp
             .get("content")
             .and_then(|c| c.get("markdown"))
             .and_then(|m| m.as_str())
             .or_else(|| resp.get("markdown").and_then(|m| m.as_str()))
             .map(str::to_string)
-            .unwrap_or_else(|| serde_json::to_string_pretty(resp).expect("serialization failed")),
+            .unwrap_or_else(|| {
+                serde_json::to_string_pretty(resp)
+                    .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}"))
+            }),
         OutputFormat::Text => resp
             .get("content")
             .and_then(|c| c.get("plain_text"))
@@ -83,7 +88,8 @@ pub(crate) fn format_cloud_output(resp: &serde_json::Value, format: &OutputForma
 
 pub(crate) fn format_map_output(entries: &[SitemapEntry], format: &OutputFormat) -> String {
     match format {
-        OutputFormat::Json => serde_json::to_string_pretty(entries).expect("serialization failed"),
+        OutputFormat::Json => serde_json::to_string_pretty(entries)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
         _ => {
             let mut out = String::new();
             for entry in entries {
@@ -99,16 +105,16 @@ pub(crate) fn format_frontmatter(meta: &Metadata) -> String {
     let mut lines = vec!["---".to_string()];
 
     if let Some(title) = &meta.title {
-        lines.push(format!("title: \"{title}\""));
+        lines.push(format!("title: {}", yaml_string(title)));
     }
     if let Some(author) = &meta.author {
-        lines.push(format!("author: \"{author}\""));
+        lines.push(format!("author: {}", yaml_string(author)));
     }
     if let Some(date) = &meta.published_date {
-        lines.push(format!("date: \"{date}\""));
+        lines.push(format!("date: {}", yaml_string(date)));
     }
     if let Some(url) = &meta.url {
-        lines.push(format!("source: \"{url}\""));
+        lines.push(format!("source: {}", yaml_string(url)));
     }
     if meta.word_count > 0 {
         lines.push(format!("word_count: {}", meta.word_count));
@@ -117,6 +123,17 @@ pub(crate) fn format_frontmatter(meta: &Metadata) -> String {
     lines.push("---".to_string());
     lines.push(String::new()); // blank line after frontmatter
     lines.join("\n")
+}
+
+fn yaml_string(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    )
 }
 
 pub(crate) fn format_progress(page: &PageResult, index: usize, max_pages: usize) -> String {

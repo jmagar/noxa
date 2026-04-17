@@ -58,11 +58,8 @@ pub(crate) fn fire_webhook(url: &str, payload: &serde_json::Value) {
                 .await
             {
                 Ok(resp) => {
-                    eprintln!(
-                        "[webhook] POST {} -> {}",
-                        &url[..url.len().min(60)],
-                        resp.status()
-                    );
+                    let display_url: String = url.chars().take(60).collect();
+                    eprintln!("[webhook] POST {} -> {}", display_url, resp.status());
                 }
                 Err(e) => eprintln!("[webhook] POST failed: {e}"),
             },
@@ -78,6 +75,9 @@ pub(crate) async fn run_watch(
 ) -> Result<(), String> {
     if urls.is_empty() {
         return Err("--watch requires at least one URL".into());
+    }
+    if cli.watch_interval == 0 {
+        return Err("--watch-interval must be at least 1 second".into());
     }
 
     let client = Arc::new(

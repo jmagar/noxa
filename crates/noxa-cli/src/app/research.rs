@@ -86,7 +86,7 @@ pub(crate) async fn run_research(
                     .collect::<Vec<_>>()
                     .join("-")
                     .to_lowercase();
-                let slug = if slug.len() > 50 { &slug[..50] } else { &slug };
+                let slug: String = slug.chars().take(50).collect();
                 let filename = format!("research-{slug}.json");
 
                 let json = serde_json::to_string_pretty(&status_resp).unwrap_or_default();

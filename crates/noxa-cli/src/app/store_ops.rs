@@ -36,25 +36,15 @@ pub(crate) fn run_list(filter: &str, store_root: std::path::PathBuf) {
         eprintln!("\n{dim}noxa --list <domain>{reset}  {dim}to see individual docs{reset}\n");
     } else {
         // Domain view: list all docs for matching domain dir, URL → path
-        let domain_dir = store_root.join(filter.strip_prefix("www.").unwrap_or(filter));
+        let domain = filter.strip_prefix("www.").unwrap_or(filter);
+        let Some(domain_component) = validated_domain_component(domain) else {
+            eprintln!("error: invalid domain filter: {filter}");
+            return;
+        };
+        let domain_dir = store_root.join(&domain_component);
         if !domain_dir.exists() {
             // Try sanitized form (dots → underscores)
-            let sanitized: String = filter
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let alt = store_root.join(&sanitized);
-            if alt.exists() {
-                list_domain_docs(&alt, &store_root, filter);
-            } else {
-                eprintln!("{dim}no docs found for{reset} {bold}{filter}{reset}");
-            }
+            eprintln!("{dim}no docs found for{reset} {bold}{filter}{reset}");
             return;
         }
         list_domain_docs(&domain_dir, &store_root, filter);
@@ -142,6 +132,7 @@ pub(crate) fn collect_docs(
                     // Legacy format: metadata.url at top level.
                     v["metadata"]["url"].as_str().map(|u| u.to_string())
                 });
+            let url = url.or_else(|| reconstruct_url_from_store_path(&path, store_root));
             if let Some(url) = url {
                 out.push((url, path));
             }
@@ -236,11 +227,7 @@ pub(crate) fn grep_dir(
                 eprintln!("{pink}{}{reset}", rel.display());
                 for (lineno, line) in &hits {
                     let trimmed = line.trim();
-                    let display = if trimmed.len() > 120 {
-                        &trimmed[..120]
-                    } else {
-                        trimmed
-                    };
+                    let display = truncate_display(trimmed, 120);
                     eprintln!("  {dim}{:>4}{reset}  {bold}{display}{reset}", lineno + 1);
                     *matched_lines += 1;
                 }
@@ -249,6 +236,68 @@ pub(crate) fn grep_dir(
             }
         }
     }
+}
+
+fn validated_domain_component(filter: &str) -> Option<String> {
+    let normalized = filter.trim();
+    if normalized.is_empty()
+        || normalized.contains('\0')
+        || normalized.starts_with(['/', '\\'])
+        || normalized
+            .split(['/', '\\'])
+            .any(|part| part == "." || part == "..")
+    {
+        return None;
+    }
+    Some(
+        normalized
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
+    )
+}
+
+fn reconstruct_url_from_store_path(
+    path: &std::path::Path,
+    store_root: &std::path::Path,
+) -> Option<String> {
+    let rel = path.strip_prefix(store_root).ok()?;
+    let mut components = rel.components();
+    let domain = components.next()?.as_os_str().to_str()?.replace('_', ".");
+    let stem = rel.with_extension("");
+    let mut segments = stem
+        .components()
+        .skip(1)
+        .filter_map(|part| part.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if segments.last().copied() == Some("index") {
+        segments.pop();
+    }
+    let mut url = format!("https://{domain}");
+    if !segments.is_empty() {
+        url.push('/');
+        url.push_str(&segments.join("/"));
+    }
+    Some(url)
+}
+
+fn truncate_display(line: &str, max_chars: usize) -> &str {
+    let mut end = line.len();
+    let mut seen = 0usize;
+    for (idx, _) in line.char_indices() {
+        if seen == max_chars {
+            end = idx;
+            break;
+        }
+        seen += 1;
+    }
+    if seen < max_chars { line } else { &line[..end] }
 }
 
 pub(crate) async fn run_search(
@@ -296,16 +345,21 @@ pub(crate) async fn run_search(
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|e| format!("http client error: {e}"))?;
-            let resp: serde_json::Value = client
+            let resp = client
                 .post("https://api.noxa.io/v1/search")
                 .header("Authorization", format!("Bearer {api_key}"))
                 .json(&serde_json::json!({ "query": query, "num_results": num }))
                 .send()
                 .await
-                .map_err(|e| format!("API error: {e}"))?
-                .json()
-                .await
-                .map_err(|e| format!("parse error: {e}"))?;
+                .map_err(|e| format!("API error: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                let preview: String = body.chars().take(240).collect();
+                return Err(format!("search API returned HTTP {status}: {preview}"));
+            }
+            let resp: serde_json::Value =
+                resp.json().await.map_err(|e| format!("parse error: {e}"))?;
             resp.get("results")
                 .and_then(|v| v.as_array())
                 .map(|arr| {

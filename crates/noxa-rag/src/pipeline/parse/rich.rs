@@ -181,7 +181,7 @@ fn parse_feed_text(
         }
     }
     if parts.is_empty() {
-        parts.push(extract_xml_text(content));
+        parts.push(extract_xml_text(content).unwrap_or_else(|_| content.to_string()));
     }
     let text = parts.join("\n\n");
     let word_count = text.split_whitespace().count();
@@ -343,19 +343,28 @@ fn parse_subtitle_timestamp(value: &str) -> Option<f64> {
 
 fn strip_subtitle_timestamps(content: &str) -> String {
     let mut lines: Vec<&str> = Vec::new();
-    for line in content.lines() {
+    let content_lines: Vec<&str> = content.lines().collect();
+    for (index, line) in content_lines.iter().enumerate() {
         let trimmed = line.trim();
+        let next = content_lines
+            .get(index + 1)
+            .map(|line| line.trim())
+            .unwrap_or("");
         if trimmed.is_empty()
             || trimmed.starts_with("WEBVTT")
             || trimmed.starts_with("NOTE")
             || trimmed.starts_with("STYLE")
             || trimmed.starts_with("REGION")
             || trimmed.contains("-->")
-            || trimmed.chars().all(|c| c.is_ascii_digit())
+            || is_subtitle_sequence_marker(trimmed, next)
         {
             continue;
         }
         lines.push(trimmed);
     }
     lines.join(" ")
+}
+
+fn is_subtitle_sequence_marker(line: &str, next_line: &str) -> bool {
+    line.chars().all(|c| c.is_ascii_digit()) && next_line.contains("-->")
 }
