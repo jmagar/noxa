@@ -116,6 +116,8 @@ impl Pipeline {
             "pipeline starting"
         );
 
+        let watch_root = Arc::new(canonical_watch_root(&watch_dir).await?);
+
         // Bounded job queue: backpressure at 256 queued jobs.
         let (tx, rx) = tokio::sync::mpsc::channel::<IndexJob>(256);
 
@@ -133,6 +135,7 @@ impl Pipeline {
             let config = self.config.clone();
             let url_locks = self.url_locks.clone();
             let counters = self.counters.clone();
+            let watch_root = watch_root.clone();
 
             let handle = tokio::spawn(async move {
                 tracing::debug!(worker_id, "index worker started");
@@ -146,7 +149,13 @@ impl Pipeline {
                             let span = job.span.clone();
                             async {
                                 match process_job(
-                                    job, &embed, &store, &tokenizer, &config, &url_locks,
+                                    job,
+                                    &embed,
+                                    &store,
+                                    &tokenizer,
+                                    &config,
+                                    &url_locks,
+                                    watch_root.as_ref(),
                                 )
                                 .await
                                 {
@@ -1667,6 +1676,16 @@ struct JobStats {
     upsert_ms: u64,
 }
 
+async fn canonical_watch_root(watch_dir: &Path) -> Result<PathBuf, RagError> {
+    tokio::fs::canonicalize(watch_dir)
+        .await
+        .map_err(|e| RagError::Generic(format!("canonicalize watch_dir failed: {e}")))
+}
+
+fn path_is_within_watch_root(canonical_path: &Path, watch_root: &Path) -> bool {
+    canonical_path.starts_with(watch_root)
+}
+
 async fn process_job(
     job: IndexJob,
     embed: &DynEmbedProvider,
@@ -1674,6 +1693,7 @@ async fn process_job(
     tokenizer: &Arc<Tokenizer>,
     config: &RagConfig,
     url_locks: &Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    watch_root: &Path,
 ) -> Result<JobStats, RagError> {
     let job_start = Instant::now();
 
@@ -1691,13 +1711,7 @@ async fn process_job(
             job.path.display()
         ))
     })?;
-    let watch_dir = match &config.source {
-        SourceConfig::FsWatcher { watch_dir, .. } => watch_dir.clone(),
-    };
-    let watch_canonical = tokio::fs::canonicalize(&watch_dir)
-        .await
-        .map_err(|e| RagError::Generic(format!("canonicalize watch_dir failed: {e}")))?;
-    if !canonical.starts_with(&watch_canonical) {
+    if !path_is_within_watch_root(&canonical, watch_root) {
         tracing::warn!(
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"
@@ -1936,8 +1950,9 @@ async fn process_job(
 #[cfg(test)]
 mod tests {
     use super::{
-        IngestionProvenance, build_point_payload, collect_indexable_paths, detect_git_branch,
-        is_indexable, parse_file, validate_url_scheme,
+        IngestionProvenance, build_point_payload, canonical_watch_root,
+        collect_indexable_paths, detect_git_branch, is_indexable, parse_file,
+        path_is_within_watch_root, validate_url_scheme,
     };
     use serde_json::json;
     use std::fs;
@@ -2984,6 +2999,45 @@ mod tests {
         assert!(
             matches!(result, Err(crate::error::RagError::Parse(_))),
             "unsupported extension should return Parse error, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_watch_root_resolves_once_up_front() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nested = tmp.path().join("watch/../watch");
+        tokio::fs::create_dir_all(&nested).await.expect("create watch dir");
+
+        let canonical = canonical_watch_root(&nested)
+            .await
+            .expect("canonical watch root");
+        let expected = tokio::fs::canonicalize(tmp.path().join("watch"))
+            .await
+            .expect("expected canonical path");
+
+        assert_eq!(canonical, expected);
+    }
+
+    #[tokio::test]
+    async fn path_is_within_watch_root_rejects_escape() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let watch = tmp.path().join("watch");
+        let outside = tmp.path().join("outside");
+        tokio::fs::create_dir_all(&watch).await.expect("create watch");
+        tokio::fs::create_dir_all(&outside).await.expect("create outside");
+
+        let watch_root = canonical_watch_root(&watch).await.expect("watch root");
+        let outside_file = outside.join("doc.json");
+        tokio::fs::write(&outside_file, "{}")
+            .await
+            .expect("write outside file");
+        let canonical_outside = tokio::fs::canonicalize(&outside_file)
+            .await
+            .expect("canonical outside file");
+
+        assert!(
+            !path_is_within_watch_root(&canonical_outside, &watch_root),
+            "paths outside the cached watch root should be rejected"
         );
     }
 }

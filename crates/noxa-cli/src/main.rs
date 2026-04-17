@@ -28,7 +28,7 @@ use noxa_mcp as _;
 use noxa_pdf::PdfMode;
 use noxa_store::{
     FilesystemContentStore, FilesystemOperationsLog, Op, OperationEntry, domain_from_url,
-    url_to_store_path,
+    is_private_or_reserved_ip, parse_http_url, url_to_store_path, validate_public_http_url,
 };
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
@@ -672,101 +672,8 @@ fn url_to_filename(raw_url: &str, format: &OutputFormat) -> String {
     format!("{sanitized}.{ext}")
 }
 
-/// Returns true if the IP address is loopback, private, link-local, or otherwise reserved.
-fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()                               // 127.0.0.0/8
-                || v4.is_unspecified()                     // 0.0.0.0
-                || v4.is_link_local()                      // 169.254.0.0/16 (IMDS)
-                || octets[0] == 10                         // 10.0.0.0/8
-                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) // 172.16-31.x
-                || (octets[0] == 192 && octets[1] == 168) // 192.168.0.0/16
-                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127) // 100.64.0.0/10 (Tailscale/CGNAT)
-        }
-        std::net::IpAddr::V6(v6) => {
-            // Unmap IPv4-mapped addresses (::ffff:x.x.x.x) and check as IPv4.
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_ip(std::net::IpAddr::V4(v4));
-            }
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()                         // ::1
-                || v6.is_unspecified()               // ::
-                || v6.is_multicast()                 // ff00::/8
-                || (seg0 & 0xffc0) == 0xfe80         // fe80::/10 link-local
-                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7  unique-local (ULA)
-        }
-    }
-}
-
-/// Validate that a URL is non-empty, has an http/https scheme, and does not target
-/// private/loopback/reserved hosts (SSRF prevention).
-///
-/// For literal IP addresses the check is synchronous. For hostnames all A/AAAA
-/// records are resolved and rejected if any resolves to a private range.
 async fn validate_url(url: &str) -> Result<(), String> {
-    validate_url_impl(url, |host| async move {
-        tokio::net::lookup_host(host)
-            .await
-            .map(|iter| iter.collect::<Vec<_>>())
-    })
-    .await
-}
-
-/// Inner validation logic with an injectable resolver for deterministic testing.
-/// `resolve` receives `"host:80"` and returns the resolved socket addresses.
-async fn validate_url_impl<F, Fut>(url: &str, resolve: F) -> Result<(), String>
-where
-    F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
-{
-    if url.is_empty() {
-        return Err("Invalid URL: must not be empty".into());
-    }
-    let parsed = url::Url::parse(url)
-        .map_err(|e| format!("Invalid URL: {e}. Must start with http:// or https://"))?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(format!(
-            "Invalid URL: scheme '{}' not allowed, must start with http:// or https://",
-            parsed.scheme()
-        ));
-    }
-    let Some(host) = parsed.host_str() else {
-        return Ok(());
-    };
-    let lower = host.to_lowercase();
-
-    if lower == "localhost" || lower.ends_with(".localhost") {
-        return Err(format!(
-            "Invalid URL: host '{host}' is a private or reserved address"
-        ));
-    }
-
-    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
-        if is_private_ip(ip) {
-            return Err(format!(
-                "Invalid URL: host '{host}' is a private or reserved address"
-            ));
-        }
-    } else {
-        // Resolve hostname; reject if any resolved address is private (fail-closed).
-        match resolve(format!("{host}:80")).await {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_private_ip(addr.ip()) {
-                        return Err(format!(
-                            "Invalid URL: host '{host}' resolves to a private or reserved address"
-                        ));
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(format!("Invalid URL: could not resolve host '{host}': {e}"));
-            }
-        }
-    }
-    Ok(())
+    validate_public_http_url(url).await
 }
 
 /// Canonical content store root: `output_dir/.noxa/content` when configured,
@@ -862,24 +769,6 @@ fn print_save_hint(dest: &std::path::Path, content: &str) {
     );
 }
 
-fn parse_http_url(url: &str) -> Result<url::Url, String> {
-    if url.is_empty() {
-        return Err("Invalid URL: must not be empty".into());
-    }
-
-    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        s => {
-            return Err(format!(
-                "Invalid URL: scheme '{s}' not allowed, must start with http:// or https://"
-            ));
-        }
-    }
-    parsed.host_str().ok_or("Invalid URL: no host")?;
-    Ok(parsed)
-}
-
 /// Validate a URL provided by the operator (e.g. SEARXNG_URL). Only checks scheme and
 /// host presence; does NOT reject private/loopback addresses (operator-trusted config).
 fn validate_operator_url(url: &str) -> Result<(), String> {
@@ -903,11 +792,11 @@ fn validate_url_sync(url: &str) -> Result<(), String> {
     let private = match parsed.host() {
         Some(url::Host::Ipv4(addr)) => {
             let ip = std::net::IpAddr::V4(addr);
-            ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip)
+            ip.is_loopback() || ip.is_unspecified() || is_private_or_reserved_ip(ip)
         }
         Some(url::Host::Ipv6(addr)) => {
             let ip = std::net::IpAddr::V6(addr);
-            ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip)
+            ip.is_loopback() || ip.is_unspecified() || is_private_or_reserved_ip(ip)
         }
         Some(url::Host::Domain(_)) => false, // DNS not checked in sync path; use async validate_url for full protection
         None => true,
@@ -1912,7 +1801,10 @@ fn read_crawl_status(path: &Path) -> io::Result<CrawlStatusRecord> {
     })
 }
 
-fn classify_crawl_status(status: Option<&CrawlStatusRecord>, pid_running: bool) -> CrawlStatusState {
+fn classify_crawl_status(
+    status: Option<&CrawlStatusRecord>,
+    pid_running: bool,
+) -> CrawlStatusState {
     match status {
         None => CrawlStatusState::NeverStarted,
         Some(status) => match status.phase {
@@ -2304,11 +2196,15 @@ fn run_status(domain: &str) {
             return;
         }
     };
-    let pid_running = status.as_ref().is_some_and(|status| is_pid_running(status.pid));
+    let pid_running = status
+        .as_ref()
+        .is_some_and(|status| is_pid_running(status.pid));
     let state = classify_crawl_status(status.as_ref(), pid_running);
 
     if matches!(state, CrawlStatusState::NeverStarted) {
-        eprintln!("\n  {dim}crawl{reset}  {bold}{cyan}{domain}{reset}  {dim}never started{reset}\n");
+        eprintln!(
+            "\n  {dim}crawl{reset}  {bold}{cyan}{domain}{reset}  {dim}never started{reset}\n"
+        );
         eprintln!("  {dim}run:{reset}  {cyan}noxa --crawl {domain}{reset}\n");
         return;
     }
@@ -2346,13 +2242,18 @@ fn run_status(domain: &str) {
     }
     let words_suffix = if done && total_words > 0 {
         if total_words >= 1_000_000 {
-            format!("  {dim}~{:.1}M words{reset}", total_words as f64 / 1_000_000.0)
+            format!(
+                "  {dim}~{:.1}M words{reset}",
+                total_words as f64 / 1_000_000.0
+            )
         } else if total_words >= 1_000 {
             format!("  {dim}~{}k words{reset}", total_words / 1_000)
         } else {
             format!("  {dim}{total_words} words{reset}")
         }
-    } else { String::new() };
+    } else {
+        String::new()
+    };
     let excl_suffix = if done && excluded > 0 {
         format!("  {dim}{excluded} excluded{reset}")
     } else {
@@ -2949,6 +2850,46 @@ async fn run_watch(
     run_watch_multi(cli, resolved, &client, &options, urls, &cancelled).await
 }
 
+const WATCH_ON_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn run_on_change_command(
+    cmd: &str,
+    payload: &str,
+    max_runtime: std::time::Duration,
+) -> Result<(), String> {
+    let mut child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run command: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        if let Err(e) = stdin.write_all(payload.as_bytes()).await {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!("failed to write command stdin: {e}"));
+        }
+    }
+
+    match tokio::time::timeout(max_runtime, child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(format!("command exited with status {status}")),
+        Ok(Err(e)) => Err(format!("failed to wait for command: {e}")),
+        Err(_) => {
+            let _ = child.kill().await;
+            match child.wait().await {
+                Ok(_) => Err(format!(
+                    "command timed out after {}s",
+                    max_runtime.as_secs()
+                )),
+                Err(e) => Err(format!("command timed out and could not be reaped: {e}")),
+            }
+        }
+    }
+}
+
 /// Original single-URL watch loop -- backward compatible.
 async fn run_watch_single(
     cli: &Cli,
@@ -3027,10 +2968,12 @@ async fn run_watch_single(
                 &watch_ops_log,
                 url,
                 Op::Diff,
-                || serde_json::json!({
-                    "source": "watch",
-                    "interval_secs": cli.watch_interval
-                }),
+                || {
+                    serde_json::json!({
+                        "source": "watch",
+                        "interval_secs": cli.watch_interval
+                    })
+                },
                 || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
             )
             .await;
@@ -3041,19 +2984,10 @@ async fn run_watch_single(
                 if let Some(ref cmd) = cli.on_change {
                     let diff_json = serde_json::to_string(&diff).unwrap_or_default();
                     eprintln!("[watch] Running: {cmd}");
-                    match tokio::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(cmd)
-                        .stdin(std::process::Stdio::piped())
-                        .spawn()
+                    if let Err(e) =
+                        run_on_change_command(cmd, &diff_json, WATCH_ON_CHANGE_TIMEOUT).await
                     {
-                        Ok(mut child) => {
-                            if let Some(mut stdin) = child.stdin.take() {
-                                use tokio::io::AsyncWriteExt;
-                                let _ = stdin.write_all(diff_json.as_bytes()).await;
-                            }
-                        }
-                        Err(e) => eprintln!("[watch] Failed to run command: {e}"),
+                        eprintln!("[watch] Failed to run command: {e}");
                     }
                 }
 
@@ -3198,12 +3132,14 @@ async fn run_watch_multi(
                         &multi_ops_log,
                         url,
                         Op::Diff,
-                        || serde_json::json!({
+                        || {
+                            serde_json::json!({
                             "source": "watch",
                             "interval_secs": cli.watch_interval,
                                 "check_number": check_number
-                            }),
-                            || entry.clone(),
+                            })
+                        },
+                        || entry.clone(),
                     )
                     .await;
                 }
@@ -3221,19 +3157,10 @@ async fn run_watch_multi(
                 });
                 let payload_json = serde_json::to_string(&payload).unwrap_or_default();
                 eprintln!("[watch] Running: {cmd}");
-                match tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
+                if let Err(e) =
+                    run_on_change_command(cmd, &payload_json, WATCH_ON_CHANGE_TIMEOUT).await
                 {
-                    Ok(mut child) => {
-                        if let Some(mut stdin) = child.stdin.take() {
-                            use tokio::io::AsyncWriteExt;
-                            let _ = stdin.write_all(payload_json.as_bytes()).await;
-                        }
-                    }
-                    Err(e) => eprintln!("[watch] Failed to run command: {e}"),
+                    eprintln!("[watch] Failed to run command: {e}");
                 }
             }
 
@@ -3275,14 +3202,19 @@ async fn run_diff(
 
     // Append diff result to ops log.
     let ops_log = build_ops_log(cli, resolved);
-    let url = cli.urls.first().map(|u| normalize_url(u)).unwrap_or_default();
+    let url = cli
+        .urls
+        .first()
+        .map(|u| normalize_url(u))
+        .unwrap_or_default();
     log_operation(
         &ops_log,
         &url,
         Op::Diff,
         || serde_json::json!({ "source": "file", "snapshot": snapshot_path }),
         || serde_json::to_value(&diff).unwrap_or(serde_json::Value::Null),
-    ).await;
+    )
+    .await;
 
     print_diff_output(&diff, &resolved.format);
     Ok(())
@@ -3303,7 +3235,8 @@ async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), S
         Op::Brand,
         || serde_json::json!({}),
         || serde_json::to_value(&brand).unwrap_or(serde_json::Value::Null),
-    ).await;
+    )
+    .await;
 
     let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
     println!("{output}");
@@ -3411,14 +3344,17 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Extract,
-            || serde_json::json!({
-                "kind": "json",
-                "schema": schema,
-                "provider": provider.name(),
-                "model": model
-            }),
+            || {
+                serde_json::json!({
+                    "kind": "json",
+                    "schema": schema,
+                    "provider": provider.name(),
+                    "model": model
+                })
+            },
             || extracted.clone(),
-        ).await;
+        )
+        .await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(ref prompt) = cli.extract_prompt {
@@ -3437,14 +3373,17 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Extract,
-            || serde_json::json!({
-                "kind": "prompt",
-                "prompt": prompt,
-                "provider": provider.name(),
-                "model": model
-            }),
+            || {
+                serde_json::json!({
+                    "kind": "prompt",
+                    "prompt": prompt,
+                    "provider": provider.name(),
+                    "model": model
+                })
+            },
             || extracted.clone(),
-        ).await;
+        )
+        .await;
 
         Some(serde_json::to_string_pretty(&extracted).expect("serialization failed"))
     } else if let Some(sentences) = cli.summarize {
@@ -3463,13 +3402,16 @@ async fn run_llm(cli: &Cli, resolved: &config::ResolvedConfig) -> Result<(), Str
             &ops_log,
             &url,
             Op::Summarize,
-            || serde_json::json!({
-                "sentences": sentences,
-                "provider": provider.name(),
-                "model": model
-            }),
+            || {
+                serde_json::json!({
+                    "sentences": sentences,
+                    "provider": provider.name(),
+                    "model": model
+                })
+            },
             || serde_json::Value::String(summary.clone()),
-        ).await;
+        )
+        .await;
 
         Some(summary)
     } else {
@@ -4241,7 +4183,9 @@ async fn main() {
     init_logging(resolved.verbose);
 
     // Validate webhook URL early so any SSRF attempt is rejected before operations run.
-    if let Some(ref webhook_url) = cli.webhook && let Err(e) = validate_url(webhook_url).await {
+    if let Some(ref webhook_url) = cli.webhook
+        && let Err(e) = validate_url(webhook_url).await
+    {
         eprintln!("error: invalid webhook URL: {e}");
         process::exit(1);
     }
@@ -4808,7 +4752,10 @@ mod tests {
         let running = sample_crawl_status(CrawlStatusPhase::Running);
         let done = sample_crawl_status(CrawlStatusPhase::Done);
 
-        assert_eq!(classify_crawl_status(None, false), CrawlStatusState::NeverStarted);
+        assert_eq!(
+            classify_crawl_status(None, false),
+            CrawlStatusState::NeverStarted
+        );
         assert_eq!(
             classify_crawl_status(Some(&running), true),
             CrawlStatusState::Running
@@ -4862,8 +4809,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let status_path = crawl_status_path_for_home(home.path(), "https://code.claude.com");
 
-        write_initial_crawl_status(&status_path, "https://code.claude.com", 321, 50, "/tmp/docs")
-            .unwrap();
+        write_initial_crawl_status(
+            &status_path,
+            "https://code.claude.com",
+            321,
+            50,
+            "/tmp/docs",
+        )
+        .unwrap();
 
         let actual = read_crawl_status(&status_path).unwrap();
         assert_eq!(actual.phase, CrawlStatusPhase::Running);
@@ -4886,6 +4839,51 @@ mod tests {
 
         let actual = read_crawl_status(&path).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_change_command_writes_payload_and_exits_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("payload.json");
+        let payload = r#"{"status":"changed"}"#;
+        let cmd = format!("cat > {}", output_path.display());
+
+        run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))
+            .await
+            .expect("on-change command should succeed");
+
+        let written = tokio::fs::read_to_string(&output_path).await.unwrap();
+        assert_eq!(written, payload);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_change_command_times_out_and_returns_promptly() {
+        let start = std::time::Instant::now();
+        let result =
+            run_on_change_command("sleep 5", "{}", std::time::Duration::from_millis(50)).await;
+
+        assert!(result.is_err(), "long-running child should time out");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "timeout should bound execution, elapsed={:?}",
+            start.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_change_command_returns_error_when_child_closes_stdin_early() {
+        let payload = "x".repeat(1024 * 1024);
+        let result = run_on_change_command(
+            "exec 0<&-; sleep 0.05",
+            &payload,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(result.is_err(), "stdin write failure should be surfaced");
     }
 }
 
@@ -4982,52 +4980,6 @@ mod enum_deserialize_tests {
     async fn validate_accepts_public_ip() {
         assert!(validate_url("http://8.8.8.8/").await.is_ok());
         assert!(validate_url("http://1.1.1.1/").await.is_ok());
-    }
-
-    // Use validate_url_impl with a mock resolver to test the DNS path without
-    // hitting the network. This keeps hostname validation covered in all CI environments.
-
-    #[tokio::test]
-    async fn validate_accepts_hostname_resolving_to_public() {
-        let result = validate_url_impl("http://example.com/", |_| async {
-            Ok(vec![
-                "93.184.216.34:80".parse::<std::net::SocketAddr>().unwrap(),
-            ])
-        })
-        .await;
-        assert!(
-            result.is_ok(),
-            "hostname resolving to a public IP should be accepted"
-        );
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_hostname_resolving_to_private() {
-        let result = validate_url_impl("http://attacker.example/", |_| async {
-            Ok(vec![
-                "192.168.1.1:80".parse::<std::net::SocketAddr>().unwrap(),
-            ])
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "hostname resolving to a private IP should be rejected"
-        );
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_hostname_dns_failure() {
-        let result = validate_url_impl("http://nxdomain.example/", |_| async {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no such host",
-            ))
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "DNS failure should be rejected (fail-closed)"
-        );
     }
 
     // --- write_to_file traversal tests ---

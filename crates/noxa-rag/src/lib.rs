@@ -26,6 +26,7 @@ pub mod config;
 pub mod embed;
 pub mod error;
 pub mod factory;
+pub mod mcp_bridge;
 pub mod pipeline;
 pub mod store;
 pub mod types;

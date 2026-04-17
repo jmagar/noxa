@@ -109,6 +109,34 @@ noxa https://docs.example.com --output ~/.noxa/output/
 
 The daemon watches `watch_dir` for `.json` files. When noxa writes an `ExtractionResult` to that directory, the daemon detects it (within `debounce_ms` ms), chunks it, embeds it, and upserts to Qdrant.
 
+### 6. Feed MCP sources through mcporter
+
+`noxa-rag` also ships a producer-side bridge that normalizes MCP source records into the same `ExtractionResult` JSON files the daemon already knows how to ingest. The bridge writes deterministic files under `watch_dir/mcp/<source>/`.
+
+Run one source per invocation so each source can provide its own platform base URL:
+
+```bash
+# Linkding can preserve the bookmarked URL as metadata.url.
+cargo run -p noxa-rag --bin noxa-rag-mcp-sync -- \
+  linkding \
+  --watch-dir ~/.noxa/output \
+  --platform-base-url https://ding.example.com
+
+# Memos, bytestash, and paperless require a platform base URL so metadata.url
+# is a valid http(s) URL for the existing noxa-rag pipeline validation.
+cargo run -p noxa-rag --bin noxa-rag-mcp-sync -- \
+  memos \
+  --watch-dir ~/.noxa/output \
+  --platform-base-url https://memos.example.com
+```
+
+Source-specific behavior:
+
+- `linkding`: uses the bookmarked page URL for `metadata.url` and optionally records a Linkding search URL as `platform_url`
+- `memos`: derives `metadata.url` and `platform_url` from `/api/v1/memos/{id}`
+- `bytestash`: derives `metadata.url` and `platform_url` from `/api/snippets/{id}`
+- `paperless`: derives `metadata.url` and `platform_url` from `/api/documents/{id}/` and resolves tag/correspondent names through lookup calls
+
 ## Configuration Reference
 
 | Field | Default | Description |
