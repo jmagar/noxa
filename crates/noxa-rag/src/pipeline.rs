@@ -1950,9 +1950,9 @@ async fn process_job(
 #[cfg(test)]
 mod tests {
     use super::{
-        IngestionProvenance, build_point_payload, canonical_watch_root,
-        collect_indexable_paths, detect_git_branch, is_indexable, parse_file,
-        path_is_within_watch_root, validate_url_scheme,
+        IngestionProvenance, build_point_payload, canonical_watch_root, collect_indexable_paths,
+        detect_git_branch, is_indexable, parse_file, path_is_within_watch_root,
+        validate_url_scheme,
     };
     use serde_json::json;
     use std::fs;
@@ -3006,7 +3006,9 @@ mod tests {
     async fn canonical_watch_root_resolves_once_up_front() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let nested = tmp.path().join("watch/../watch");
-        tokio::fs::create_dir_all(&nested).await.expect("create watch dir");
+        tokio::fs::create_dir_all(&nested)
+            .await
+            .expect("create watch dir");
 
         let canonical = canonical_watch_root(&nested)
             .await
@@ -3023,8 +3025,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let watch = tmp.path().join("watch");
         let outside = tmp.path().join("outside");
-        tokio::fs::create_dir_all(&watch).await.expect("create watch");
-        tokio::fs::create_dir_all(&outside).await.expect("create outside");
+        tokio::fs::create_dir_all(&watch)
+            .await
+            .expect("create watch");
+        tokio::fs::create_dir_all(&outside)
+            .await
+            .expect("create outside");
 
         let watch_root = canonical_watch_root(&watch).await.expect("watch root");
         let outside_file = outside.join("doc.json");
