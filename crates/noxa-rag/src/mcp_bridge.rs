@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -174,7 +173,7 @@ where
                 }
                 new_records += 1;
                 report.fetched += 1;
-                match write_bridge_document(&self.config.watch_dir, &document)? {
+                match write_bridge_document(&self.config.watch_dir, &document).await? {
                     WriteStatus::Written => report.written += 1,
                     WriteStatus::Unchanged => report.skipped += 1,
                 }
@@ -213,21 +212,22 @@ where
             for record in records {
                 let document = normalize_memo_record(record, base_url)?;
                 report.fetched += 1;
-                match write_bridge_document(&self.config.watch_dir, &document)? {
+                match write_bridge_document(&self.config.watch_dir, &document).await? {
                     WriteStatus::Written => report.written += 1,
                     WriteStatus::Unchanged => report.skipped += 1,
                 }
             }
 
-            page_token = data
+            let next_page_token = data
                 .get("nextPageToken")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
-            if page_token.is_none() {
+            if next_page_token.is_none() || next_page_token == page_token {
                 break;
             }
+            page_token = next_page_token;
         }
 
         Ok(report)
@@ -248,7 +248,7 @@ where
         for record in records {
             let document = normalize_bytestash_record(record, base_url)?;
             report.fetched += 1;
-            match write_bridge_document(&self.config.watch_dir, &document)? {
+            match write_bridge_document(&self.config.watch_dir, &document).await? {
                 WriteStatus::Written => report.written += 1,
                 WriteStatus::Unchanged => report.skipped += 1,
             }
@@ -284,7 +284,7 @@ where
                 let document =
                     normalize_paperless_record(record, &tag_names, &correspondent_names, base_url)?;
                 report.fetched += 1;
-                match write_bridge_document(&self.config.watch_dir, &document)? {
+                match write_bridge_document(&self.config.watch_dir, &document).await? {
                     WriteStatus::Written => report.written += 1,
                     WriteStatus::Unchanged => report.skipped += 1,
                 }
@@ -336,18 +336,20 @@ where
 }
 
 pub fn relative_output_path(source: McpSource, external_id: &str) -> PathBuf {
-    PathBuf::from("mcp")
-        .join(source.as_str())
-        .join(format!("{}.json", sanitize_component(external_id)))
+    PathBuf::from("mcp").join(source.as_str()).join(format!(
+        "{}-{:016x}.json",
+        sanitize_component(external_id),
+        stable_component_hash(external_id)
+    ))
 }
 
-pub fn write_bridge_document(
+pub async fn write_bridge_document(
     root: &Path,
     document: &BridgeDocument,
 ) -> Result<WriteStatus, RagError> {
     let path = root.join(relative_output_path(document.source, &document.external_id));
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
 
     let payload = StoredExtractionResult {
@@ -356,13 +358,13 @@ pub fn write_bridge_document(
         platform_url: document.platform_url.clone(),
     };
     let serialized = serde_json::to_vec_pretty(&payload)?;
-    if fs::read(&path).ok().as_deref() == Some(serialized.as_slice()) {
+    if tokio::fs::read(&path).await.ok().as_deref() == Some(serialized.as_slice()) {
         return Ok(WriteStatus::Unchanged);
     }
 
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, &serialized)?;
-    fs::rename(&tmp_path, &path)?;
+    let tmp_path = temp_output_path(&path);
+    tokio::fs::write(&tmp_path, &serialized).await?;
+    tokio::fs::rename(&tmp_path, &path).await?;
     Ok(WriteStatus::Written)
 }
 
@@ -551,6 +553,22 @@ fn sanitize_component(value: &str) -> String {
         .collect()
 }
 
+fn stable_component_hash(value: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut hasher = DefaultHasher::new();
+    hasher.write(value.as_bytes());
+    hasher.finish()
+}
+
+fn temp_output_path(path: &Path) -> PathBuf {
+    let suffix = format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
+    path.with_extension(format!("json.{suffix}"))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredExtractionResult {
     #[serde(flatten)]
@@ -589,7 +607,7 @@ fn array_field<'a>(value: &'a Value, key: &str) -> Result<Vec<&'a Value>, RagErr
         .ok_or_else(|| RagError::Parse(format!("expected array field {key}")))
 }
 
-fn required_base_url<'a>(config: &'a BridgeConfig, source: McpSource) -> Result<&'a str, RagError> {
+fn required_base_url(config: &BridgeConfig, source: McpSource) -> Result<&str, RagError> {
     config.platform_base_url.as_deref().ok_or_else(|| {
         RagError::Config(format!("{} requires --platform-base-url", source.as_str()))
     })
@@ -606,7 +624,13 @@ fn join_base_url(base: &str, path: &str) -> Result<String, RagError> {
 fn linkding_platform_url(base: &str, bookmark_url: &str) -> Result<String, RagError> {
     let mut url = Url::parse(base)
         .map_err(|e| RagError::Parse(format!("invalid linkding base URL {base:?}: {e}")))?;
-    url.set_path("bookmarks");
+    let current_path = url.path().trim_end_matches('/');
+    let next_path = if current_path.is_empty() {
+        "/bookmarks".to_string()
+    } else {
+        format!("{current_path}/bookmarks")
+    };
+    url.set_path(&next_path);
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("q", bookmark_url)
         .finish();
@@ -684,6 +708,7 @@ fn first_line_title(content: &str) -> Option<String> {
         .map(|line| line.chars().take(80).collect::<String>())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_extraction(
     url: String,
     title: Option<String>,
@@ -783,10 +808,16 @@ mod tests {
     fn relative_output_path_sanitizes_external_ids() {
         let path = relative_output_path(McpSource::Memos, "memos/G3BLCD3swV4Fuxk4uMT97d");
 
-        assert_eq!(
-            path,
-            PathBuf::from("mcp/memos/memos_G3BLCD3swV4Fuxk4uMT97d.json")
-        );
+        let rendered = path.display().to_string();
+        assert!(rendered.starts_with("mcp/memos/memos_G3BLCD3swV4Fuxk4uMT97d-"));
+        assert!(rendered.ends_with(".json"));
+    }
+
+    #[test]
+    fn relative_output_path_distinguishes_colliding_sanitized_ids() {
+        let first = relative_output_path(McpSource::Memos, "memos/G3");
+        let second = relative_output_path(McpSource::Memos, "memos_G3");
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -822,6 +853,25 @@ mod tests {
             Some("2026-02-02T15:23:27.821564-05:00")
         );
         assert!(document.extraction.content.markdown.contains("MCP client"));
+    }
+
+    #[test]
+    fn normalize_linkding_record_preserves_base_path_prefix() {
+        let record = serde_json::json!({
+            "id": 12,
+            "url": "https://example.com/doc",
+            "title": "Doc",
+            "description": "",
+            "notes": ""
+        });
+
+        let document =
+            normalize_linkding_record(&record, Some("https://ding.example/app")).expect("maps");
+
+        assert_eq!(
+            document.platform_url.as_deref(),
+            Some("https://ding.example/app/bookmarks?q=https%3A%2F%2Fexample.com%2Fdoc")
+        );
     }
 
     #[test]
@@ -933,8 +983,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_bridge_document_skips_unchanged_payloads() {
+    #[tokio::test]
+    async fn write_bridge_document_skips_unchanged_payloads() {
         let temp = tempfile::tempdir().expect("tempdir");
         let document = BridgeDocument {
             source: McpSource::Linkding,
@@ -954,8 +1004,12 @@ mod tests {
             ),
         };
 
-        let first = write_bridge_document(temp.path(), &document).expect("first write");
-        let second = write_bridge_document(temp.path(), &document).expect("second write");
+        let first = write_bridge_document(temp.path(), &document)
+            .await
+            .expect("first write");
+        let second = write_bridge_document(temp.path(), &document)
+            .await
+            .expect("second write");
 
         assert_eq!(first, WriteStatus::Written);
         assert_eq!(second, WriteStatus::Unchanged);
@@ -1027,8 +1081,16 @@ mod tests {
         assert_eq!(calls[0].2, "bookmark.list");
         assert_eq!(calls[0].3, serde_json::json!({ "limit": 1, "offset": 0 }));
         assert_eq!(calls[1].3, serde_json::json!({ "limit": 1, "offset": 1 }));
-        assert!(temp.path().join("mcp/linkding/linkding_1.json").exists());
-        assert!(temp.path().join("mcp/linkding/linkding_2.json").exists());
+        assert!(
+            temp.path()
+                .join(relative_output_path(McpSource::Linkding, "linkding:1"))
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(relative_output_path(McpSource::Linkding, "linkding:2"))
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1092,7 +1154,11 @@ mod tests {
         );
         let calls = executor.calls();
         assert_eq!(calls.len(), 2);
-        assert!(temp.path().join("mcp/linkding/linkding_1.json").exists());
+        assert!(
+            temp.path()
+                .join(relative_output_path(McpSource::Linkding, "linkding:1"))
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1156,8 +1222,70 @@ mod tests {
             calls[1].3,
             serde_json::json!({ "page_size": 1, "page_token": "page-2" })
         );
-        assert!(temp.path().join("mcp/memos/memos_first.json").exists());
-        assert!(temp.path().join("mcp/memos/memos_second.json").exists());
+        assert!(
+            temp.path()
+                .join(relative_output_path(McpSource::Memos, "memos:first"))
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(relative_output_path(McpSource::Memos, "memos:second"))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_memos_stops_when_next_page_token_repeats() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executor = MockExecutor::with_responses(vec![
+            Ok(serde_json::json!({
+                "ok": true,
+                "data": {
+                    "memos": [
+                        {
+                            "name": "memos/first",
+                            "content": "first memo",
+                            "tags": []
+                        }
+                    ],
+                    "nextPageToken": "page-2"
+                }
+            })),
+            Ok(serde_json::json!({
+                "ok": true,
+                "data": {
+                    "memos": [
+                        {
+                            "name": "memos/second",
+                            "content": "second memo",
+                            "tags": []
+                        }
+                    ],
+                    "nextPageToken": "page-2"
+                }
+            })),
+        ]);
+        let bridge = McpBridge::new(
+            executor.clone(),
+            BridgeConfig {
+                server: "lab".to_string(),
+                watch_dir: temp.path().to_path_buf(),
+                page_size: 1,
+                platform_base_url: Some("https://memos.example.com".to_string()),
+            },
+        );
+
+        let report = bridge.sync(McpSource::Memos).await.expect("sync memos");
+
+        assert_eq!(
+            report,
+            SyncReport {
+                fetched: 2,
+                written: 2,
+                skipped: 0
+            }
+        );
+        assert_eq!(executor.calls().len(), 2);
     }
 
     #[tokio::test]
@@ -1210,7 +1338,10 @@ mod tests {
         assert_eq!(calls[0].3, serde_json::json!({}));
         assert!(
             temp.path()
-                .join("mcp/bytestash/bytestash_snippet-1.json")
+                .join(relative_output_path(
+                    McpSource::Bytestash,
+                    "bytestash:snippet-1"
+                ))
                 .exists()
         );
     }
@@ -1284,6 +1415,10 @@ mod tests {
             calls[2].3,
             serde_json::json!({ "page_size": 100, "page": 1 })
         );
-        assert!(temp.path().join("mcp/paperless/paperless_17.json").exists());
+        assert!(
+            temp.path()
+                .join(relative_output_path(McpSource::Paperless, "paperless:17"))
+                .exists()
+        );
     }
 }

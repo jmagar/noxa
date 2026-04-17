@@ -2866,10 +2866,11 @@ async fn run_on_change_command(
 
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(payload.as_bytes())
-            .await
-            .map_err(|e| format!("failed to write command stdin: {e}"))?;
+        if let Err(e) = stdin.write_all(payload.as_bytes()).await {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!("failed to write command stdin: {e}"));
+        }
     }
 
     match tokio::time::timeout(max_runtime, child.wait()).await {
@@ -2879,7 +2880,10 @@ async fn run_on_change_command(
         Err(_) => {
             let _ = child.kill().await;
             match child.wait().await {
-                Ok(_) => Err(format!("command timed out after {}s", max_runtime.as_secs())),
+                Ok(_) => Err(format!(
+                    "command timed out after {}s",
+                    max_runtime.as_secs()
+                )),
                 Err(e) => Err(format!("command timed out and could not be reaped: {e}")),
             }
         }
@@ -4857,12 +4861,8 @@ mod tests {
     #[tokio::test]
     async fn on_change_command_times_out_and_returns_promptly() {
         let start = std::time::Instant::now();
-        let result = run_on_change_command(
-            "sleep 5",
-            "{}",
-            std::time::Duration::from_millis(50),
-        )
-        .await;
+        let result =
+            run_on_change_command("sleep 5", "{}", std::time::Duration::from_millis(50)).await;
 
         assert!(result.is_err(), "long-running child should time out");
         assert!(
@@ -4870,6 +4870,20 @@ mod tests {
             "timeout should bound execution, elapsed={:?}",
             start.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_change_command_returns_error_when_child_closes_stdin_early() {
+        let payload = "x".repeat(1024 * 1024);
+        let result = run_on_change_command(
+            "exec 0<&-; sleep 0.05",
+            &payload,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(result.is_err(), "stdin write failure should be surfaced");
     }
 }
 
