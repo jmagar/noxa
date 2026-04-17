@@ -34,21 +34,25 @@ pub(crate) async fn fetch_and_extract(
 
     let cloud_client = cloud::CloudClient::new(cli.api_key.as_deref());
 
-    // --cloud: skip local, go straight to cloud API
-    if cli.cloud {
-        let c = cloud_client.ok_or("--cloud requires NOXA_API_KEY (set via env or --api-key)")?;
-        let options = build_extraction_options(resolved);
-        let format_str = match resolved.format {
+    // Helper: map OutputFormat to the cloud API format string.
+    fn cloud_format_str(f: &OutputFormat) -> &'static str {
+        match f {
             OutputFormat::Markdown => "markdown",
             OutputFormat::Json => "json",
             OutputFormat::Text => "text",
             OutputFormat::Llm => "llm",
             OutputFormat::Html => "html",
-        };
+        }
+    }
+
+    // --cloud: skip local, go straight to cloud API
+    if cli.cloud {
+        let c = cloud_client.ok_or("--cloud requires NOXA_API_KEY (set via env or --api-key)")?;
+        let options = build_extraction_options(resolved);
         let resp = c
             .scrape(
                 url,
-                &[format_str],
+                &[cloud_format_str(&resolved.format)],
                 &options.include_selectors,
                 &options.exclude_selectors,
                 options.only_main_content,
@@ -71,17 +75,10 @@ pub(crate) async fn fetch_and_extract(
     if !matches!(reason, EmptyReason::None) {
         if let Some(ref c) = cloud_client {
             eprintln!("{}", info("falling back to cloud API..."));
-            let format_str = match resolved.format {
-                OutputFormat::Markdown => "markdown",
-                OutputFormat::Json => "json",
-                OutputFormat::Text => "text",
-                OutputFormat::Llm => "llm",
-                OutputFormat::Html => "html",
-            };
             match c
                 .scrape(
                     url,
-                    &[format_str],
+                    &[cloud_format_str(&resolved.format)],
                     &options.include_selectors,
                     &options.exclude_selectors,
                     options.only_main_content,
@@ -176,19 +173,39 @@ pub(crate) async fn enrich_html_with_stylesheets(html: &str, base_url: &str) -> 
         return html.to_string();
     }
 
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .unwrap_or_default();
+    {
+        Ok(c) => c,
+        Err(_) => return html.to_string(),
+    };
+
+    // Fetch stylesheets in parallel, but validate each URL first to prevent SSRF.
+    let mut join_set = tokio::task::JoinSet::new();
+    for href in hrefs {
+        let client = client.clone();
+        join_set.spawn(async move {
+            // SSRF guard: only fetch public HTTP(S) URLs.
+            if validate_public_http_url(&href).await.is_err() {
+                return None;
+            }
+            if let Ok(resp) = client.get(&href).send().await
+                && resp.status().is_success()
+                && let Ok(body) = resp.text().await
+                && !body.trim_start().starts_with("<!")
+                && body.len() < 2_000_000
+            {
+                Some(body)
+            } else {
+                None
+            }
+        });
+    }
 
     let mut extra_css = String::new();
-    for href in &hrefs {
-        if let Ok(resp) = client.get(href).send().await
-            && resp.status().is_success()
-            && let Ok(body) = resp.text().await
-            && !body.trim_start().starts_with("<!")
-            && body.len() < 2_000_000
-        {
+    while let Some(result) = join_set.join_next().await {
+        if let Ok(Some(body)) = result {
             extra_css.push_str("\n<style>\n");
             extra_css.push_str(&body);
             extra_css.push_str("\n</style>\n");

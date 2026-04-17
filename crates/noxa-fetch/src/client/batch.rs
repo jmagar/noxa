@@ -11,7 +11,8 @@ impl FetchClient {
         urls: &[&str],
         concurrency: usize,
     ) -> Vec<BatchResult> {
-        let semaphore = Arc::new(Semaphore::new(concurrency));
+        // Clamp to at least 1 — Semaphore::new(0) blocks all tasks forever.
+        let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
         let mut handles = Vec::with_capacity(urls.len());
 
         for (idx, url) in urls.iter().enumerate() {
@@ -48,7 +49,8 @@ impl FetchClient {
         concurrency: usize,
         options: &noxa_core::ExtractionOptions,
     ) -> Vec<BatchExtractResult> {
-        let semaphore = Arc::new(Semaphore::new(concurrency));
+        // Clamp to at least 1 — Semaphore::new(0) blocks all tasks forever.
+        let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
         let mut handles = Vec::with_capacity(urls.len());
 
         for (idx, url) in urls.iter().enumerate() {

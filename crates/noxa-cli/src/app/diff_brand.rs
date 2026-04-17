@@ -17,11 +17,12 @@ pub(crate) async fn run_diff(
     let diff = noxa_core::diff::diff(&old, &new_result);
 
     // Append diff result to ops log.
+    // Use collect_urls to honour --urls-file / --file / --stdin, consistent with other handlers.
     let ops_log = build_ops_log(cli, resolved);
-    let url = cli
-        .urls
-        .first()
-        .map(|u| normalize_url(u))
+    let url = collect_urls(cli)
+        .ok()
+        .and_then(|entries| entries.into_iter().next().map(|(u, _)| u))
+        .map(|u| normalize_url(&u))
         .unwrap_or_default();
     log_operation(
         &ops_log,
@@ -54,7 +55,8 @@ pub(crate) async fn run_brand(cli: &Cli, resolved: &config::ResolvedConfig) -> R
     )
     .await;
 
-    let output = serde_json::to_string_pretty(&brand).expect("serialization failed");
+    let output = serde_json::to_string_pretty(&brand)
+        .map_err(|e| format!("failed to serialize brand: {e}"))?;
     println!("{output}");
     Ok(())
 }

@@ -324,7 +324,7 @@ pub(crate) async fn run_batch_llm(
     eprintln!("Processed {total} URLs ({ok} ok, {errors} errors)");
 
     if let Some(ref webhook_url) = cli.webhook {
-        fire_webhook(
+        let handle = fire_webhook(
             webhook_url,
             &serde_json::json!({
                 "event": "batch_llm_complete",
@@ -333,7 +333,8 @@ pub(crate) async fn run_batch_llm(
                 "errors": errors,
             }),
         );
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Await webhook delivery with a bounded timeout instead of a blind sleep.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
     }
 
     if errors > 0 {

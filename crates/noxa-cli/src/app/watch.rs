@@ -8,15 +8,41 @@ pub(crate) fn timestamp() -> String {
     let hours = (now % 86400) / 3600;
     let minutes = (now % 3600) / 60;
     let seconds = now % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
+    // Append "UTC" so users are not misled into thinking this is local time.
+    format!("{hours:02}:{minutes:02}:{seconds:02} UTC")
 }
 
-/// Fire a webhook POST with a JSON payload. Non-blocking — errors logged to stderr.
+/// Shared HTTP client for webhook delivery — built once and reused across all
+/// webhook calls to avoid paying TLS/connector setup on every event.
+static WEBHOOK_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn webhook_client() -> reqwest::Client {
+    WEBHOOK_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("webhook reqwest::Client build should not fail")
+        })
+        .clone()
+}
+
+/// Fire a webhook POST with a JSON payload.
+/// Returns a `JoinHandle` so callers can await delivery with a bounded timeout.
 /// Auto-detects Discord and Slack webhook URLs and wraps the payload accordingly.
-pub(crate) fn fire_webhook(url: &str, payload: &serde_json::Value) {
+///
+/// The webhook URL is **not** logged verbatim to avoid leaking embedded tokens
+/// (Discord/Slack webhook tokens appear in the URL path).
+pub(crate) fn fire_webhook(url: &str, payload: &serde_json::Value) -> tokio::task::JoinHandle<()> {
     let url = url.to_string();
     let is_discord = url.contains("discord.com/api/webhooks");
     let is_slack = url.contains("hooks.slack.com");
+
+    // Derive a safe display string: scheme + host only, no path/query/token.
+    let safe_host = url::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "[redacted]".to_string());
 
     let body = if is_discord {
         let event = payload
@@ -45,27 +71,22 @@ pub(crate) fn fire_webhook(url: &str, payload: &serde_json::Value) {
     } else {
         serde_json::to_string(payload).unwrap_or_default()
     };
+
+    let client = webhook_client();
     tokio::spawn(async move {
-        match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
+        match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
         {
-            Ok(c) => match c
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .body(body)
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    let display_url: String = url.chars().take(60).collect();
-                    eprintln!("[webhook] POST {} -> {}", display_url, resp.status());
-                }
-                Err(e) => eprintln!("[webhook] POST failed: {e}"),
-            },
-            Err(e) => eprintln!("[webhook] client error: {e}"),
+            Ok(resp) => {
+                eprintln!("[webhook] POST {} -> {}", safe_host, resp.status());
+            }
+            Err(e) => eprintln!("[webhook] POST failed: {e}"),
         }
-    });
+    })
 }
 
 pub(crate) async fn run_watch(
@@ -123,6 +144,11 @@ pub(crate) async fn run_on_change_command(
             .write_all(payload.as_bytes())
             .await
             .map_err(|e| format!("failed to write command stdin: {e}"))?;
+        // Explicitly close stdin so the child sees EOF.  The implicit drop at the
+        // end of the if-let would also work, but being explicit avoids a future
+        // refactor accidentally keeping the write-end open and deadlocking
+        // commands that wait for EOF (e.g. `cat`, `jq`).
+        drop(stdin);
     }
 
     match tokio::time::timeout(max_runtime, child.wait()).await {
@@ -244,7 +270,8 @@ pub(crate) async fn run_watch_single(
                 }
 
                 if let Some(ref webhook_url) = cli.webhook {
-                    fire_webhook(
+                    // Fire-and-forget: watch loop continues immediately without waiting for delivery.
+                    let _handle = fire_webhook(
                         webhook_url,
                         &serde_json::json!({
                             "event": "watch_change",
@@ -418,7 +445,8 @@ pub(crate) async fn run_watch_multi(
 
             // Fire webhook once with aggregate payload
             if let Some(ref webhook_url) = cli.webhook {
-                fire_webhook(
+                // Fire-and-forget: watch loop continues immediately without waiting for delivery.
+                let _handle = fire_webhook(
                     webhook_url,
                     &serde_json::json!({
                         "event": "watch_changes",

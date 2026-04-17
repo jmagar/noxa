@@ -165,10 +165,14 @@ pub(crate) async fn run_refresh(
             }
         };
 
-        let result = store
-            .write(url, &extraction)
-            .await
-            .map_err(|e| format!("failed to store {url}: {e}"))?;
+        let result = match store.write(url, &extraction).await {
+            Ok(r) => r,
+            Err(error) => {
+                failed += 1;
+                eprintln!("  {yellow}error{reset}  {url}  {dim}failed to store: {error}{reset}");
+                continue;
+            }
+        };
 
         if result.changed {
             changed += 1;

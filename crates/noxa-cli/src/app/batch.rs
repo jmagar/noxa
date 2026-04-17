@@ -45,10 +45,10 @@ pub(crate) async fn run_batch(
         errors
     );
 
-    // Fire webhook on batch complete
+    // Fire webhook on batch complete and await delivery with a bounded timeout.
     if let Some(ref webhook_url) = cli.webhook {
         let urls: Vec<&str> = results.iter().map(|r| r.url.as_str()).collect();
-        fire_webhook(
+        let handle = fire_webhook(
             webhook_url,
             &serde_json::json!({
                 "event": "batch_complete",
@@ -58,7 +58,7 @@ pub(crate) async fn run_batch(
                 "urls": urls,
             }),
         );
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
     }
 
     if errors > 0 {

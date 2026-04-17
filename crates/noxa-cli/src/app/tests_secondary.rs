@@ -101,9 +101,14 @@ mod enum_deserialize_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path();
         assert!(write_to_file(path, "../escape.md", "x").is_err());
-        assert!(write_to_file(path, "/etc/passwd", "x").is_err());
         assert!(write_to_file(path, "..\\windows\\evil", "x").is_err());
         assert!(write_to_file(path, "foo\0bar", "x").is_err());
+        // Absolute-path rejection is platform-specific: /etc/passwd is only
+        // absolute on Unix; on Windows Path::is_absolute() requires a drive letter.
+        #[cfg(unix)]
+        assert!(write_to_file(path, "/etc/passwd", "x").is_err());
+        #[cfg(windows)]
+        assert!(write_to_file(path, "C:\\Windows\\System32\\drivers\\etc\\hosts", "x").is_err());
     }
 
     #[test]

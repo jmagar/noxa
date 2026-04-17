@@ -20,15 +20,24 @@ pub(crate) fn spawn_crawl_background(cli: &Cli, resolved: &config::ResolvedConfi
         let _ = std::fs::create_dir_all(p);
     }
 
+    // Open /dev/null for writing to use as a writable sink for stdout/stderr fallback.
+    let open_devnull = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+    };
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
-        .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+        .or_else(|_| open_devnull())
+        .expect("failed to open log file and /dev/null fallback");
     let log_clone = log_file
         .try_clone()
-        .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+        .or_else(|_| open_devnull())
+        .expect("failed to clone log fd and /dev/null fallback");
 
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(&args)
@@ -36,7 +45,8 @@ pub(crate) fn spawn_crawl_background(cli: &Cli, resolved: &config::ResolvedConfi
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_clone));
 
-    // Detach from process group so it survives terminal close
+    // Detach from process group so it survives terminal close (Unix only).
+    #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -324,10 +334,10 @@ pub(crate) async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> R
         print_crawl_output(&result, &resolved.format, resolved.metadata);
     }
 
-    // Fire webhook on crawl complete
+    // Fire webhook on crawl complete and await delivery with a bounded timeout.
     if let Some(ref webhook_url) = cli.webhook {
         let urls: Vec<&str> = result.pages.iter().map(|p| p.url.as_str()).collect();
-        fire_webhook(
+        let handle = fire_webhook(
             webhook_url,
             &serde_json::json!({
                 "event": "crawl_complete",
@@ -338,8 +348,7 @@ pub(crate) async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> R
                 "urls": urls,
             }),
         );
-        // Brief pause so the async webhook has time to fire
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
     }
 
     if result.errors > 0 {

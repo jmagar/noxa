@@ -191,16 +191,18 @@ pub(crate) async fn run() {
         return;
     }
 
+    // Extract the first URL from the already-collected entries to avoid re-reading --urls-file.
+    let first_url = entries.into_iter().next().map(|(url, _)| url).unwrap_or_default();
+
     // Single-page extraction (handles both HTML and PDF via content-type detection)
     match fetch_and_extract(&cli, &resolved).await {
         Ok(FetchOutput::Local(result)) => {
             print_output(&result, &resolved.format, resolved.metadata);
             if !cli.no_store {
-                let url = primary_input_url(&cli);
                 let content = format_output(&result, &resolved.format, resolved.metadata);
                 let store_root = content_store_root(resolved.output_dir.as_deref());
                 let dest = store_root
-                    .join(url_to_store_path(&url))
+                    .join(url_to_store_path(&first_url))
                     .with_extension("md");
                 print_save_hint(&dest, &content);
             }
@@ -208,11 +210,10 @@ pub(crate) async fn run() {
         Ok(FetchOutput::Cloud(resp)) => {
             print_cloud_output(&resp, &resolved.format);
             if !cli.no_store {
-                let url = primary_input_url(&cli);
                 let content = format_cloud_output(&resp, &resolved.format);
                 let store_root = content_store_root(resolved.output_dir.as_deref());
                 let dest = store_root
-                    .join(url_to_store_path(&url))
+                    .join(url_to_store_path(&first_url))
                     .with_extension("md");
                 print_save_hint(&dest, &content);
             }
@@ -224,9 +225,3 @@ pub(crate) async fn run() {
     }
 }
 
-fn primary_input_url(cli: &Cli) -> String {
-    collect_urls(cli)
-        .ok()
-        .and_then(|entries| entries.into_iter().next().map(|(url, _)| url))
-        .unwrap_or_default()
-}

@@ -381,6 +381,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_liveness_prefers_proc_when_available() {
         let dir = tempfile::tempdir().unwrap();
@@ -397,6 +398,7 @@ mod tests {
         assert!(!called.get());
     }
 
+    #[cfg(unix)]
     #[test]
     fn liveness_falls_back_to_signal_probe_without_proc() {
         let running = is_pid_running_with(888, None, |pid| {
@@ -458,7 +460,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output_path = dir.path().join("payload.json");
         let payload = r#"{"status":"changed"}"#;
-        let cmd = format!("cat > {}", output_path.display());
+        // Pass the path via env so it is never interpolated unquoted into the shell
+        // command string — avoids breakage when TMPDIR contains spaces or special chars.
+        std::env::set_var("_NOXA_TEST_OUTPUT", &output_path);
+        let cmd = "cat > \"$_NOXA_TEST_OUTPUT\"";
 
         run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))
             .await

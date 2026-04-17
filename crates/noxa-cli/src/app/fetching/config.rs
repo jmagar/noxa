@@ -24,21 +24,26 @@ pub(crate) fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -
         (None, Vec::new())
     };
 
+    // Use lowercase keys so user -H flags (any casing) override defaults without duplication.
+    // HTTP header names are case-insensitive; we normalise to ASCII-lowercase throughout.
     let mut headers = std::collections::HashMap::from([(
-        "Accept-Language".to_string(),
+        "accept-language".to_string(),
         "en-US,en;q=0.9".to_string(),
     )]);
 
-    // Parse -H "Key: Value" flags
+    // Parse -H "Key: Value" flags; normalise key to lowercase for dedup.
     for h in &cli.headers {
         if let Some((key, val)) = h.split_once(':') {
-            headers.insert(key.trim().to_string(), val.trim().to_string());
+            headers.insert(
+                key.trim().to_ascii_lowercase(),
+                val.trim().to_string(),
+            );
         }
     }
 
-    // --cookie shorthand
+    // --cookie shorthand (lowercase key for consistency)
     if let Some(ref cookie) = cli.cookie {
-        headers.insert("Cookie".to_string(), cookie.clone());
+        headers.insert("cookie".to_string(), cookie.clone());
     }
 
     // --cookie-file: parse JSON array of {name, value, domain, ...}
@@ -46,10 +51,10 @@ pub(crate) fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -
         match parse_cookie_file(path) {
             Ok(cookie_str) => {
                 // Merge with existing cookies if --cookie was also provided
-                if let Some(existing) = headers.get("Cookie") {
-                    headers.insert("Cookie".to_string(), format!("{existing}; {cookie_str}"));
+                if let Some(existing) = headers.get("cookie") {
+                    headers.insert("cookie".to_string(), format!("{existing}; {cookie_str}"));
                 } else {
-                    headers.insert("Cookie".to_string(), cookie_str);
+                    headers.insert("cookie".to_string(), cookie_str);
                 }
             }
             Err(e) => {
@@ -102,14 +107,13 @@ pub(crate) fn parse_cookie_file(path: &str) -> Result<String, String> {
     let pairs: Vec<String> = cookies
         .iter()
         .filter_map(|c| {
-            let secure = c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false);
-            let domain = c.get("domain").and_then(|v| v.as_str()).unwrap_or("");
-            let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("/");
-            if secure || !domain.is_empty() || path != "/" {
-                return None;
-            }
+            // Accept all cookies with a name and value; domain/secure/path are metadata
+            // that don't affect whether the cookie is usable for HTTP requests.
             let name = c.get("name")?.as_str()?;
             let value = c.get("value")?.as_str()?;
+            if name.is_empty() {
+                return None;
+            }
             Some(format!("{name}={value}"))
         })
         .collect();

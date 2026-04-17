@@ -80,7 +80,10 @@ pub(crate) fn list_domain_docs(dir: &std::path::Path, store_root: &std::path::Pa
         return;
     }
 
-    // Measure URL column width for alignment
+    // Measure URL column width for alignment.
+    // Note: uses byte length (url.len()), which is correct for ASCII store keys
+    // (normalized URLs are always ASCII). Non-ASCII display widths would require
+    // the unicode-width crate but are not needed in practice here.
     let url_width = docs.iter().map(|(url, _)| url.len()).max().unwrap_or(0);
 
     eprintln!(
@@ -352,14 +355,17 @@ pub(crate) async fn run_search(
                 .send()
                 .await
                 .map_err(|e| format!("API error: {e}"))?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
+            let status = resp.status();
+            // Read text first so we can include a body preview in both error paths.
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
                 let preview: String = body.chars().take(240).collect();
                 return Err(format!("search API returned HTTP {status}: {preview}"));
             }
-            let resp: serde_json::Value =
-                resp.json().await.map_err(|e| format!("parse error: {e}"))?;
+            let resp: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                let preview: String = body.chars().take(240).collect();
+                format!("parse error: {e} (body: {preview})")
+            })?;
             resp.get("results")
                 .and_then(|v| v.as_array())
                 .map(|arr| {

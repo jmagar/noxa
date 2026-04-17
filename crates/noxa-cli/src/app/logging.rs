@@ -41,11 +41,14 @@ fn env_flag_enabled(name: &str) -> bool {
         .ok()
         .map(|value| {
             let trimmed = value.trim();
-            trimmed.is_empty()
-                || matches!(
-                    trimmed.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
+            // Empty / whitespace-only values are treated as unset (not enabled).
+            // Only explicit truthy tokens enable the flag so that patterns like
+            // `export NOXA_NO_STORE=` (common "unset-like" shell idioms) do not
+            // accidentally disable the store.
+            matches!(
+                trimmed.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
         })
         .unwrap_or(false)
 }
@@ -72,7 +75,9 @@ pub(crate) async fn log_operation(
             output: output(),
         };
         if let Err(e) = log.append(&domain, &entry).await {
-            tracing::warn!(op = %op_dbg, url, %domain, error = %e, "ops log append failed");
+            // Log domain rather than the full URL to avoid leaking sensitive query parameters
+            // (API keys, auth tokens) that may appear in operator-provided URLs.
+            tracing::warn!(op = %op_dbg, %domain, error = %e, "ops log append failed");
         }
     }
 }

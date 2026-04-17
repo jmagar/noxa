@@ -16,7 +16,9 @@ pub(crate) fn crawl_status_key(input: &str) -> String {
         .ok()
         .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
         .or_else(|| {
-            input
+            // Use `normalized` (not raw `input`) so both paths derive the host
+            // from the same canonical form (scheme, case, trailing-dot removal).
+            normalized
                 .trim()
                 .trim_start_matches("https://")
                 .trim_start_matches("http://")
@@ -279,6 +281,14 @@ where
     if let Some(root) = proc_root {
         return root.join(pid.to_string()).exists();
     }
+    // Validate PID fits in libc::pid_t (i32 on Linux/macOS) before casting.
+    // A u32 value > i32::MAX would wrap to a negative PID and probe the wrong target.
+    if pid > i32::MAX as u32 {
+        return false;
+    }
+    // TODO: On Linux, also read /proc/<pid>/stat field 22 (starttime) and compare
+    // against the recorded crawl start time to guard against PID reuse races where
+    // a crashed crawl's PID is recycled by an unrelated process (shell, compiler, etc.).
     match kill_probe(pid as libc::pid_t) {
         Ok(()) => true,
         Err(error) => matches!(error.raw_os_error(), Some(code) if code == libc::EPERM),

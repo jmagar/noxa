@@ -12,7 +12,10 @@ pub(crate) fn collect_urls(cli: &Cli) -> Result<Vec<(String, Option<String>)>, S
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            if let Some((url_part, name_part)) = trimmed.split_once(',') {
+            // rsplit_once so URLs containing commas (e.g. query strings like
+            // ?ll=40.7,-74.0) are preserved; the optional name suffix must not
+            // itself contain commas.
+            if let Some((url_part, name_part)) = trimmed.rsplit_once(',') {
                 let name = name_part.trim();
                 let custom = if name.is_empty() {
                     None
@@ -41,11 +44,16 @@ impl FetchOutput {
         match self {
             FetchOutput::Local(r) => Ok(*r),
             FetchOutput::Cloud(resp) => {
-                // Cloud response has an "extraction" field with the full ExtractionResult
-                resp.get("extraction")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .or_else(|| serde_json::from_value(resp.clone()).ok())
-                    .ok_or_else(|| "could not parse extraction from cloud response".to_string())
+                // Cloud response has an "extraction" field with the full ExtractionResult.
+                // If the field is present but malformed, surface that specific error rather
+                // than silently falling back and hiding the root cause.
+                if let Some(v) = resp.get("extraction") {
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| format!("failed to parse cloud extraction field: {e}"))
+                } else {
+                    serde_json::from_value(resp)
+                        .map_err(|e| format!("could not parse extraction from cloud response: {e}"))
+                }
             }
         }
     }

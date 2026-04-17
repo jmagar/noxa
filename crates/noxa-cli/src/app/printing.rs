@@ -121,31 +121,7 @@ pub(crate) fn print_crawl_output(result: &CrawlResult, format: &OutputFormat, sh
                 serde_json::to_string_pretty(result).expect("serialization failed")
             );
         }
-        OutputFormat::Markdown => {
-            for page in &result.pages {
-                let Some(ref extraction) = page.extraction else {
-                    continue;
-                };
-                print_page_section(&page.url, extraction, format, show_metadata);
-            }
-        }
-        OutputFormat::Text => {
-            for page in &result.pages {
-                let Some(ref extraction) = page.extraction else {
-                    continue;
-                };
-                print_page_section(&page.url, extraction, format, show_metadata);
-            }
-        }
-        OutputFormat::Llm => {
-            for page in &result.pages {
-                let Some(ref extraction) = page.extraction else {
-                    continue;
-                };
-                print_page_section(&page.url, extraction, format, show_metadata);
-            }
-        }
-        OutputFormat::Html => {
+        _ => {
             for page in &result.pages {
                 let Some(ref extraction) = page.extraction else {
                     continue;
@@ -182,43 +158,7 @@ pub(crate) fn print_batch_output(
                 serde_json::to_string_pretty(&entries).expect("serialization failed")
             );
         }
-        OutputFormat::Markdown => {
-            for r in results {
-                match &r.result {
-                    Ok(extraction) => {
-                        print_page_section(&r.url, extraction, format, show_metadata);
-                    }
-                    Err(e) => {
-                        eprintln!("error: {} -- {}", r.url, e);
-                    }
-                }
-            }
-        }
-        OutputFormat::Text => {
-            for r in results {
-                match &r.result {
-                    Ok(extraction) => {
-                        print_page_section(&r.url, extraction, format, show_metadata);
-                    }
-                    Err(e) => {
-                        eprintln!("error: {} -- {}", r.url, e);
-                    }
-                }
-            }
-        }
-        OutputFormat::Llm => {
-            for r in results {
-                match &r.result {
-                    Ok(extraction) => {
-                        print_page_section(&r.url, extraction, format, show_metadata);
-                    }
-                    Err(e) => {
-                        eprintln!("error: {} -- {}", r.url, e);
-                    }
-                }
-            }
-        }
-        OutputFormat::Html => {
+        _ => {
             for r in results {
                 match &r.result {
                     Ok(extraction) => {

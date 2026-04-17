@@ -8,17 +8,32 @@ pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
         return;
     }
 
-    // Exact URL lookup
-    let looks_like_url = query.starts_with("http://")
-        || query.starts_with("https://")
-        || (!query.contains(' ') && query.contains('.'));
+    // Exact URL lookup.
+    // Require an explicit scheme (http:// or https://) OR a parseable URL with a valid
+    // host that has at least one dot and a TLD-like final label (2+ alphabetic chars).
+    // This avoids treating tokens like "node.js", "e.g.", or "readme.md" as URLs.
+    let has_scheme = query.starts_with("http://") || query.starts_with("https://");
+    let url_candidate = if has_scheme {
+        query.to_string()
+    } else {
+        format!("https://{query}")
+    };
+    let looks_like_url = has_scheme || (!query.contains(' ') && query.contains('.') && {
+        url::Url::parse(&url_candidate)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .map(|host| {
+                let parts: Vec<&str> = host.split('.').collect();
+                parts.len() >= 2
+                    && parts.last()
+                        .map(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()))
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    });
 
     if looks_like_url {
-        let url = if query.starts_with("http") {
-            query.to_string()
-        } else {
-            format!("https://{query}")
-        };
+        let url = url_candidate;
         let md_path = store_root
             .join(url_to_store_path(&url))
             .with_extension("md");
@@ -55,9 +70,8 @@ pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
         let url_lower = url.to_lowercase();
         // Also pull title from JSON sidecar if present.
         // Support both new Sidecar envelope and legacy raw ExtractionResult.
-        let title_lower = path
-            .with_extension("json")
-            .pipe(|jp| std::fs::read_to_string(jp).ok())
+        let title_lower = std::fs::read_to_string(path.with_extension("json"))
+            .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| {
                 // New sidecar: nested under current.metadata.title.
@@ -110,13 +124,3 @@ pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
     }
 }
 
-// Helper to pipe a value through a function (avoids temp var for path transform)
-trait Pipe: Sized {
-    fn pipe<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Self) -> R,
-    {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}

@@ -26,16 +26,21 @@ pub(crate) async fn run_research(
     }
 
     // Start job
-    let resp = client
+    let http_resp = client
         .post("https://api.noxa.io/v1/research")
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("API error: {e}"))?
+        .map_err(|e| format!("API error: {e}"))?;
+    let status = http_resp.status();
+    let resp = http_resp
         .json::<serde_json::Value>()
         .await
-        .map_err(|e| format!("parse error: {e}"))?;
+        .map_err(|e| format!("parse error (HTTP {status}): {e}"))?;
+    if !status.is_success() {
+        return Err(format!("API error {status}: {resp}"));
+    }
 
     let job_id = resp
         .get("id")
@@ -49,15 +54,20 @@ pub(crate) async fn run_research(
     for poll in 0..200 {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        let status_resp = client
+        let poll_http = client
             .get(format!("https://api.noxa.io/v1/research/{job_id}"))
             .header("Authorization", format!("Bearer {api_key}"))
             .send()
             .await
-            .map_err(|e| format!("poll error: {e}"))?
+            .map_err(|e| format!("poll error: {e}"))?;
+        let poll_status = poll_http.status();
+        let status_resp = poll_http
             .json::<serde_json::Value>()
             .await
-            .map_err(|e| format!("parse error: {e}"))?;
+            .map_err(|e| format!("parse error (HTTP {poll_status}): {e}"))?;
+        if !poll_status.is_success() {
+            return Err(format!("API error {poll_status}: {status_resp}"));
+        }
 
         let status = status_resp
             .get("status")
@@ -87,16 +97,22 @@ pub(crate) async fn run_research(
                     .join("-")
                     .to_lowercase();
                 let slug: String = slug.chars().take(50).collect();
-                let filename = format!("research-{slug}.json");
+                // Guard against empty slug (e.g., emoji-only or CJK-punctuation queries)
+                // to avoid producing "research-.json".
+                let filename = if slug.is_empty() {
+                    format!("research-{job_id}.json")
+                } else {
+                    format!("research-{slug}.json")
+                };
 
                 let json = serde_json::to_string_pretty(&status_resp).unwrap_or_default();
-                if let Some(ref dir) = resolved.output_dir {
-                    let output_dir = dir.clone();
-                    write_to_file(&output_dir, &filename, &json)?;
-                } else {
-                    std::fs::write(&filename, &json)
-                        .map_err(|e| format!("failed to write {filename}: {e}"))?;
-                }
+                // Route both branches through write_to_file for consistent traversal/symlink
+                // protections and error reporting; use "." as the default when no output_dir set.
+                let dir = resolved
+                    .output_dir
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                write_to_file(&dir, &filename, &json)?;
 
                 let elapsed = status_resp
                     .get("elapsed_ms")
