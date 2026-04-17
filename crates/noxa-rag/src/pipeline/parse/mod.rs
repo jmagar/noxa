@@ -79,11 +79,23 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
         "yaml" | "yml" | "toml" => Ok(parse_plain_text_file(bytes, file_url, title)),
         "log" => Ok(parse_log_file(bytes, file_url, title)),
         "html" | "htm" => parse_html_file(bytes, file_url).await,
-        "ipynb" => Ok(parse_ipynb_file(&bytes, file_url, title)?),
-        "pdf" => Ok(parse_pdf_file(&bytes, file_url, title)?),
-        "docx" => Ok(parse_office_zip_file(&bytes, file_url, title, "docx")?),
-        "odt" => Ok(parse_office_zip_file(&bytes, file_url, title, "odt")?),
-        "pptx" => Ok(parse_office_zip_file(&bytes, file_url, title, "pptx")?),
+        "ipynb" => spawn_blocking_parse("ipynb", move || {
+            parse_ipynb_file(&bytes, file_url, title)
+        })
+        .await,
+        "pdf" => spawn_blocking_parse("PDF", move || parse_pdf_file(&bytes, file_url, title)).await,
+        "docx" => spawn_blocking_parse("DOCX", move || {
+            parse_office_zip_file(&bytes, file_url, title, "docx")
+        })
+        .await,
+        "odt" => spawn_blocking_parse("ODT", move || {
+            parse_office_zip_file(&bytes, file_url, title, "odt")
+        })
+        .await,
+        "pptx" => spawn_blocking_parse("PPTX", move || {
+            parse_office_zip_file(&bytes, file_url, title, "pptx")
+        })
+        .await,
         "jsonl" => Ok(parse_jsonl_file(bytes, file_url, title)),
         "xml" | "opml" => Ok(parse_xml_file(bytes, file_url, title)),
         "rss" | "atom" => parse_feed_file(bytes, file_url, title),
@@ -93,6 +105,15 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
             "unsupported file extension: .{other}"
         ))),
     }
+}
+
+async fn spawn_blocking_parse<F>(label: &'static str, f: F) -> Result<ParsedFile, RagError>
+where
+    F: FnOnce() -> Result<ParsedFile, RagError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| RagError::Parse(format!("{label} spawn_blocking: {e}")))?
 }
 
 fn file_url_for_path(path: &Path) -> String {
@@ -265,6 +286,4 @@ pub(crate) fn make_text_result(
 }
 
 #[cfg(test)]
-mod tests {
-    include!("./tests.rs");
-}
+mod tests;

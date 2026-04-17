@@ -112,10 +112,6 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, config: 
     }
 }
 
-fn detect_git_branch(file_path: &Path) -> Option<String> {
-    scan::detect_git_branch(file_path)
-}
-
 pub(crate) async fn process_job(
     job: IndexJob,
     embed: &DynEmbedProvider,
@@ -186,7 +182,7 @@ pub(crate) async fn process_job(
         result.metadata.last_modified =
             Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
-    let git_branch = detect_git_branch(&job.path);
+    let git_branch = scan::detect_git_branch(&job.path);
 
     let raw_url = result.metadata.url.clone().unwrap_or_else(|| {
         url::Url::from_file_path(&canonical)

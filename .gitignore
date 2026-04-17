@@ -21,3 +21,6 @@ benchmarks
 .dolt/
 *.db
 .beads-credential-key
+
+# Local review notes / scratch reports
+.full-review/

@@ -10,13 +10,19 @@ mod intelligence_tools;
 mod research;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use noxa_store::validate_public_http_url;
+use rmcp::ErrorData;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, Implementation, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, ServerHandler, tool, tool_router};
 
 use crate::cloud::CloudClient;
 use crate::tools::{
@@ -110,7 +116,6 @@ impl NoxaMcp {
     }
 }
 
-#[tool_handler]
 impl ServerHandler for NoxaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -119,6 +124,39 @@ impl ServerHandler for NoxaMcp {
                 "Noxa MCP server -- web content extraction for AI agents. \
                  Tools: scrape, crawl, map, batch, extract, summarize, diff, brand, research, search.",
             ))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tool = request.name.to_string();
+        let started = Instant::now();
+        let tcc = ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(_) => tracing::info!(tool = %tool, duration_ms, "tool ok"),
+            Err(e) => tracing::warn!(tool = %tool, duration_ms, error = %e, "tool err"),
+        }
+        result
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult {
+            tools: self.tool_router.list_all(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
     }
 }
 
