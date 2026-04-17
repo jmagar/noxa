@@ -4,24 +4,41 @@ fn is_fence_line(trimmed: &str) -> bool {
     trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
+/// Return the fence opener style if this line starts a or closes a fence, otherwise `None`.
+fn fence_style(trimmed: &str) -> Option<&'static str> {
+    if trimmed.starts_with("```") {
+        Some("```")
+    } else if trimmed.starts_with("~~~") {
+        Some("~~~")
+    } else {
+        None
+    }
+}
+
 pub(crate) fn merge_stat_lines(input: &str) -> String {
     let lines: Vec<&str> = input.lines().collect();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
-    let mut in_code_block = false;
+    // Track the fence opener style so that ``` only closes on ``` and ~~~ only
+    // closes on ~~~.  Mixed fences are intentionally left open.
+    let mut open_fence: Option<&'static str> = None;
 
     while i < lines.len() {
         let trimmed = lines[i].trim();
 
-        if is_fence_line(trimmed) {
-            in_code_block = !in_code_block;
+        if let Some(style) = fence_style(trimmed) {
+            match open_fence {
+                None => open_fence = Some(style),
+                Some(opener) if opener == style => open_fence = None,
+                Some(_) => {} // mismatched closer — stay inside the block
+            }
             out.push_str(lines[i]);
             out.push('\n');
             i += 1;
             continue;
         }
 
-        if in_code_block {
+        if open_fence.is_some() {
             out.push_str(lines[i]);
             out.push('\n');
             i += 1;
@@ -121,15 +138,19 @@ pub(crate) fn dedup_content_blocks(input: &str) -> String {
     let mut seen_exact: HashSet<String> = HashSet::new();
     let mut seen_prefix: HashSet<String> = HashSet::new();
     let mut kept: Vec<String> = Vec::with_capacity(blocks.len());
-    let mut in_code_block = false;
+    let mut open_fence_dedup: Option<&'static str> = None;
 
     for block in &blocks {
         let has_fence = block.lines().any(|l| is_fence_line(l.trim_start()));
-        if in_code_block || has_fence {
+        if open_fence_dedup.is_some() || has_fence {
             kept.push(block.to_string());
             for line in block.lines() {
-                if is_fence_line(line.trim_start()) {
-                    in_code_block = !in_code_block;
+                if let Some(style) = fence_style(line.trim_start()) {
+                    match open_fence_dedup {
+                        None => open_fence_dedup = Some(style),
+                        Some(opener) if opener == style => open_fence_dedup = None,
+                        Some(_) => {}
+                    }
                 }
             }
             continue;

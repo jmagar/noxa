@@ -12,20 +12,25 @@ pub(crate) fn collect_urls(cli: &Cli) -> Result<Vec<(String, Option<String>)>, S
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            // rsplit_once so URLs containing commas (e.g. query strings like
-            // ?ll=40.7,-74.0) are preserved; the optional name suffix must not
-            // itself contain commas.
-            if let Some((url_part, name_part)) = trimmed.rsplit_once(',') {
+            // Support an optional `url,name` suffix syntax.  Only split on the
+            // last comma when the part after it does NOT look like a URL
+            // fragment (i.e. doesn't contain "://" or ".").  This preserves
+            // bare URLs that contain commas in their query strings
+            // (e.g. ?ll=40.7,-74.0) while still allowing a custom display
+            // name to be appended after the final comma.
+            let custom = if let Some((url_part, name_part)) = trimmed.rsplit_once(',') {
                 let name = name_part.trim();
-                let custom = if name.is_empty() {
-                    None
-                } else {
-                    Some(name.to_string())
-                };
-                entries.push((normalize_url(url_part.trim()), custom));
+                // If the name part looks like a URL component, don't treat it
+                // as a custom name — the whole line is just a URL.
+                if !name.is_empty() && !name.contains("://") && !name.contains('.') {
+                    entries.push((normalize_url(url_part.trim()), Some(name.to_string())));
+                    continue;
+                }
+                None
             } else {
-                entries.push((normalize_url(trimmed), None));
-            }
+                None
+            };
+            entries.push((normalize_url(trimmed), custom));
         }
     }
 

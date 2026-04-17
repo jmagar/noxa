@@ -211,10 +211,16 @@ pub(crate) fn strip_trailing_empty_headings(input: &str) -> String {
 
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        let Some(caps) = HEADING_RE.captures(trimmed) else {
+        // Also handle headings with no text (e.g. `##` with no space/content after).
+        // HEADING_RE requires a space after the `#` characters, so these would be
+        // skipped without the extra check below.
+        let level = if !trimmed.is_empty() && trimmed.chars().all(|c| c == '#') {
+            trimmed.len()
+        } else if let Some(caps) = HEADING_RE.captures(trimmed) {
+            caps.get(1).unwrap().as_str().len()
+        } else {
             continue;
         };
-        let level = caps.get(1).unwrap().as_str().len();
 
         let mut next_content = None;
         for (j, line_j) in lines.iter().enumerate().skip(i + 1) {
@@ -228,9 +234,15 @@ pub(crate) fn strip_trailing_empty_headings(input: &str) -> String {
             None => remove[i] = true,
             Some(j) => {
                 let next = lines[j].trim();
-                if let Some(next_caps) = HEADING_RE.captures(next) {
-                    let next_level = next_caps.get(1).unwrap().as_str().len();
-                    if next_level <= level {
+                let next_level = if !next.is_empty() && next.chars().all(|c| c == '#') {
+                    Some(next.len())
+                } else {
+                    HEADING_RE
+                        .captures(next)
+                        .map(|c| c.get(1).unwrap().as_str().len())
+                };
+                if let Some(nl) = next_level {
+                    if nl <= level {
                         remove[i] = true;
                     }
                 }

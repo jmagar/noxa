@@ -91,17 +91,32 @@ pub(crate) fn strip_leaked_js(input: &str) -> String {
 
     let mut out = String::with_capacity(input.len());
     let mut in_code_fence = false;
+    // Track whether the last non-JS line we emitted was a blank line, so that
+    // when a JS-only line is silently dropped we can insert a blank separator
+    // to prevent the surrounding non-JS lines from running together.
+    let mut last_was_blank = true;
+    let mut pending_blank = false;
 
     for line in input.lines() {
         if line.trim().starts_with("```") {
             in_code_fence = !in_code_fence;
+            if pending_blank {
+                out.push('\n');
+                pending_blank = false;
+            }
             out.push_str(line);
             out.push('\n');
+            last_was_blank = false;
             continue;
         }
         if in_code_fence {
+            if pending_blank {
+                out.push('\n');
+                pending_blank = false;
+            }
             out.push_str(line);
             out.push('\n');
+            last_was_blank = false;
             continue;
         }
 
@@ -109,13 +124,40 @@ pub(crate) fn strip_leaked_js(input: &str) -> String {
             if let Some(idx) = line.find("self.__") {
                 let cleaned = line[..idx].trim_end();
                 if !cleaned.is_empty() {
+                    if pending_blank {
+                        out.push('\n');
+                        pending_blank = false;
+                    }
                     out.push_str(cleaned);
                     out.push('\n');
+                    last_was_blank = false;
+                } else {
+                    // The entire line was JS — mark that we need a blank
+                    // separator before the next non-blank output, but only if
+                    // we have already emitted something (avoid leading blanks).
+                    if !last_was_blank && !out.is_empty() {
+                        pending_blank = true;
+                    }
                 }
             }
         } else {
-            out.push_str(line);
-            out.push('\n');
+            let is_blank = line.trim().is_empty();
+            if is_blank {
+                // Propagate blank lines normally; clear any pending separator
+                // since we already have a blank.
+                pending_blank = false;
+                out.push_str(line);
+                out.push('\n');
+                last_was_blank = true;
+            } else {
+                if pending_blank {
+                    out.push('\n');
+                    pending_blank = false;
+                }
+                out.push_str(line);
+                out.push('\n');
+                last_was_blank = false;
+            }
         }
     }
 

@@ -231,9 +231,11 @@ fn is_home_link(href: &str, base_url: Option<&Url>) -> bool {
             }
         }
     }
-    // Fallback: href looks like a root URL for any TLD
-    // (href == "/" already handled above; here catch "https://example.org/" etc.)
-    if href.starts_with("http://") || href.starts_with("https://") {
+    // Fallback: href looks like a root URL for any TLD, but only when there is
+    // no base URL to resolve against.  If base_url is Some, the same-host check
+    // above is authoritative; we must not accept an absolute URL from a
+    // different host as a home link just because its path is "/".
+    if base_url.is_none() && (href.starts_with("http://") || href.starts_with("https://")) {
         if let Ok(parsed) = Url::parse(href) {
             let path = parsed.path();
             return path == "/" || path.is_empty();

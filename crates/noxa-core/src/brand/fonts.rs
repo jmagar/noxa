@@ -115,8 +115,8 @@ pub(crate) fn extract_google_fonts_from_url(url: &str) -> Vec<String> {
 /// Decode percent-encoded sequences (%HH) in a string.
 /// Used for Google Fonts URLs that may contain %20 instead of + for spaces.
 fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
@@ -124,15 +124,15 @@ fn percent_decode(s: &str) -> String {
                 (bytes[i + 1] as char).to_digit(16),
                 (bytes[i + 2] as char).to_digit(16),
             ) {
-                out.push((hi * 16 + lo) as u8 as char);
+                decoded.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        decoded.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn is_junk_font_name(name: &str) -> bool {
