@@ -12,7 +12,7 @@ mod research;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use noxa_store::validate_public_http_url;
+use noxa_store::{parse_http_url, validate_public_http_url};
 use rmcp::ErrorData;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;

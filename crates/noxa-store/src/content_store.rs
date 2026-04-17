@@ -7,6 +7,8 @@ mod migrate;
 mod permissions;
 mod write;
 
+use migrate::parse_sidecar_or_migrate;
+
 use std::path::{Component, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -155,10 +157,9 @@ impl FilesystemContentStore {
                     .and_then(|m| m.modified().ok())
                     .map(DateTime::<Utc>::from)
                     .unwrap_or_else(Utc::now);
-                let result = tokio::task::spawn_blocking(move || {
-                    migrate::parse_sidecar_or_migrate(&contents, mtime)
-                })
-                .await??;
+                let result =
+                    tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime))
+                        .await??;
                 Ok(Some(result))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
