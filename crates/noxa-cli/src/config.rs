@@ -54,6 +54,12 @@ pub struct NoxaConfig {
     pub cloud: Option<CloudConfig>,
 }
 
+/// Cloud deployment configuration (loaded from config.json `cloud` key).
+///
+/// These fields are parsed and stored in `ResolvedConfig.cloud` but are not yet
+/// consumed by the CLI runtime — the cloud fallback path reads `NOXA_API_KEY`
+/// directly. The struct is kept here as the canonical schema so that future
+/// cloud-routing logic has a typed home without breaking existing config files.
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct CloudConfig {
     pub provider: Option<String>,
@@ -190,7 +196,9 @@ pub struct ResolvedConfig {
     pub llm_model: Option<String>,
     pub output_dir: Option<PathBuf>,
 
-    // Cloud
+    // Cloud — parsed and stored but not yet consumed by CLI runtime.
+    // TODO: wire cloud config fields into the CloudClient / smart-fetch path
+    // once per-domain cloud routing is implemented (tracked in cloud.rs).
     pub cloud: Option<CloudConfig>,
 }
 

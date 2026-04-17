@@ -19,13 +19,6 @@ pub const yellow: &str = "\x1b[93m";
 pub const cyan: &str = "\x1b[96m";
 pub const pink: &str = "\x1b[95m";
 pub const blue: &str = "\x1b[94m";
-pub const red: &str = "\x1b[91m";
-
-// ── Pre-formatted tokens ─────────────────────────────────────────────────────
-pub const CHECK: &str = "\x1b[92m✓\x1b[0m"; // green ✓
-pub const CROSS: &str = "\x1b[93m✗\x1b[0m"; // yellow ✗
-pub const WARN: &str = "\x1b[93m⚠\x1b[0m"; // yellow ⚠
-
 // ── Prefix helpers ───────────────────────────────────────────────────────────
 pub fn warning(msg: &str) -> String {
     format!("{yellow}warning:{reset} {msg}")

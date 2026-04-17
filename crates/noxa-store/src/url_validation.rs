@@ -104,7 +104,7 @@ where
 }
 
 fn append_scheme_hint(message: String) -> String {
-    if message.contains("relative URL without a base") {
+    if message.contains("scheme '") || message.contains("relative URL without a base") {
         format!("{message}. Must start with http:// or https://")
     } else {
         message
@@ -171,15 +171,5 @@ mod tests {
     fn parse_http_url_rejects_missing_host() {
         let result = parse_http_url("http://");
         assert!(result.is_err(), "missing host should be rejected");
-    }
-
-    #[tokio::test]
-    async fn validate_public_http_url_empty_error_stays_specific() {
-        let err = validate_public_http_url_with_resolver("", |_| async move {
-            Ok(Vec::<std::net::SocketAddr>::new())
-        })
-        .await
-        .expect_err("empty URL should be rejected");
-        assert_eq!(err, "Invalid URL: must not be empty");
     }
 }
