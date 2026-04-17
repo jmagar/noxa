@@ -225,12 +225,17 @@ pub(crate) fn collapse_whitespace(input: &str) -> String {
     out.trim().to_string()
 }
 
-// Bold: **text** or __text__ — only when surrounded by non-word context or start/end of string
-static BOLD_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?:^|(?<=\W))\*\*([^*\n]+)\*\*(?:$|(?=\W))|(?:^|(?<=\W))__([^_\n]+)__(?:$|(?=\W))").unwrap());
-// Italic *text* — require surrounding non-word chars (prevents star-in-math or glob patterns)
-static ITALIC_STAR_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?:^|(?<=\W))\*([^*\n]+)\*(?:$|(?=\W))").unwrap());
+// Bold: **text** or __text__.
+// Inner content must not be whitespace-only and must not start/end with a space.
+// This avoids stripping "* list item *" patterns where spaces border the asterisks.
+static BOLD_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\*\*([^\s*][^*\n]*[^\s*]|[^\s*])\*\*|__([^\s_][^_\n]*[^\s_]|[^\s_])__").unwrap()
+});
+// Italic *text* — inner must not start/end with space or asterisk; and opening *
+// must not be immediately followed by another * (already handled by BOLD_RE running first).
+static ITALIC_STAR_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\*([^\s*][^*\n]*[^\s*]|[^\s*])\*").unwrap()
+});
 // Italic _text_ — keep existing word-boundary requirement
 static ITALIC_UNDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b_([^_\n]+)_\b").unwrap());
 

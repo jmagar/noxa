@@ -96,6 +96,25 @@ fn long_alt_description_real_content_kept() {
     ));
 }
 
+// -- Code-fence preservation in strip_long_alt_descriptions --
+
+#[test]
+fn strip_long_alt_descriptions_preserves_code_fence() {
+    // Content inside a code fence should not be stripped even if it looks like alt text.
+    let input = "```\nAn illustration in the style of lo-fi anime showing a cute dinosaur coding on a laptop.\n```";
+    // strip_long_alt_descriptions uses prepend-newline pattern (no trailing newline on output)
+    let expected = "```\nAn illustration in the style of lo-fi anime showing a cute dinosaur coding on a laptop.\n```";
+    assert_eq!(strip_long_alt_descriptions(input), expected);
+}
+
+// -- Code-fence preservation in strip_css_class_lines --
+
+#[test]
+fn strip_css_class_lines_preserves_code_fence() {
+    let input = "```\nflex items-center justify-between\n```\n";
+    assert_eq!(strip_css_class_lines(input), input);
+}
+
 // -- CSS artifact filtering --
 
 #[test]

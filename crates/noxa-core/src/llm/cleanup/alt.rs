@@ -124,7 +124,26 @@ pub(crate) fn strip_long_alt_descriptions(input: &str) -> String {
         Lazy::new(|| Regex::new(r"(?m)^\s*This element contains [^.]*\.[^.]*\.(?:\s*[^.]*\.)*").unwrap());
 
     let mut out = String::with_capacity(input.len());
+    let mut in_code_block = false;
+
     for line in input.lines() {
+        if line.trim().starts_with("```") {
+            in_code_block = !in_code_block;
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+            continue;
+        }
+
+        if in_code_block {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+            continue;
+        }
+
         if is_long_alt_description(line) {
             continue;
         }

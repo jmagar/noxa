@@ -54,19 +54,29 @@ fn find_dump_start(words: &[&str]) -> Option<usize> {
     }
     let window = 15;
     let mut consecutive_non_prose = 0;
-    for (i, word) in words.iter().enumerate() {
-        if is_prose_function_word(&word.to_lowercase()) {
+
+    // Pre-compute prose classification to avoid repeated to_lowercase() in the
+    // inner ratio scan, making the full function O(n) instead of O(n²).
+    let is_prose: Vec<bool> = words
+        .iter()
+        .map(|w| is_prose_function_word(&w.to_lowercase()))
+        .collect();
+    // Prefix-sum of prose words for O(1) range queries
+    let mut prose_prefix = vec![0usize; words.len() + 1];
+    for i in 0..words.len() {
+        prose_prefix[i + 1] = prose_prefix[i] + usize::from(is_prose[i]);
+    }
+
+    for (i, &prose) in is_prose.iter().enumerate() {
+        if prose {
             consecutive_non_prose = 0;
         } else {
             consecutive_non_prose += 1;
             if consecutive_non_prose >= window {
                 let start = i + 1 - window;
-                let remaining = &words[start..];
-                let prose_in_remaining = remaining
-                    .iter()
-                    .filter(|w| is_prose_function_word(&w.to_lowercase()))
-                    .count();
-                let ratio = prose_in_remaining as f64 / remaining.len() as f64;
+                let remaining_len = words.len() - start;
+                let prose_in_remaining = prose_prefix[words.len()] - prose_prefix[start];
+                let ratio = prose_in_remaining as f64 / remaining_len as f64;
                 if ratio < 0.05 {
                     return Some(start);
                 }
@@ -152,12 +162,11 @@ pub(crate) fn dedup_adjacent_descriptions(input: &str) -> String {
 
         if i + 1 < lines.len() {
             let next = lines[i + 1].trim();
-            if let Some(rest) = next
-                .strip_prefix("Learn more")
-                .or_else(|| next.strip_prefix("LEARN MORE"))
-                .or_else(|| next.strip_prefix("learn more"))
-            {
-                let rest = rest.trim().trim_start_matches('*').trim();
+            let next_lower = next.to_lowercase();
+            // Case-insensitive "learn more" check covers all variants
+            if let Some(_rest_lower) = next_lower.strip_prefix("learn more") {
+                // Slice the original string past "learn more" (10 ASCII chars)
+                let rest = next["learn more".len()..].trim().trim_start_matches('*').trim();
                 if !rest.is_empty() && rest.len() > 15 && current.contains(rest) {
                     skip_next = true;
                 }

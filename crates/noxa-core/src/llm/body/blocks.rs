@@ -67,19 +67,26 @@ fn is_structural_line(line: &str) -> bool {
 }
 
 fn is_ordered_list_item(line: &str) -> bool {
-    let mut chars = line.chars();
-    // Match `\d+[.)]\s`
-    let has_digit = chars.next().map(|c| c.is_ascii_digit()).unwrap_or(false);
-    if !has_digit {
+    // Match `^\d+[.)]\s` — one or more digits, then `.` or `)`, then a space.
+    let mut chars = line.chars().peekable();
+    if !chars.next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
         return false;
     }
-    for c in line.chars().skip(1) {
+    // Consume remaining digits
+    while let Some(&c) = chars.peek() {
         if c.is_ascii_digit() {
-            continue;
+            chars.next();
+        } else {
+            break;
         }
-        return (c == '.' || c == ')') && line.contains(' ');
     }
-    false
+    // Must be followed by `.` or `)`
+    let sep = chars.next();
+    if !matches!(sep, Some('.') | Some(')')) {
+        return false;
+    }
+    // Must be followed by a space
+    matches!(chars.next(), Some(' '))
 }
 
 const DEDUP_MIN_CHARS: usize = 20;

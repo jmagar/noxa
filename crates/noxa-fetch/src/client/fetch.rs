@@ -137,8 +137,48 @@ impl FetchClient {
 
         let start = Instant::now();
         let client = self.pick_client(url);
-        let resp = client.get(url).send().await?;
-        let mut response = Response::from_wreq(resp).await?;
+
+        // Apply the same retry policy used by `fetch()` so that transient
+        // errors and retryable statuses (429/5xx) are handled here too.
+        let delays = [Duration::ZERO, Duration::from_secs(1)];
+        let mut response = {
+            let mut last_err: Option<FetchError> = None;
+            let mut result = None;
+            'retry: for (attempt, delay) in delays.iter().enumerate() {
+                if attempt > 0 {
+                    tokio::time::sleep(*delay).await;
+                }
+                match client.get(url).send().await {
+                    Ok(resp) => match Response::from_wreq(resp).await {
+                        Ok(r) => {
+                            if is_retryable_status(r.status()) && attempt < delays.len() - 1 {
+                                warn!(url, status = r.status(), attempt = attempt + 1, "retryable status, will retry");
+                                last_err = Some(FetchError::Build(format!("HTTP {}", r.status())));
+                                continue 'retry;
+                            }
+                            result = Some(r);
+                            break 'retry;
+                        }
+                        Err(e) => {
+                            if !is_retryable_error(&e) || attempt == delays.len() - 1 {
+                                return Err(e);
+                            }
+                            warn!(url, error = %e, attempt = attempt + 1, "transient error, will retry");
+                            last_err = Some(e);
+                        }
+                    },
+                    Err(e) => {
+                        let fe = FetchError::Request(e);
+                        if !is_retryable_error(&fe) || attempt == delays.len() - 1 {
+                            return Err(fe);
+                        }
+                        warn!(url, error = %fe, attempt = attempt + 1, "transient error, will retry");
+                        last_err = Some(fe);
+                    }
+                }
+            }
+            result.ok_or_else(|| last_err.unwrap_or_else(|| FetchError::Build("all retries exhausted".into())))?
+        };
 
         if is_challenge_response(&response)
             && let Some(homepage) = extract_homepage(url)
@@ -156,7 +196,7 @@ impl FetchClient {
 
         if is_pdf_content_type(&headers) {
             debug!(status, "detected PDF response, using pdf extraction");
-            let bytes = response.body();
+            let bytes = response.body().to_vec();
             let elapsed = start.elapsed();
             debug!(
                 status,
@@ -165,13 +205,20 @@ impl FetchClient {
                 "PDF fetch complete"
             );
 
-            let pdf_result = noxa_pdf::extract_pdf(bytes, self.pdf_mode.clone())?;
-            Ok(pdf_to_extraction_result(&pdf_result, &final_url))
+            let pdf_mode = self.pdf_mode.clone();
+            let final_url_clone = final_url.clone();
+            let pdf_result = tokio::task::spawn_blocking(move || {
+                noxa_pdf::extract_pdf(&bytes, pdf_mode)
+            })
+            .await
+            .map_err(|e| FetchError::Build(format!("PDF spawn_blocking panic: {e}")))?
+            .map_err(FetchError::Pdf)?;
+            Ok(pdf_to_extraction_result(&pdf_result, &final_url_clone))
         } else if let Some(doc_type) =
             crate::document::is_document_content_type(&headers, &final_url)
         {
             debug!(status, doc_type = ?doc_type, "detected document response, extracting");
-            let bytes = response.body();
+            let bytes = response.body().to_vec();
             let elapsed = start.elapsed();
             debug!(
                 status,
@@ -180,8 +227,14 @@ impl FetchClient {
                 "document fetch complete"
             );
 
-            let mut result = crate::document::extract_document(bytes, doc_type)?;
-            result.metadata.url = Some(final_url);
+            let final_url_clone = final_url.clone();
+            let mut result = tokio::task::spawn_blocking(move || {
+                crate::document::extract_document(&bytes, doc_type)
+            })
+            .await
+            .map_err(|e| FetchError::Build(format!("document spawn_blocking panic: {e}")))?
+            .map_err(|e| e)?;
+            result.metadata.url = Some(final_url_clone);
             Ok(result)
         } else {
             let html = response.into_text();
@@ -257,9 +310,12 @@ pub(super) fn is_challenge_response(response: &Response) -> bool {
 }
 
 pub(super) fn extract_homepage(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .map(|u| format!("{}://{}/", u.scheme(), u.host_str().unwrap_or("")))
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?;
+    match u.port() {
+        Some(port) => Some(format!("{}://{}:{}/", u.scheme(), host, port)),
+        None => Some(format!("{}://{}/", u.scheme(), host)),
+    }
 }
 
 pub(super) fn pdf_to_extraction_result(

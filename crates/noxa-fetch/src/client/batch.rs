@@ -79,7 +79,16 @@ pub(super) async fn collect_ordered<T>(
     for handle in handles {
         match handle.await {
             Ok((idx, result)) => slots[idx] = Some(result),
-            Err(error) => warn!(error = %error, "batch task panicked"),
+            Err(error) => {
+                if error.is_panic() {
+                    // Re-propagate task panics so they surface as crashes
+                    // rather than silently dropping the result slot.
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                // Cancellation (the only other JoinError variant) is not
+                // expected here; log and skip the slot.
+                warn!(error = %error, "batch task was cancelled");
+            }
         }
     }
 

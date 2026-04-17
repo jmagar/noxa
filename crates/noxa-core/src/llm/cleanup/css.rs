@@ -37,14 +37,14 @@ fn strip_css_at_rules(line: &str) -> String {
         // Find the matching closing brace after the at-rule header
         let after_header = m.end();
         let bytes = result.as_bytes();
-        let Some(first_brace) = bytes[after_header..].iter().position(|&b| b == b'{') else {
+        let Some(first_brace_offset) = bytes[after_header..].iter().position(|&b| b == b'{') else {
             // No opening brace — just remove the at-rule token
             result.replace_range(start..after_header, "");
             break;
         };
-        let brace_start = after_header + first_brace;
+        let brace_start = after_header + first_brace_offset;
         let mut depth = 0usize;
-        let mut end = brace_start;
+        let mut end = result.len(); // default: consume to end of line if braces are unbalanced
         for (i, &b) in bytes[brace_start..].iter().enumerate() {
             match b {
                 b'{' => depth += 1,
