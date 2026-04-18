@@ -1,19 +1,16 @@
 //! Domain-level operations log in NDJSON format (`.operations.ndjson`).
 //!
-//! One JSON object per line. O(1) appends via `OpenOptions::append(true)`.
+//! One JSON object per line. Appends are serialized with an in-process lock so
+//! concurrent writers within the same process keep the file valid NDJSON.
 //!
 //! **Concurrency notes:**
-//! - `O_APPEND` guarantees the seek-to-end + write is atomic at the kernel
-//!   level (inode lock), but `write_all()` may issue multiple `write(2)`
-//!   syscalls for large buffers. If an entry is emitted via multiple
-//!   `write(2)` calls, concurrent writers can still interleave partial lines.
-//! - The `OUTPUT_SIZE_LIMIT` truncation keeps most entries small, but this
-//!   module does **not** guarantee corruption-free concurrent writes for
-//!   entries near that limit.
-//! - For the typical single-writer scenario (one CLI / one MCP server) this
-//!   is safe.
+//! - The lock only coordinates writers in the current process.
+//! - Separate processes that append to the same log path are still best-effort.
+//! - Within one process, each append holds the lock across the full line write,
+//!   so even large entries remain valid NDJSON.
 use std::io::Write;
 use std::path::{Component, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::types::{OperationEntry, StoreError};
 
@@ -64,13 +61,15 @@ impl FilesystemOperationsLog {
                 .create(true)
                 .append(true)
                 .open(&path_clone)?;
+            let _guard = match append_write_lock().lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
 
             #[cfg(unix)]
             set_file_permissions_if_new(&path_clone)?;
 
             file.write_all(line.as_bytes())?;
-
-            // flush() on a regular file is a no-op but documents intent.
             file.flush()?;
 
             Ok(())
@@ -100,6 +99,11 @@ fn build_line(entry: &OperationEntry) -> Result<String, StoreError> {
     Ok(line)
 }
 
+fn append_write_lock() -> &'static Mutex<()> {
+    static WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[cfg(unix)]
 fn set_dir_permissions(path: &std::path::Path) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt;
@@ -127,6 +131,7 @@ mod tests {
     use super::*;
     use crate::types::Op;
     use chrono::Utc;
+    use std::sync::Arc;
 
     fn make_entry(op: Op, url: &str) -> OperationEntry {
         OperationEntry {
@@ -200,5 +205,39 @@ mod tests {
             content.contains("output_truncated"),
             "content was: {content}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_large_appends_remain_valid_ndjson() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(FilesystemOperationsLog::new(dir.path()));
+        let mut tasks = Vec::new();
+
+        for i in 0..8 {
+            let log = Arc::clone(&log);
+            tasks.push(tokio::spawn(async move {
+                let entry = OperationEntry {
+                    op: Op::Summarize,
+                    at: Utc::now(),
+                    url: format!("https://example.com/{i}"),
+                    input: serde_json::json!({}),
+                    output: serde_json::Value::String("x".repeat(512 * 1024)),
+                };
+                log.append("example_com", &entry).await
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        let log_path = dir.path().join("example_com/.operations.ndjson");
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 8, "content was: {content}");
+        for line in lines {
+            serde_json::from_str::<serde_json::Value>(line)
+                .expect("every concurrent append must stay valid NDJSON");
+        }
     }
 }

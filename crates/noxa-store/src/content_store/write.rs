@@ -13,6 +13,8 @@ impl FilesystemContentStore {
         url: &str,
         extraction: &noxa_core::ExtractionResult,
     ) -> Result<StoreResult, StoreError> {
+        tokio::fs::create_dir_all(&self.root).await?;
+        let _ = self.get_canonical_root()?;
         let base = self.resolve_path(url)?;
         let md_path = base.with_extension("md");
         let json_path = base.with_extension("json");
@@ -23,7 +25,8 @@ impl FilesystemContentStore {
             set_dir_permissions(parent)?;
         }
 
-        if self.is_oversized(extraction, &md_path, &json_path) {
+        let to_store = sanitize_extraction(url, extraction.clone());
+        if self.is_oversized(&to_store, &md_path, &json_path) {
             return Ok(StoreResult {
                 md_path,
                 json_path,
@@ -36,7 +39,6 @@ impl FilesystemContentStore {
 
         let now = Utc::now();
         let existing_sidecar = self.load_existing_sidecar(&json_path, now).await?;
-        let to_store = sanitize_extraction(url, extraction.clone());
         let (mut sidecar, is_new, changed, word_count_delta, diff) =
             build_sidecar(existing_sidecar, &to_store, url, now).await?;
         cap_changelog(&mut sidecar, self.max_changelog_entries);
@@ -73,11 +75,7 @@ impl FilesystemContentStore {
     ) -> bool {
         let estimated = extraction.content.markdown.len()
             + extraction.content.plain_text.len()
-            + extraction
-                .content
-                .raw_html
-                .as_deref()
-                .map_or(0, |html| html.len());
+            ;
         if let Some(max) = self.max_content_bytes
             && estimated > max
         {
@@ -106,12 +104,15 @@ impl FilesystemContentStore {
                     .and_then(|m| m.modified().ok())
                     .map(DateTime::<Utc>::from)
                     .unwrap_or(now);
-                let parsed = tokio::task::spawn_blocking(move || {
-                    parse_sidecar_or_migrate(&contents, mtime).ok()
-                })
-                .await
-                .unwrap_or(None);
-                Ok(parsed)
+                let json_path_for_error = json_path.to_path_buf();
+                let parsed =
+                    tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime))
+                        .await?
+                        .map_err(|source| StoreError::CorruptSidecar {
+                            path: json_path_for_error,
+                            source,
+                        })?;
+                Ok(Some(parsed))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),

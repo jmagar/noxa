@@ -14,7 +14,7 @@ use std::path::{Component, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{content_store_root, url_to_store_path};
+use crate::paths::{content_store_root, try_url_to_store_path};
 use crate::types::StoreError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,16 +71,13 @@ impl FilesystemContentStore {
         if let Some(root) = self.canonical_root.get() {
             return Ok(root.clone());
         }
-        let resolved = std::fs::canonicalize(&self.root).map_err(|source| StoreError::IoPath {
-            source,
-            path: self.root.clone(),
-        })?;
+        let resolved = canonicalize_with_missing_components(&self.root)?;
         let _ = self.canonical_root.set(resolved.clone());
         Ok(resolved)
     }
 
     fn resolve_path(&self, url: &str) -> Result<PathBuf, StoreError> {
-        let rel = url_to_store_path(url);
+        let rel = try_url_to_store_path(url)?;
         if rel
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
@@ -95,47 +92,35 @@ impl FilesystemContentStore {
 
         let canonical_root = self.get_canonical_root()?;
         let parent = base.parent().unwrap_or(&base);
-        let mut existing_ancestor = parent.to_path_buf();
-        let mut suffix = PathBuf::new();
-
-        while !existing_ancestor.exists() {
-            if let Some(name) = existing_ancestor.file_name() {
-                suffix = PathBuf::from(name).join(&suffix);
-            }
-            match existing_ancestor.parent() {
-                Some(parent) => existing_ancestor = parent.to_path_buf(),
-                None => break,
-            }
-        }
-
-        let canonical_parent =
-            std::fs::canonicalize(&existing_ancestor).map_err(|source| StoreError::IoPath {
-                source,
-                path: existing_ancestor.clone(),
-            })?;
-        let resolved = canonical_parent.join(&suffix);
-        if !resolved.starts_with(&canonical_root) {
+        let resolved_parent = canonicalize_with_missing_components(parent)?;
+        if !resolved_parent.starts_with(&canonical_root) {
             return Err(StoreError::PathEscape(url.to_string()));
         }
 
         let file_name = base
             .file_name()
             .ok_or_else(|| StoreError::PathEscape(url.to_string()))?;
-        Ok(resolved.join(file_name))
+        Ok(resolved_parent.join(file_name))
     }
 
     pub async fn read(&self, url: &str) -> Result<Option<noxa_core::ExtractionResult>, StoreError> {
         let base = match self.resolve_path(url) {
             Ok(path) => path,
-            Err(_) => return Ok(None),
+            Err(StoreError::PathEscape(_)) => return Ok(None),
+            Err(error) => return Err(error),
         };
         let json_path = base.with_extension("json");
         match tokio::fs::read_to_string(&json_path).await {
             Ok(contents) => {
+                let json_path_for_error = json_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     migrate::parse_sidecar_or_legacy(&contents).map(|sidecar| sidecar.current)
                 })
-                .await??;
+                .await?
+                .map_err(|source| StoreError::CorruptSidecar {
+                    path: json_path_for_error,
+                    source,
+                })?;
                 Ok(Some(result))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -146,7 +131,8 @@ impl FilesystemContentStore {
     pub async fn read_sidecar(&self, url: &str) -> Result<Option<Sidecar>, StoreError> {
         let base = match self.resolve_path(url) {
             Ok(path) => path,
-            Err(_) => return Ok(None),
+            Err(StoreError::PathEscape(_)) => return Ok(None),
+            Err(error) => return Err(error),
         };
         let json_path = base.with_extension("json");
         match tokio::fs::read_to_string(&json_path).await {
@@ -157,15 +143,42 @@ impl FilesystemContentStore {
                     .and_then(|m| m.modified().ok())
                     .map(DateTime::<Utc>::from)
                     .unwrap_or_else(Utc::now);
+                let json_path_for_error = json_path.clone();
                 let result =
                     tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime))
-                        .await??;
+                        .await?
+                        .map_err(|source| StoreError::CorruptSidecar {
+                            path: json_path_for_error,
+                            source,
+                        })?;
                 Ok(Some(result))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn canonicalize_with_missing_components(path: &std::path::Path) -> Result<PathBuf, StoreError> {
+    let mut existing_ancestor = path.to_path_buf();
+    let mut suffix = PathBuf::new();
+
+    while !existing_ancestor.exists() {
+        if let Some(name) = existing_ancestor.file_name() {
+            suffix = PathBuf::from(name).join(&suffix);
+        }
+        match existing_ancestor.parent() {
+            Some(parent) => existing_ancestor = parent.to_path_buf(),
+            None => break,
+        }
+    }
+
+    let canonical_parent =
+        std::fs::canonicalize(&existing_ancestor).map_err(|source| StoreError::IoPath {
+            source,
+            path: existing_ancestor.clone(),
+        })?;
+    Ok(canonical_parent.join(&suffix))
 }
 
 #[cfg(test)]

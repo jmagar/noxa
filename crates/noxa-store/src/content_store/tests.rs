@@ -2,6 +2,7 @@ use std::path::Component;
 
 use crate::content_store::FilesystemContentStore;
 use crate::paths::url_to_store_path;
+use crate::types::StoreError;
 
 fn make_extraction(markdown: &str) -> noxa_core::ExtractionResult {
     noxa_core::ExtractionResult {
@@ -91,7 +92,7 @@ async fn test_identical_content_not_changed() {
 }
 
 #[tokio::test]
-async fn test_corrupted_prev_json_treated_as_new() {
+async fn test_corrupted_prev_json_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let store = FilesystemContentStore::new(dir.path());
     let rel = url_to_store_path("https://example.com/corrupt");
@@ -103,11 +104,11 @@ async fn test_corrupted_prev_json_treated_as_new() {
         .await
         .unwrap();
     let extraction = make_extraction("content");
-    let result = store
+    let err = store
         .write("https://example.com/corrupt", &extraction)
         .await
-        .unwrap();
-    assert!(result.is_new);
+        .expect_err("corrupt sidecar should fail closed");
+    assert!(matches!(err, StoreError::CorruptSidecar { .. }));
 }
 
 #[tokio::test]

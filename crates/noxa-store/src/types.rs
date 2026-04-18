@@ -20,6 +20,18 @@ pub enum StoreError {
     #[error("store JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// The input URL was invalid for persistence.
+    #[error("invalid store URL: {0}")]
+    InvalidUrl(String),
+
+    /// A persisted sidecar could not be parsed.
+    #[error("corrupt sidecar at {path}: {source}")]
+    CorruptSidecar {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
     /// A computed store path would escape the root directory.
     #[error("store: path escapes root for url: {0}")]
     PathEscape(String),

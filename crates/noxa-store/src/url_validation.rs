@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use url::Url;
 
@@ -25,29 +25,40 @@ pub fn parse_http_url(url: &str) -> Result<Url, String> {
 
 pub fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()
-                || v4.is_unspecified()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || octets[0] == 10
-                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
-                || (octets[0] == 192 && octets[1] == 168)
-                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
-        }
+        IpAddr::V4(v4) => is_special_use_ipv4(v4),
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_private_or_reserved_ip(IpAddr::V4(v4));
             }
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg0 & 0xffc0) == 0xfe80
-                || (seg0 & 0xfe00) == 0xfc00
+            is_special_use_ipv6(v6)
         }
     }
+}
+
+fn is_special_use_ipv4(v4: Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_multicast()
+        || v4.is_unspecified()
+        || octets[0] == 0
+        || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && octets[1] >= 18 && octets[1] <= 19)
+        || octets[0] >= 240
+}
+
+fn is_special_use_ipv6(v6: Ipv6Addr) -> bool {
+    let segments = v6.segments();
+    v6.is_loopback()
+        || v6.is_unspecified()
+        || v6.is_multicast()
+        || v6.is_unique_local()
+        || v6.is_unicast_link_local()
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
 pub async fn validate_public_http_url(url: &str) -> Result<(), String> {
@@ -113,7 +124,12 @@ fn append_scheme_hint(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_http_url, validate_public_http_url, validate_public_http_url_with_resolver};
+    use std::net::IpAddr;
+
+    use super::{
+        is_private_or_reserved_ip, parse_http_url, validate_public_http_url,
+        validate_public_http_url_with_resolver,
+    };
 
     #[tokio::test]
     async fn validate_public_http_url_accepts_hostname_resolving_to_public() {
@@ -171,5 +187,53 @@ mod tests {
     fn parse_http_url_rejects_missing_host() {
         let result = parse_http_url("http://");
         assert!(result.is_err(), "missing host should be rejected");
+    }
+
+    #[tokio::test]
+    async fn validate_public_http_url_empty_error_stays_specific() {
+        let err = validate_public_http_url_with_resolver("", |_| async move {
+            Ok(Vec::<std::net::SocketAddr>::new())
+        })
+        .await
+        .expect_err("empty URL should be rejected");
+        assert_eq!(err, "Invalid URL: must not be empty");
+    }
+
+    #[test]
+    fn is_private_or_reserved_ip_rejects_missing_special_use_ranges() {
+        let benchmarking: IpAddr = "198.18.0.1".parse().unwrap();
+        let documentation: IpAddr = "2001:db8::1".parse().unwrap();
+
+        assert!(is_private_or_reserved_ip(benchmarking));
+        assert!(is_private_or_reserved_ip(documentation));
+    }
+
+    #[tokio::test]
+    async fn validate_public_http_url_rejects_benchmarking_range() {
+        let result =
+            validate_public_http_url_with_resolver("http://benchmark.example/", |_| async move {
+                Ok(vec![
+                    "198.18.0.1:80".parse::<std::net::SocketAddr>().unwrap(),
+                ])
+            })
+            .await;
+
+        assert!(result.is_err(), "benchmarking range should be rejected");
+    }
+
+    #[tokio::test]
+    async fn validate_public_http_url_rejects_ipv6_documentation_range() {
+        let result =
+            validate_public_http_url_with_resolver("http://docs.example/", |_| async move {
+                Ok(vec![
+                    "[2001:db8::1]:80".parse::<std::net::SocketAddr>().unwrap(),
+                ])
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "IPv6 documentation range should be rejected"
+        );
     }
 }
