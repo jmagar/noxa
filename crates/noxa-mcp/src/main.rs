@@ -3,7 +3,7 @@
 /// like Claude Desktop, Claude Code, and other MCP clients.
 #[tokio::main]
 async fn main() -> Result<(), noxa_mcp::NoxaMcpError> {
-    dotenvy::dotenv().ok();
+    noxa_mcp::load_env().ok();
 
     // Log to stderr -- stdout is the MCP transport channel
     tracing_subscriber::fmt()

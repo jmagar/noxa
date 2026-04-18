@@ -82,6 +82,38 @@ impl NoxaMcpConfig {
     }
 }
 
+pub(crate) fn env_file_candidates(
+    home_dir: &Path,
+    exe_path: Option<&Path>,
+    cwd: Option<&Path>,
+    repo_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = vec![home_dir.join(".noxa").join(".env")];
+
+    if let Some(exe_path) = exe_path.and_then(Path::parent) {
+        candidates.push(exe_path.join(".env"));
+    }
+    if let Some(repo_root) = repo_root {
+        candidates.push(repo_root.join(".env"));
+    }
+    if let Some(cwd) = cwd {
+        candidates.push(cwd.join(".env"));
+    }
+
+    candidates
+}
+
+pub(crate) fn find_env_file(
+    home_dir: &Path,
+    exe_path: Option<&Path>,
+    cwd: Option<&Path>,
+    repo_root: Option<&Path>,
+) -> Option<PathBuf> {
+    env_file_candidates(home_dir, exe_path, cwd, repo_root)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
 fn create_dir(path: &Path) -> Result<(), NoxaMcpError> {
     std::fs::create_dir_all(path).map_err(|source| NoxaMcpError::CreateDirectory {
         path: path.to_path_buf(),
@@ -112,7 +144,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::NoxaMcpConfig;
+    use super::{NoxaMcpConfig, env_file_candidates, find_env_file};
 
     #[test]
     fn config_loads_proxy_pool_and_paths_from_inputs() {
@@ -160,5 +192,52 @@ mod tests {
         .to_string();
 
         assert!(err.contains("SEARXNG_URL"));
+    }
+
+    #[test]
+    fn env_file_candidates_follow_requested_order() {
+        let home = PathBuf::from("/home/tester");
+        let exe = PathBuf::from("/opt/noxa/bin/noxa-mcp");
+        let cwd = PathBuf::from("/workspace/noxa");
+        let repo_root = PathBuf::from("/workspace/noxa");
+
+        let candidates = env_file_candidates(&home, Some(&exe), Some(&cwd), Some(&repo_root));
+
+        assert_eq!(
+            candidates,
+            vec![
+                home.join(".noxa").join(".env"),
+                PathBuf::from("/opt/noxa/bin/.env"),
+                PathBuf::from("/workspace/noxa/.env"),
+                PathBuf::from("/workspace/noxa/.env"),
+            ]
+        );
+    }
+
+    #[test]
+    fn find_env_file_returns_first_existing_candidate() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let exe_dir = root.path().join("bin");
+        let cwd = root.path().join("cwd");
+        let repo = root.path().join("repo");
+
+        std::fs::create_dir_all(home.join(".noxa")).unwrap();
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+
+        std::fs::write(exe_dir.join(".env"), "SEARXNG_URL=https://binary.example\n").unwrap();
+        std::fs::write(repo.join(".env"), "SEARXNG_URL=https://repo.example\n").unwrap();
+        std::fs::write(cwd.join(".env"), "SEARXNG_URL=https://cwd.example\n").unwrap();
+
+        let found = find_env_file(
+            &home,
+            Some(&exe_dir.join("noxa-mcp")),
+            Some(&cwd),
+            Some(&repo),
+        );
+
+        assert_eq!(found, Some(exe_dir.join(".env")));
     }
 }

@@ -16,10 +16,39 @@ pub(crate) mod test_support;
 pub(crate) mod tools;
 pub(crate) mod validation;
 
+use std::path::PathBuf;
+
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
 pub use error::NoxaMcpError;
+
+pub fn load_env() -> Result<Option<PathBuf>, NoxaMcpError> {
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| NoxaMcpError::message("failed to determine home directory for noxa-mcp"))?;
+    let exe_path = std::env::current_exe().ok();
+    let cwd = std::env::current_dir().ok();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .map(PathBuf::from);
+
+    let env_path = config::find_env_file(
+        &home_dir,
+        exe_path.as_deref(),
+        cwd.as_deref(),
+        repo_root.as_deref(),
+    );
+
+    if let Some(path) = env_path {
+        dotenvy::from_path(&path).map_err(|error| {
+            NoxaMcpError::message(format!("failed to load env file {}: {error}", path.display()))
+        })?;
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
 
 /// Start the MCP server over stdio and block until the client disconnects.
 pub async fn run() -> Result<(), NoxaMcpError> {
