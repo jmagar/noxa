@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::error::RagError;
-use crate::store::VectorStore;
+use crate::store::{HashExistsResult, VectorStore};
 use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
 use super::QdrantStore;
 use super::http::{DeleteByFilterRequest, SearchRequest, SearchResponse, UpsertRequest};
-use super::normalize::normalize_url;
+use crate::url_util::normalize_url;
 use super::payload::{point_to_qdrant_payload, search_filter, search_result_from_payload};
 
 #[async_trait]
@@ -222,9 +222,9 @@ impl VectorStore for QdrantStore {
         Ok(body["result"]["vectors_count"].as_u64().unwrap_or(0))
     }
 
-    async fn url_with_hash_exists(&self, url: &str, hash: &str) -> Result<bool, RagError> {
+    async fn url_with_hash_exists_checked(&self, url: &str, hash: &str) -> HashExistsResult {
         if hash.is_empty() {
-            return Ok(false);
+            return HashExistsResult::NotIndexed;
         }
         let normalized = normalize_url(url);
         let endpoint = format!(
@@ -240,13 +240,24 @@ impl VectorStore for QdrantStore {
             }
         });
 
-        let resp = self
+        let resp = match self
             .client
             .post(&endpoint)
             .timeout(std::time::Duration::from_secs(5))
             .json(&body)
             .send()
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    url = %normalized,
+                    error = %e,
+                    "url_with_hash_exists_checked: network error — treating as backend error"
+                );
+                return HashExistsResult::BackendError(format!("network error: {e}"));
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -255,14 +266,31 @@ impl VectorStore for QdrantStore {
             tracing::warn!(
                 status,
                 url = %normalized,
-                body = preview,
-                "url_with_hash_exists count request failed — assuming not indexed"
+                body = %preview,
+                "url_with_hash_exists_checked: non-success HTTP status — treating as backend error"
             );
-            return Ok(false);
+            return HashExistsResult::BackendError(format!(
+                "HTTP {status}: {preview}"
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await?;
-        Ok(json["result"]["count"].as_u64().unwrap_or(0) > 0)
+        let json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    url = %normalized,
+                    error = %e,
+                    "url_with_hash_exists_checked: JSON parse error — treating as backend error"
+                );
+                return HashExistsResult::BackendError(format!("JSON parse error: {e}"));
+            }
+        };
+
+        if json["result"]["count"].as_u64().unwrap_or(0) > 0 {
+            HashExistsResult::Exists
+        } else {
+            HashExistsResult::NotIndexed
+        }
     }
 
     fn name(&self) -> &str {

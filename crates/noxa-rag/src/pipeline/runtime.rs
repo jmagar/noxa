@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::stream::{self, StreamExt};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
 use tokio::sync::{Mutex, mpsc};
@@ -8,10 +10,14 @@ use tracing::Instrument;
 
 use crate::config::SourceConfig;
 use crate::error::RagError;
+use crate::store::HashExistsResult;
 
 use super::process;
 use super::scan;
 use super::{IndexJob, Pipeline};
+
+/// Maximum concurrent Qdrant existence probes during startup delta scan.
+const STARTUP_SCAN_CONCURRENCY: usize = 16;
 
 pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     let (watch_dir, debounce_ms) = match &pipeline.config.source {
@@ -214,68 +220,96 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         let total = paths.len();
         tracing::info!(count = total, "startup scan: checking files for delta");
 
-        let mut queued = 0usize;
-        let mut skipped = 0usize;
+        let queued = Arc::new(AtomicUsize::new(0));
+        let skipped = Arc::new(AtomicUsize::new(0));
+        let backend_errors = Arc::new(AtomicUsize::new(0));
 
-        for path in paths {
-            if scan_shutdown.is_cancelled() {
-                break;
-            }
+        stream::iter(paths)
+            .for_each_concurrent(STARTUP_SCAN_CONCURRENCY, |path| {
+                let scan_tx = scan_tx.clone();
+                let scan_store = scan_store.clone();
+                let scan_shutdown = scan_shutdown.clone();
+                let queued = Arc::clone(&queued);
+                let skipped = Arc::clone(&skipped);
+                let backend_errors = Arc::clone(&backend_errors);
 
-            let path2 = path.clone();
-            let hash_and_url = tokio::task::spawn_blocking(move || scan::startup_scan_key(&path2))
-                .await
-                .ok()
-                .flatten();
-
-            let (hash, url) = match hash_and_url {
-                Some(t) => t,
-                None => {
-                    tracing::debug!(path = %path.display(), "startup scan: no url/hash, queuing");
-                    let span = tracing::info_span!("index_job", path = %path.display());
-                    tokio::select! {
-                        _ = scan_tx.send(IndexJob { path, span }) => {}
-                        _ = scan_shutdown.cancelled() => { break; }
+                async move {
+                    if scan_shutdown.is_cancelled() {
+                        return;
                     }
-                    queued += 1;
-                    continue;
-                }
-            };
 
-            match scan_store.url_with_hash_exists(&url, &hash).await {
-                Ok(true) => {
-                    skipped += 1;
-                    tracing::debug!(
-                        path = %path.display(),
-                        url = %url,
-                        "startup scan: already indexed, skipping"
-                    );
-                }
-                Ok(false) => {
-                    let span = tracing::info_span!("index_job", path = %path.display());
-                    tokio::select! {
-                        _ = scan_tx.send(IndexJob { path, span }) => {}
-                        _ = scan_shutdown.cancelled() => { break; }
+                    let path2 = path.clone();
+                    let hash_and_url =
+                        tokio::task::spawn_blocking(move || scan::startup_scan_key(&path2))
+                            .await
+                            .ok()
+                            .flatten();
+
+                    let (hash, url) = match hash_and_url {
+                        Some(t) => t,
+                        None => {
+                            tracing::debug!(
+                                path = %path.display(),
+                                "startup scan: no url/hash, queuing"
+                            );
+                            let span = tracing::info_span!("index_job", path = %path.display());
+                            tokio::select! {
+                                _ = scan_tx.send(IndexJob { path, span }) => {}
+                                _ = scan_shutdown.cancelled() => {}
+                            }
+                            queued.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                    };
+
+                    match scan_store.url_with_hash_exists_checked(&url, &hash).await {
+                        HashExistsResult::Exists => {
+                            skipped.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!(
+                                path = %path.display(),
+                                url = %url,
+                                "startup scan: already indexed, skipping"
+                            );
+                        }
+                        HashExistsResult::NotIndexed => {
+                            let span = tracing::info_span!("index_job", path = %path.display());
+                            tokio::select! {
+                                _ = scan_tx.send(IndexJob { path, span }) => {}
+                                _ = scan_shutdown.cancelled() => {}
+                            }
+                            queued.fetch_add(1, Ordering::Relaxed);
+                        }
+                        HashExistsResult::BackendError(ref msg) => {
+                            // Do NOT re-queue on backend failure — a degraded Qdrant endpoint
+                            // must not trigger a full reindex storm.  The file will be
+                            // re-evaluated on next startup once the backend recovers.
+                            backend_errors.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(
+                                path = %path.display(),
+                                url = %url,
+                                error = %msg,
+                                "startup scan: backend error during delta check — skipping requeue to avoid reindex storm"
+                            );
+                        }
                     }
-                    queued += 1;
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "startup scan: delta check failed, re-enqueueing conservatively"
-                    );
-                    let span = tracing::info_span!("index_job", path = %path.display());
-                    tokio::select! {
-                        _ = scan_tx.send(IndexJob { path, span }) => {}
-                        _ = scan_shutdown.cancelled() => { break; }
-                    }
-                    queued += 1;
-                }
-            }
+            })
+            .await;
+
+        let queued = queued.load(Ordering::Relaxed);
+        let skipped = skipped.load(Ordering::Relaxed);
+        let backend_errors = backend_errors.load(Ordering::Relaxed);
+        if backend_errors > 0 {
+            tracing::warn!(
+                total,
+                queued,
+                skipped,
+                backend_errors,
+                "startup scan complete — some files skipped due to backend errors; they will be re-evaluated on next startup"
+            );
+        } else {
+            tracing::info!(total, queued, skipped, "startup scan complete");
         }
-
-        tracing::info!(total, queued, skipped, "startup scan complete");
     });
 
     let heartbeat_counters = pipeline.counters.clone();

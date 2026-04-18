@@ -4,7 +4,7 @@ use crate::config::{
     ChunkerConfig, EmbedProviderConfig, PipelineConfig, RagConfig, SourceConfig, VectorStoreConfig,
 };
 use crate::factory::build_vector_store;
-use crate::store::VectorStore;
+use crate::store::{HashExistsResult, VectorStore};
 use crate::types::SearchMetadataFilter;
 
 use super::QdrantStore;
@@ -356,4 +356,215 @@ async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metada
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file_path.as_deref(), Some("/tmp/report.md"));
     assert_eq!(results[0].git_branch.as_deref(), Some("main"));
+}
+
+// ── helpers for status-aware test server ────────────────────────────────────
+
+/// Like `spawn_test_server` but the responder returns `(status_code, body)` so
+/// tests can simulate non-200 responses.
+async fn spawn_test_server_with_status<F>(
+    responder: F,
+) -> (
+    String,
+    Arc<Mutex<Vec<RecordedRequest>>>,
+    tokio::task::JoinHandle<()>,
+)
+where
+    F: Fn(&RecordedRequest) -> (u16, String) + Send + Sync + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let responder = Arc::new(responder);
+
+    let handle = tokio::spawn(async move {
+        'connection: loop {
+            let Ok((mut stream, _peer)) = listener.accept().await else {
+                break;
+            };
+
+            let mut buffer = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0u8; 1024];
+                let n = match stream.read(&mut chunk).await {
+                    Ok(n) => n,
+                    Err(_) => continue 'connection,
+                };
+                if n == 0 {
+                    continue 'connection;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = find_subslice(&buffer, b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+
+            let headers = String::from_utf8_lossy(&buffer[..header_end]);
+            let mut content_length = 0usize;
+            let mut method = String::new();
+            let mut path = String::new();
+            for (i, line) in headers.lines().enumerate() {
+                if i == 0 {
+                    let mut parts = line.split_whitespace();
+                    method = parts.next().unwrap_or_default().to_string();
+                    path = parts.next().unwrap_or_default().to_string();
+                } else if let Some((name, value)) = line.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+
+            while buffer.len() < header_end + content_length {
+                let mut chunk = [0u8; 1024];
+                let n = match stream.read(&mut chunk).await {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+
+            let body = String::from_utf8_lossy(&buffer[header_end..header_end + content_length])
+                .to_string();
+            let request = RecordedRequest { method, path, body };
+            recorded.lock().unwrap().push(request.clone());
+
+            let (status_code, response_body) = responder.as_ref()(&request);
+            let status_text = match status_code {
+                200 => "OK",
+                400 => "Bad Request",
+                500 => "Internal Server Error",
+                503 => "Service Unavailable",
+                _ => "Unknown",
+            };
+            let response = format!(
+                "HTTP/1.1 {status_code} {status_text}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+
+    (format!("http://{}", addr), requests, handle)
+}
+
+// ── regression tests: startup delta scan does not requeue on backend errors ─
+
+/// When the Qdrant count endpoint returns a non-success HTTP status,
+/// `url_with_hash_exists_checked` must return `BackendError`, NOT `NotIndexed`.
+/// This prevents a degraded backend from triggering a full reindex storm.
+#[tokio::test]
+async fn url_with_hash_exists_checked_returns_backend_error_on_5xx() {
+    let (base_url, _requests, handle) = spawn_test_server_with_status(|_req| {
+        (500, r#"{"status":"error","error":"internal"}"#.to_string())
+    })
+    .await;
+
+    let store =
+        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+            .expect("store");
+
+    let result = store
+        .url_with_hash_exists_checked("https://example.com/doc.md", "abc123")
+        .await;
+
+    handle.abort();
+
+    assert!(
+        matches!(result, HashExistsResult::BackendError(_)),
+        "expected BackendError on 500 response, got {result:?}"
+    );
+}
+
+/// When the count endpoint returns 503 (Qdrant overloaded/restarting),
+/// `url_with_hash_exists_checked` must return `BackendError`.
+#[tokio::test]
+async fn url_with_hash_exists_checked_returns_backend_error_on_503() {
+    let (base_url, _requests, handle) = spawn_test_server_with_status(|_req| {
+        (503, "Service Unavailable".to_string())
+    })
+    .await;
+
+    let store =
+        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+            .expect("store");
+
+    let result = store
+        .url_with_hash_exists_checked("https://example.com/doc.md", "deadbeef")
+        .await;
+
+    handle.abort();
+
+    assert!(
+        matches!(result, HashExistsResult::BackendError(_)),
+        "expected BackendError on 503 response, got {result:?}"
+    );
+}
+
+/// When the count endpoint returns a successful response with count > 0,
+/// `url_with_hash_exists_checked` must return `Exists`.
+#[tokio::test]
+async fn url_with_hash_exists_checked_returns_exists_on_match() {
+    let (base_url, _requests, handle) = spawn_test_server_with_status(|_req| {
+        (
+            200,
+            serde_json::json!({ "result": { "count": 3 } }).to_string(),
+        )
+    })
+    .await;
+
+    let store =
+        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+            .expect("store");
+
+    let result = store
+        .url_with_hash_exists_checked("https://example.com/doc.md", "abc123")
+        .await;
+
+    handle.abort();
+
+    assert_eq!(
+        result,
+        HashExistsResult::Exists,
+        "expected Exists when count > 0"
+    );
+}
+
+/// When the count endpoint returns count == 0, result is `NotIndexed`.
+#[tokio::test]
+async fn url_with_hash_exists_checked_returns_not_indexed_on_zero_count() {
+    let (base_url, _requests, handle) = spawn_test_server_with_status(|_req| {
+        (
+            200,
+            serde_json::json!({ "result": { "count": 0 } }).to_string(),
+        )
+    })
+    .await;
+
+    let store =
+        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+            .expect("store");
+
+    let result = store
+        .url_with_hash_exists_checked("https://example.com/doc.md", "abc123")
+        .await;
+
+    handle.abort();
+
+    assert_eq!(
+        result,
+        HashExistsResult::NotIndexed,
+        "expected NotIndexed when count == 0"
+    );
 }
