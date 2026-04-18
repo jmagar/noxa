@@ -11,6 +11,21 @@ pub struct NoxaMcpConfig {
     pub research_dir: PathBuf,
     pub searxng_url: Option<String>,
     pub cloud_api_key: Option<String>,
+    pub llm_provider: Option<String>,
+    pub llm_model: Option<String>,
+    pub llm_base_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoxaMcpConfigInputs {
+    pub home_dir: PathBuf,
+    pub proxy: Option<String>,
+    pub proxy_file: Option<PathBuf>,
+    pub searxng_url: Option<String>,
+    pub cloud_api_key: Option<String>,
+    pub llm_provider: Option<String>,
+    pub llm_model: Option<String>,
+    pub llm_base_url: Option<String>,
 }
 
 impl NoxaMcpConfig {
@@ -20,22 +35,30 @@ impl NoxaMcpConfig {
         })?;
         let proxy_file = std::env::var("NOXA_PROXY_FILE").ok().map(PathBuf::from);
 
-        Self::from_inputs(
+        Self::from_inputs(NoxaMcpConfigInputs {
             home_dir,
-            std::env::var("NOXA_PROXY").ok(),
+            proxy: std::env::var("NOXA_PROXY").ok(),
             proxy_file,
-            std::env::var("SEARXNG_URL").ok(),
-            std::env::var("NOXA_API_KEY").ok(),
-        )
+            searxng_url: std::env::var("SEARXNG_URL").ok(),
+            cloud_api_key: std::env::var("NOXA_API_KEY").ok(),
+            llm_provider: std::env::var("NOXA_LLM_PROVIDER").ok(),
+            llm_model: std::env::var("NOXA_LLM_MODEL").ok(),
+            llm_base_url: std::env::var("NOXA_LLM_BASE_URL").ok(),
+        })
     }
 
-    pub fn from_inputs(
-        home_dir: PathBuf,
-        proxy: Option<String>,
-        proxy_file: Option<PathBuf>,
-        searxng_url: Option<String>,
-        cloud_api_key: Option<String>,
-    ) -> Result<Self, NoxaMcpError> {
+    pub fn from_inputs(inputs: NoxaMcpConfigInputs) -> Result<Self, NoxaMcpError> {
+        let NoxaMcpConfigInputs {
+            home_dir,
+            proxy,
+            proxy_file,
+            searxng_url,
+            cloud_api_key,
+            llm_provider,
+            llm_model,
+            llm_base_url,
+        } = inputs;
+
         let noxa_root = home_dir.join(".noxa");
         let store_root = noxa_root.join("content");
         let research_dir = noxa_root.join("research");
@@ -78,6 +101,9 @@ impl NoxaMcpConfig {
             research_dir,
             searxng_url,
             cloud_api_key: normalize_optional(cloud_api_key),
+            llm_provider: normalize_optional(llm_provider),
+            llm_model: normalize_optional(llm_model),
+            llm_base_url: normalize_optional(llm_base_url),
         })
     }
 }
@@ -144,7 +170,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{NoxaMcpConfig, env_file_candidates, find_env_file};
+    use super::{NoxaMcpConfig, NoxaMcpConfigInputs, env_file_candidates, find_env_file};
 
     #[test]
     fn config_loads_proxy_pool_and_paths_from_inputs() {
@@ -152,13 +178,16 @@ mod tests {
         let proxy_file = home.path().join("proxies.txt");
         std::fs::write(&proxy_file, "proxy.example.com:8080:user:pass\n").unwrap();
 
-        let config = NoxaMcpConfig::from_inputs(
-            home.path().to_path_buf(),
-            Some("http://proxy.internal:8080".into()),
-            Some(proxy_file.clone()),
-            Some(" https://search.example.com ".into()),
-            Some("api-key".into()),
-        )
+        let config = NoxaMcpConfig::from_inputs(NoxaMcpConfigInputs {
+            home_dir: home.path().to_path_buf(),
+            proxy: Some("http://proxy.internal:8080".into()),
+            proxy_file: Some(proxy_file.clone()),
+            searxng_url: Some(" https://search.example.com ".into()),
+            cloud_api_key: Some("api-key".into()),
+            llm_provider: Some(" ollama ".into()),
+            llm_model: Some(" qwen3.5:14b ".into()),
+            llm_base_url: Some(" http://ollama.internal:11434 ".into()),
+        })
         .unwrap();
 
         assert_eq!(
@@ -171,6 +200,12 @@ mod tests {
             Some("https://search.example.com")
         );
         assert_eq!(config.cloud_api_key.as_deref(), Some("api-key"));
+        assert_eq!(config.llm_provider.as_deref(), Some("ollama"));
+        assert_eq!(config.llm_model.as_deref(), Some("qwen3.5:14b"));
+        assert_eq!(
+            config.llm_base_url.as_deref(),
+            Some("http://ollama.internal:11434")
+        );
         assert_eq!(
             config.store.root(),
             PathBuf::from(home.path()).join(".noxa").join("content")
@@ -181,13 +216,16 @@ mod tests {
     #[test]
     fn config_rejects_invalid_searxng_url() {
         let home = tempdir().unwrap();
-        let err = NoxaMcpConfig::from_inputs(
-            home.path().to_path_buf(),
-            None,
-            None,
-            Some("ftp://invalid.example.com".into()),
-            None,
-        )
+        let err = NoxaMcpConfig::from_inputs(NoxaMcpConfigInputs {
+            home_dir: home.path().to_path_buf(),
+            proxy: None,
+            proxy_file: None,
+            searxng_url: Some("ftp://invalid.example.com".into()),
+            cloud_api_key: None,
+            llm_provider: None,
+            llm_model: None,
+            llm_base_url: None,
+        })
         .unwrap_err()
         .to_string();
 

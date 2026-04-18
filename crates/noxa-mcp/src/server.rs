@@ -11,6 +11,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use noxa_llm::LlmProvider;
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -26,6 +27,67 @@ use crate::validation::{collect_valid_urls, validate_fetch_url, validate_fetch_u
 
 const NO_LLM_PROVIDERS_MESSAGE: &str = "No LLM providers available (priority: Gemini CLI -> OpenAI -> Ollama -> Anthropic). Install gemini on PATH, set OPENAI_API_KEY, OLLAMA_HOST / OLLAMA_MODEL, or ANTHROPIC_API_KEY, or set NOXA_API_KEY for cloud fallback.";
 type ToolResult = Result<String, String>;
+
+async fn build_llm_chain(
+    config: &NoxaMcpConfig,
+) -> Result<Option<noxa_llm::ProviderChain>, NoxaMcpError> {
+    let chain = if let Some(ref name) = config.llm_provider {
+        let provider: Box<dyn noxa_llm::LlmProvider> = match name.as_str() {
+            "gemini" => {
+                let provider = noxa_llm::providers::gemini_cli::GeminiCliProvider::new(
+                    config.llm_model.clone(),
+                );
+                if !provider.is_available().await {
+                    return Err(NoxaMcpError::llm(
+                        "gemini CLI not found on PATH -- install it or omit NOXA_LLM_PROVIDER",
+                    ));
+                }
+                Box::new(provider)
+            }
+            "ollama" => {
+                let provider = noxa_llm::providers::ollama::OllamaProvider::new(
+                    config.llm_base_url.clone(),
+                    config.llm_model.clone(),
+                );
+                if !provider.is_available().await {
+                    return Err(NoxaMcpError::llm("ollama is not running or unreachable"));
+                }
+                Box::new(provider)
+            }
+            "openai" => Box::new(
+                noxa_llm::providers::openai::OpenAiProvider::new(
+                    None,
+                    config.llm_base_url.clone(),
+                    config.llm_model.clone(),
+                )
+                .ok_or_else(|| NoxaMcpError::llm("OPENAI_API_KEY not set"))?,
+            ),
+            "anthropic" => Box::new(
+                noxa_llm::providers::anthropic::AnthropicProvider::new(
+                    None,
+                    config.llm_model.clone(),
+                )
+                .ok_or_else(|| NoxaMcpError::llm("ANTHROPIC_API_KEY not set"))?,
+            ),
+            other => {
+                return Err(NoxaMcpError::invalid_parameter(format!(
+                    "unknown LLM provider: {other} (use gemini, ollama, openai, or anthropic)"
+                )));
+            }
+        };
+        noxa_llm::ProviderChain::single(provider)
+    } else {
+        noxa_llm::ProviderChain::default().await
+    };
+
+    if chain.is_empty() {
+        warn!("{NO_LLM_PROVIDERS_MESSAGE} -- extract/summarize tools will fail");
+        Ok(None)
+    } else {
+        info!(providers = chain.len(), "LLM provider chain ready");
+        Ok(Some(chain))
+    }
+}
 
 pub struct NoxaMcp {
     tool_router: ToolRouter<Self>,
@@ -54,14 +116,7 @@ impl NoxaMcp {
         let fetch_client = noxa_fetch::FetchClient::new(config.fetch.clone())
             .map_err(NoxaMcpError::FetchClientInit)?;
 
-        let chain = noxa_llm::ProviderChain::default().await;
-        let llm_chain = if chain.is_empty() {
-            warn!("{NO_LLM_PROVIDERS_MESSAGE} -- extract/summarize tools will fail");
-            None
-        } else {
-            info!(providers = chain.len(), "LLM provider chain ready");
-            Some(chain)
-        };
+        let llm_chain = build_llm_chain(config.as_ref()).await?;
 
         let cloud = config
             .cloud_api_key
@@ -880,6 +935,9 @@ mod tests {
             research_dir,
             searxng_url,
             cloud_api_key: cloud_base.as_ref().map(|_| "test-api-key".to_string()),
+            llm_provider: None,
+            llm_model: None,
+            llm_base_url: None,
         });
 
         NoxaMcp {
@@ -989,6 +1047,32 @@ mod tests {
             client.store().is_some(),
             "custom client should preserve store"
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_ollama_config_builds_non_empty_chain() {
+        let home = tempdir().unwrap();
+        let store_root = home.path().join("content");
+        std::fs::create_dir_all(&store_root).unwrap();
+        let store = noxa_store::FilesystemContentStore::new(&store_root);
+        let config = NoxaMcpConfig {
+            fetch: noxa_fetch::FetchConfig {
+                store: Some(store.clone()),
+                ..Default::default()
+            },
+            store,
+            research_dir: home.path().join("research"),
+            searxng_url: None,
+            cloud_api_key: None,
+            llm_provider: Some("ollama".into()),
+            llm_model: Some("qwen3.5:9b".into()),
+            llm_base_url: Some("http://127.0.0.1:11434".into()),
+        };
+
+        let chain = build_llm_chain(&config).await.unwrap();
+
+        assert!(chain.is_some(), "explicit ollama config should be honored");
+        assert_eq!(chain.unwrap().len(), 1);
     }
 
     #[tokio::test]
