@@ -460,10 +460,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output_path = dir.path().join("payload.json");
         let payload = r#"{"status":"changed"}"#;
-        // Pass the path via env so it is never interpolated unquoted into the shell
-        // command string — avoids breakage when TMPDIR contains spaces or special chars.
-        std::env::set_var("_NOXA_TEST_OUTPUT", &output_path);
-        let cmd = "cat > \"$_NOXA_TEST_OUTPUT\"";
+        let quoted_output_path = output_path
+            .to_string_lossy()
+            .replace('\'', "'\"'\"'");
+        let cmd = format!("cat > '{quoted_output_path}'");
 
         run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))
             .await
