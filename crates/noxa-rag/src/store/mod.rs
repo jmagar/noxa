@@ -30,8 +30,8 @@ pub enum HashExistsResult {
 pub trait VectorStore: Send + Sync {
     /// Upsert points into the store. Returns the number of points written.
     async fn upsert(&self, points: Vec<Point>) -> Result<usize, RagError>;
-    /// Delete all points for a given URL. Returns the number of points deleted.
-    async fn delete_by_url(&self, url: &str) -> Result<u64, RagError>;
+    /// Delete all points for a given URL.
+    async fn delete_by_url(&self, url: &str) -> Result<(), RagError>;
     /// Delete all points for a given URL whose IDs are NOT in `keep_ids`.
     ///
     /// Used for two-phase replace: upsert new points first, then call this to
@@ -41,7 +41,7 @@ pub trait VectorStore: Send + Sync {
         &self,
         url: &str,
         keep_ids: &[uuid::Uuid],
-    ) -> Result<u64, RagError>;
+    ) -> Result<(), RagError>;
     /// Search by vector similarity, optionally constrained by landed metadata.
     async fn search(
         &self,

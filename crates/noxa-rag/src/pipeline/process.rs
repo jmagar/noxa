@@ -273,7 +273,7 @@ pub(crate) async fn process_job(
         })?;
         let upsert_ms = t4.elapsed().as_millis() as u64;
 
-        let stale = store
+        store
             .delete_stale_by_url(&url, &new_ids)
             .await
             .map_err(|e| {
@@ -286,38 +286,20 @@ pub(crate) async fn process_job(
             })?;
         let delete_ms = t3.elapsed().as_millis() as u64 - upsert_ms;
 
-        if stale > 0 {
-            tracing::info!(
-                url = %url,
-                format = "json",
-                chunks = upserted,
-                stale_deleted = stale,
-                embed_tokens = total_tokens,
-                embed_tokens_per_sec,
-                parse_ms,
-                chunk_ms,
-                embed_ms,
-                delete_ms,
-                upsert_ms,
-                total_ms = job_start.elapsed().as_millis() as u64,
-                "reindexed"
-            );
-        } else {
-            tracing::info!(
-                url = %url,
-                format = "json",
-                chunks = upserted,
-                embed_tokens = total_tokens,
-                embed_tokens_per_sec,
-                parse_ms,
-                chunk_ms,
-                embed_ms,
-                delete_ms,
-                upsert_ms,
-                total_ms = job_start.elapsed().as_millis() as u64,
-                "indexed"
-            );
-        }
+        tracing::info!(
+            url = %url,
+            format = "json",
+            chunks = upserted,
+            embed_tokens = total_tokens,
+            embed_tokens_per_sec,
+            parse_ms,
+            chunk_ms,
+            embed_ms,
+            delete_ms,
+            upsert_ms,
+            total_ms = job_start.elapsed().as_millis() as u64,
+            "indexed"
+        );
 
         Ok(upsert_ms)
     }
