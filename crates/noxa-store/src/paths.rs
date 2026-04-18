@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 
-/// Map a URL to a relative store path without extension.
-pub fn url_to_store_path(url: &str) -> PathBuf {
-    let parsed = match url::Url::parse(url) {
-        Ok(url) => url,
-        Err(_) => return PathBuf::from("unknown"),
-    };
+const MAX_REL_PATH_LEN: usize = 240;
+const URL_HASH_LEN: usize = 16;
 
-    let host = parsed.host_str().unwrap_or("unknown");
+/// Map a validated URL to a relative store path without extension.
+pub fn try_url_to_store_path(url: &str) -> Result<PathBuf, crate::types::StoreError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| crate::types::StoreError::InvalidUrl(format!("{url}: {e}")))?;
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| crate::types::StoreError::InvalidUrl(format!("{url}: missing host")))?;
     let clean_host = sanitize_component(host.strip_prefix("www.").unwrap_or(host));
 
     let segments: Vec<String> = parsed
@@ -25,20 +28,28 @@ pub fn url_to_store_path(url: &str) -> PathBuf {
     };
 
     let mut rel = format!("{clean_host}/{path_part}");
-    if rel.len() > 240 {
-        rel.truncate(240);
-    }
-    if parsed.query().is_some() {
+    let needs_hash_suffix = parsed.query().is_some() || rel.len() > MAX_REL_PATH_LEN;
+    if needs_hash_suffix {
+        let hash = format!("{:016x}", url_hash(url));
+        let max_prefix_len = MAX_REL_PATH_LEN.saturating_sub(URL_HASH_LEN + 1);
+        if rel.len() > max_prefix_len {
+            rel.truncate(max_prefix_len);
+        }
         rel.push('_');
-        rel.push_str(&format!("{:08x}", url_hash(url)));
+        rel.push_str(&hash);
     }
 
-    PathBuf::from(rel)
+    Ok(PathBuf::from(rel))
 }
 
-fn url_hash(url: &str) -> u32 {
-    url.bytes().fold(2166136261_u32, |acc, b| {
-        (acc ^ (b as u32)).wrapping_mul(16777619)
+/// Lossy compatibility wrapper for already-validated URLs.
+pub fn url_to_store_path(url: &str) -> PathBuf {
+    try_url_to_store_path(url).unwrap_or_else(|_| PathBuf::from("unknown"))
+}
+
+fn url_hash(url: &str) -> u64 {
+    url.bytes().fold(14695981039346656037_u64, |acc, b| {
+        (acc ^ (b as u64)).wrapping_mul(1099511628211)
     })
 }
 
@@ -95,42 +106,60 @@ mod tests {
 
     #[test]
     fn test_url_to_store_path_root() {
-        let p = url_to_store_path("https://example.com/");
+        let p = try_url_to_store_path("https://example.com/").unwrap();
         assert_eq!(p, PathBuf::from("example_com/index"));
     }
 
     #[test]
     fn test_url_to_store_path_strips_www() {
-        let p = url_to_store_path("https://www.rust-lang.org/learn");
+        let p = try_url_to_store_path("https://www.rust-lang.org/learn").unwrap();
         assert_eq!(p, PathBuf::from("rust-lang_org/learn"));
     }
 
     #[test]
     fn test_url_to_store_path_query_discriminates() {
-        let p1 = url_to_store_path("https://example.com/search?q=rust");
-        let p2 = url_to_store_path("https://example.com/search?q=go");
+        let p1 = try_url_to_store_path("https://example.com/search?q=rust").unwrap();
+        let p2 = try_url_to_store_path("https://example.com/search?q=go").unwrap();
         assert_ne!(p1, p2);
         let p1_str = p1.to_string_lossy();
         assert!(p1_str.starts_with("example_com/search_"));
     }
 
     #[test]
+    fn test_url_to_store_path_long_urls_get_distinct_hash_suffixes() {
+        let base = "https://example.com/";
+        let repeated = "very-long-segment/".repeat(20);
+        let p1 = try_url_to_store_path(&format!("{base}{repeated}alpha")).unwrap();
+        let p2 = try_url_to_store_path(&format!("{base}{repeated}beta")).unwrap();
+
+        assert_ne!(p1, p2, "long URLs must not alias after truncation");
+        assert!(p1.to_string_lossy().len() <= MAX_REL_PATH_LEN);
+        assert!(p2.to_string_lossy().len() <= MAX_REL_PATH_LEN);
+    }
+
+    #[test]
+    fn test_try_url_to_store_path_rejects_invalid_urls() {
+        let err = try_url_to_store_path("not a url").expect_err("invalid URLs must fail closed");
+        assert!(matches!(err, crate::types::StoreError::InvalidUrl(_)));
+    }
+
+    #[test]
     fn test_store_path_stays_within_root() {
-        let p = url_to_store_path("https://evil.com/../../../etc/passwd");
+        let p = try_url_to_store_path("https://evil.com/../../../etc/passwd").unwrap();
         assert!(p.to_string_lossy().starts_with("evil_com/"));
     }
 
     #[test]
     fn test_url_to_store_path_strips_parent_components() {
         use std::path::Component;
-        let p = url_to_store_path("https://evil.com/a/../../etc/./passwd");
+        let p = try_url_to_store_path("https://evil.com/a/../../etc/./passwd").unwrap();
         assert!(!p.components().any(|c| matches!(c, Component::ParentDir)));
         assert!(!p.components().any(|c| matches!(c, Component::CurDir)));
     }
 
     #[test]
     fn test_url_to_store_path_sanitizes_ipv6() {
-        let p = url_to_store_path("https://[fe80::1]/bad:path/segment");
+        let p = try_url_to_store_path("https://[fe80::1]/bad:path/segment").unwrap();
         let s = p.to_string_lossy();
         assert!(s.starts_with("fe80__1/"));
         assert!(!s.contains(':'));
@@ -140,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_url_hash_fnv1a() {
-        assert_eq!(url_hash("hello"), 0x4f9f2cab);
+        assert_eq!(url_hash("hello"), 0xa430d84680aabd0b);
     }
 
     #[test]

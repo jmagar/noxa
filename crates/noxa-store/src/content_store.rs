@@ -11,7 +11,7 @@ use std::path::{Component, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{content_store_root, url_to_store_path};
+use crate::paths::{content_store_root, try_url_to_store_path};
 use crate::types::{StoreError, StoreResult};
 
 // ---------------------------------------------------------------------------
@@ -58,9 +58,8 @@ pub struct Sidecar {
 #[derive(Debug, Clone)]
 pub struct FilesystemContentStore {
     root: PathBuf,
-    /// Cached canonical (symlink-resolved) root path.  Populated lazily on first
-    /// use of `resolve_path()` so that the store can be constructed before the
-    /// directory exists on disk.
+    /// Cached canonical (symlink-resolved) root path. Populated lazily using the
+    /// nearest existing ancestor so the store can initialize itself on first use.
     canonical_root: std::sync::Arc<std::sync::OnceLock<PathBuf>>,
     /// Maximum combined byte size of markdown + plain_text before a document is
     /// skipped (not written). Default: 2 MiB. `None` disables the guard.
@@ -105,16 +104,13 @@ impl FilesystemContentStore {
         if let Some(cr) = self.canonical_root.get() {
             return Ok(cr.clone());
         }
-        let cr = std::fs::canonicalize(&self.root).map_err(|e| StoreError::IoPath {
-            source: e,
-            path: self.root.clone(),
-        })?;
+        let cr = canonicalize_with_missing_components(&self.root)?;
         // Ignore set error — another thread may have populated it concurrently.
         let _ = self.canonical_root.set(cr.clone());
         Ok(cr)
     }
     fn resolve_path(&self, url: &str) -> Result<PathBuf, StoreError> {
-        let rel = url_to_store_path(url);
+        let rel = try_url_to_store_path(url)?;
         if rel
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
@@ -126,29 +122,10 @@ impl FilesystemContentStore {
             return Err(StoreError::PathEscape(url.to_string()));
         }
 
-        // Use the cached canonical root instead of calling canonicalize per-request.
         let canonical_root = self.get_canonical_root()?;
-        // Symlink protection: walk up to find the nearest existing ancestor,
-        // canonicalize it, then verify the resolved path stays under the root.
         let parent = base.parent().unwrap_or(&base);
-        let mut existing_ancestor = parent.to_path_buf();
-        let mut suffix = PathBuf::new();
-        while !existing_ancestor.exists() {
-            if let Some(name) = existing_ancestor.file_name() {
-                suffix = PathBuf::from(name).join(&suffix);
-            }
-            match existing_ancestor.parent() {
-                Some(p) => existing_ancestor = p.to_path_buf(),
-                None => break,
-            }
-        }
-        let canonical_parent =
-            std::fs::canonicalize(&existing_ancestor).map_err(|e| StoreError::IoPath {
-                source: e,
-                path: existing_ancestor.clone(),
-            })?;
-        let resolved = canonical_parent.join(&suffix);
-        if !resolved.starts_with(&canonical_root) {
+        let resolved_parent = canonicalize_with_missing_components(parent)?;
+        if !resolved_parent.starts_with(&canonical_root) {
             return Err(StoreError::PathEscape(url.to_string()));
         }
 
@@ -157,21 +134,27 @@ impl FilesystemContentStore {
         let file_name = base
             .file_name()
             .ok_or_else(|| StoreError::PathEscape(url.to_string()))?;
-        Ok(resolved.join(file_name))
+        Ok(resolved_parent.join(file_name))
     }
 
     pub async fn read(&self, url: &str) -> Result<Option<noxa_core::ExtractionResult>, StoreError> {
         let base = match self.resolve_path(url) {
             Ok(b) => b,
-            Err(_) => return Ok(None),
+            Err(StoreError::PathEscape(_)) => return Ok(None),
+            Err(err) => return Err(err),
         };
         let json_path = base.with_extension("json");
         match tokio::fs::read_to_string(&json_path).await {
             Ok(contents) => {
+                let json_path_for_error = json_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     parse_sidecar_or_legacy(&contents).map(|s| s.current)
                 })
-                .await??;
+                .await?
+                .map_err(|source| StoreError::CorruptSidecar {
+                    path: json_path_for_error,
+                    source,
+                })?;
                 Ok(Some(result))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -186,7 +169,8 @@ impl FilesystemContentStore {
     pub async fn read_sidecar(&self, url: &str) -> Result<Option<Sidecar>, StoreError> {
         let base = match self.resolve_path(url) {
             Ok(b) => b,
-            Err(_) => return Ok(None),
+            Err(StoreError::PathEscape(_)) => return Ok(None),
+            Err(err) => return Err(err),
         };
         let json_path = base.with_extension("json");
         match tokio::fs::read_to_string(&json_path).await {
@@ -198,9 +182,14 @@ impl FilesystemContentStore {
                     .and_then(|m| m.modified().ok())
                     .map(DateTime::<Utc>::from)
                     .unwrap_or_else(Utc::now);
+                let json_path_for_error = json_path.clone();
                 let result =
                     tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime))
-                        .await??;
+                        .await?
+                        .map_err(|source| StoreError::CorruptSidecar {
+                            path: json_path_for_error,
+                            source,
+                        })?;
                 Ok(Some(result))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -218,6 +207,8 @@ impl FilesystemContentStore {
         extraction: &noxa_core::ExtractionResult,
     ) -> Result<StoreResult, StoreError> {
         let base = self.resolve_path(url)?;
+        tokio::fs::create_dir_all(&self.root).await?;
+        let _ = self.get_canonical_root()?;
 
         let md_path = base.with_extension("md");
         let json_path = base.with_extension("json");
@@ -228,14 +219,21 @@ impl FilesystemContentStore {
             set_dir_permissions(parent)?;
         }
 
+        let mut to_store = extraction.clone();
+        // Strip query params from metadata.url — prevents leaking auth tokens / API keys.
+        if let Some(ref url_str) = to_store.metadata.url
+            && let Ok(mut u) = url::Url::parse(url_str)
+        {
+            u.set_query(None);
+            to_store.metadata.url = Some(u.to_string());
+        }
+        // Strip sensitive fields.
+        to_store.content.raw_html = None; // persistent XSS surface for downstream renderers
+        to_store.metadata.file_path = None; // leaks local filesystem paths
+        to_store.metadata.search_query = None; // leaks user search intent
+
         // Size guard — skip oversized documents rather than filling disk.
-        let estimated = extraction.content.markdown.len()
-            + extraction.content.plain_text.len()
-            + extraction
-                .content
-                .raw_html
-                .as_deref()
-                .map_or(0, |h| h.len());
+        let estimated = to_store.content.markdown.len() + to_store.content.plain_text.len();
         if let Some(max) = self.max_content_bytes
             && estimated > max
         {
@@ -260,34 +258,25 @@ impl FilesystemContentStore {
 
         let existing_sidecar: Option<Sidecar> = match tokio::fs::read_to_string(&json_path).await {
             Ok(contents) => {
-                // Need mtime for legacy migration.
                 let mtime = tokio::fs::metadata(&json_path)
                     .await
                     .ok()
                     .and_then(|m| m.modified().ok())
                     .map(DateTime::<Utc>::from)
                     .unwrap_or(now);
-                tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime).ok())
-                    .await
-                    .unwrap_or(None)
+                let json_path_for_error = json_path.clone();
+                let sidecar =
+                    tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime))
+                        .await?
+                        .map_err(|source| StoreError::CorruptSidecar {
+                            path: json_path_for_error,
+                            source,
+                        })?;
+                Some(sidecar)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-
-        // ---- Strip query params from metadata.url before persisting --------
-        let mut to_store = extraction.clone();
-        // Strip query params from metadata.url — prevents leaking auth tokens / API keys.
-        if let Some(ref url_str) = to_store.metadata.url
-            && let Ok(mut u) = url::Url::parse(url_str)
-        {
-            u.set_query(None);
-            to_store.metadata.url = Some(u.to_string());
-        }
-        // Strip sensitive fields.
-        to_store.content.raw_html = None; // persistent XSS surface for downstream renderers
-        to_store.metadata.file_path = None; // leaks local filesystem paths
-        to_store.metadata.search_query = None; // leaks user search intent
 
         // ---- Build the updated sidecar and decide what changed -------------
         let (sidecar, is_new, changed, word_count_delta, diff_result) =
@@ -411,6 +400,36 @@ impl FilesystemContentStore {
     }
 }
 
+fn canonicalize_with_missing_components(path: &std::path::Path) -> Result<PathBuf, StoreError> {
+    let mut existing_ancestor = path.to_path_buf();
+    let mut suffix = PathBuf::new();
+
+    while !existing_ancestor.exists() {
+        if let Some(name) = existing_ancestor.file_name() {
+            suffix = PathBuf::from(name).join(&suffix);
+        }
+        match existing_ancestor.parent() {
+            Some(parent) => existing_ancestor = parent.to_path_buf(),
+            None => {
+                return Err(StoreError::IoPath {
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no existing ancestor for path",
+                    ),
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+    }
+
+    let canonical_existing =
+        std::fs::canonicalize(&existing_ancestor).map_err(|e| StoreError::IoPath {
+            source: e,
+            path: existing_ancestor.clone(),
+        })?;
+    Ok(canonical_existing.join(suffix))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers — format detection & migration
 // ---------------------------------------------------------------------------
@@ -493,7 +512,7 @@ fn set_file_permissions(path: &std::path::Path) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::url_to_store_path;
+    use crate::paths::try_url_to_store_path;
 
     fn make_extraction(markdown: &str) -> noxa_core::ExtractionResult {
         noxa_core::ExtractionResult {
@@ -577,10 +596,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_corrupted_prev_json_treated_as_new() {
+    async fn test_corrupted_prev_json_returns_typed_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = FilesystemContentStore::new(dir.path());
-        let rel = url_to_store_path("https://example.com/corrupt");
+        let rel = try_url_to_store_path("https://example.com/corrupt").unwrap();
         let json_path = dir.path().join(&rel).with_extension("json");
         tokio::fs::create_dir_all(json_path.parent().unwrap())
             .await
@@ -592,26 +611,26 @@ mod tests {
         let result = store
             .write("https://example.com/corrupt", &e)
             .await
-            .unwrap();
-        assert!(result.is_new);
+            .expect_err("corrupt sidecars must be surfaced");
+        assert!(matches!(result, StoreError::CorruptSidecar { .. }));
     }
 
     #[tokio::test]
     async fn test_store_path_stays_within_root() {
-        let p = url_to_store_path("https://evil.com/../../../etc/passwd");
+        let p = try_url_to_store_path("https://evil.com/../../../etc/passwd").unwrap();
         assert!(p.to_string_lossy().starts_with("evil_com/"));
     }
 
     #[tokio::test]
     async fn test_url_to_store_path_strips_parent_components() {
-        let p = url_to_store_path("https://evil.com/a/../../etc/./passwd");
+        let p = try_url_to_store_path("https://evil.com/a/../../etc/./passwd").unwrap();
         assert!(!p.components().any(|c| matches!(c, Component::ParentDir)));
         assert!(!p.components().any(|c| matches!(c, Component::CurDir)));
     }
 
     #[tokio::test]
     async fn test_url_to_store_path_sanitizes_ipv6_host_and_path() {
-        let p = url_to_store_path("https://[fe80::1]/bad:path/segment");
+        let p = try_url_to_store_path("https://[fe80::1]/bad:path/segment").unwrap();
         let s = p.to_string_lossy();
         assert!(s.starts_with("fe80__1/"));
         assert!(!s.contains(':'));
@@ -622,8 +641,35 @@ mod tests {
     #[test]
     fn test_url_hash_matches_fnv1a() {
         // Test via url_to_store_path behavior: URL with query gets a hash suffix.
-        let p = url_to_store_path("https://example.com/page?q=test");
+        let p = try_url_to_store_path("https://example.com/page?q=test").unwrap();
         assert!(p.to_string_lossy().contains('_'));
+    }
+
+    #[tokio::test]
+    async fn test_write_creates_fresh_root_on_first_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("missing").join("content-root");
+        let store = FilesystemContentStore::new(&root);
+
+        let result = store
+            .write("https://example.com/fresh-root", &make_extraction("fresh"))
+            .await
+            .expect("store should initialize its own root");
+
+        assert!(result.md_path.exists());
+        assert!(result.json_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_invalid_urls_fail_closed_in_store_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemContentStore::new(dir.path());
+
+        let err = store
+            .write("not a url", &make_extraction("content"))
+            .await
+            .expect_err("invalid URLs must be rejected");
+        assert!(matches!(err, StoreError::InvalidUrl(_)));
     }
 
     // --- tests for read(), Clone, atomic writes, query-param stripping ---
@@ -703,6 +749,23 @@ mod tests {
         let result = store.write("https://example.com/big", &e).await.unwrap();
         assert!(!result.is_new);
         assert!(!result.changed);
+    }
+
+    #[tokio::test]
+    async fn test_max_content_bytes_uses_sanitized_payload_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FilesystemContentStore::new(dir.path());
+        let mut extraction = make_extraction("tiny");
+        extraction.content.raw_html = Some("x".repeat(4096));
+        store.max_content_bytes = Some(32);
+
+        let result = store
+            .write("https://example.com/sanitized-budget", &extraction)
+            .await
+            .expect("sanitized payload should fit within budget");
+
+        assert!(result.is_new);
+        assert!(result.md_path.exists());
     }
 
     // -----------------------------------------------------------------------
@@ -810,7 +873,7 @@ mod tests {
         let store = FilesystemContentStore::new(dir.path());
         // Write a raw ExtractionResult (old format) directly to disk.
         let e = make_extraction("# Legacy\n\nOld format content.");
-        let rel = url_to_store_path("https://example.com/legacy");
+        let rel = try_url_to_store_path("https://example.com/legacy").unwrap();
         let json_path = dir.path().join(&rel).with_extension("json");
         tokio::fs::create_dir_all(json_path.parent().unwrap())
             .await
@@ -885,6 +948,18 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_invalid_url_propagates_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemContentStore::new(dir.path());
+
+        let err = store
+            .read("not a url")
+            .await
+            .expect_err("invalid URLs should not look like cache misses");
+        assert!(matches!(err, StoreError::InvalidUrl(_)));
     }
 
     #[tokio::test]
