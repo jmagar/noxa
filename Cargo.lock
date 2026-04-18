@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "clap",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "ego-tree",
  "once_cell",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-fetch"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bytes",
  "calamine",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-llm"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2362,7 +2362,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-mcp"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "dirs",
  "dotenvy",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-pdf"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "pdf-extract",
  "thiserror 2.0.18",
@@ -2397,13 +2397,14 @@ dependencies = [
 
 [[package]]
 name = "noxa-rag"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
  "clap",
  "dashmap",
  "feed-rs",
+ "futures",
  "mailparse",
  "notify",
  "notify-debouncer-mini",
@@ -2432,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-store"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "dirs",
