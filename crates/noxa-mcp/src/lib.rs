@@ -11,6 +11,8 @@ pub(crate) mod error;
 pub(crate) mod research;
 pub(crate) mod serialization;
 pub(crate) mod server;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod tools;
 pub(crate) mod validation;
 
