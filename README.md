@@ -479,6 +479,15 @@ noxa --status docs.rust-lang.org
 noxa --refresh docs.rust-lang.org
 ```
 
+> **Note — scaling characteristics:** Exact-URL retrieval is an O(1) path lookup.
+> Fuzzy `--retrieve` and `--refresh` are backed by `list_all_docs` /
+> `list_domain_urls`, which perform a recursive filesystem walk and parse every
+> `.json` sidecar in the store (or domain subdirectory). Performance scales
+> linearly with document count and directory depth. On stores with a few hundred
+> documents, both commands complete in well under a second. On large stores
+> (10 000+ documents), expect traversal and sidecar-parsing overhead of several
+> seconds. No in-memory index is maintained between runs.
+
 ### Save to Files
 
 ```bash

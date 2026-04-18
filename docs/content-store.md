@@ -138,6 +138,26 @@ audit-grade durability guarantee.
 
 The validation helpers fail closed on DNS resolution failure.
 
+## Enumeration and Scaling
+
+`FilesystemContentStore` exposes four enumeration methods added in Wave 1A:
+
+| Method | Scope | Cost |
+|---|---|---|
+| `list_domains()` | store root (one level) | O(domain count), counts `.md` files per domain via sync recursive walk |
+| `list_docs(domain)` | one domain directory | O(docs in domain), parses each `.json` sidecar |
+| `list_all_docs()` | entire store | O(total doc count), recursive walk + sidecar parse for every document |
+| `list_domain_urls(domain)` | one domain directory | O(docs in domain), recursive walk + sidecar parse |
+
+All four methods perform a filesystem traversal on every call. There is no persistent index. Latency scales linearly with document count and directory depth:
+
+- Small stores (< 1 000 docs): traversal typically completes in tens of milliseconds.
+- Large stores (10 000+ docs): traversal and sidecar-parsing overhead reaches several seconds.
+
+`--retrieve` (fuzzy query) calls `list_all_docs()` across the entire store.
+`--refresh <domain>` calls `list_domain_urls()` scoped to one domain directory.
+Exact-URL `--retrieve` bypasses enumeration entirely and is an O(1) path lookup.
+
 ## Deferred / Not Implemented Here
 
 These items are not part of the current crate:
