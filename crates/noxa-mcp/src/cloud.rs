@@ -7,6 +7,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracing::info;
 
+use crate::error::NoxaMcpError;
+
 const API_BASE: &str = "https://api.noxa.io/v1";
 
 /// Lightweight client for the noxa cloud API.
@@ -16,18 +18,12 @@ pub struct CloudClient {
 }
 
 impl CloudClient {
-    /// Create a new cloud client from NOXA_API_KEY env var.
-    /// Returns None if the key is not set.
-    pub fn from_env() -> Option<Self> {
-        let key = std::env::var("NOXA_API_KEY").ok()?;
-        if key.is_empty() {
-            return None;
-        }
+    pub fn new(api_key: String) -> Result<Self, NoxaMcpError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
-            .unwrap_or_default();
-        Some(Self { api_key: key, http })
+            .map_err(NoxaMcpError::CloudClientInit)?;
+        Ok(Self { api_key, http })
     }
 
     /// Scrape a URL via the cloud API. Returns the response JSON.
@@ -38,7 +34,7 @@ impl CloudClient {
         include_selectors: &[String],
         exclude_selectors: &[String],
         only_main_content: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, NoxaMcpError> {
         let mut body = json!({
             "url": url,
             "formats": formats,
@@ -58,7 +54,7 @@ impl CloudClient {
     }
 
     /// Generic POST to the cloud API.
-    pub async fn post(&self, endpoint: &str, body: Value) -> Result<Value, String> {
+    pub async fn post(&self, endpoint: &str, body: Value) -> Result<Value, NoxaMcpError> {
         let resp = self
             .http
             .post(format!("{API_BASE}/{endpoint}"))
@@ -66,40 +62,40 @@ impl CloudClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Cloud API request failed: {e}"))?;
+            .map_err(|e| NoxaMcpError::cloud(format!("request failed: {e}")))?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             let truncated = truncate_error(&text);
-            return Err(format!("Cloud API error {status}: {truncated}"));
+            return Err(NoxaMcpError::cloud(format!("error {status}: {truncated}")));
         }
 
         resp.json::<Value>()
             .await
-            .map_err(|e| format!("Cloud API response parse failed: {e}"))
+            .map_err(|e| NoxaMcpError::cloud(format!("response parse failed: {e}")))
     }
 
     /// Generic GET from the cloud API.
-    pub async fn get(&self, endpoint: &str) -> Result<Value, String> {
+    pub async fn get(&self, endpoint: &str) -> Result<Value, NoxaMcpError> {
         let resp = self
             .http
             .get(format!("{API_BASE}/{endpoint}"))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .map_err(|e| format!("Cloud API request failed: {e}"))?;
+            .map_err(|e| NoxaMcpError::cloud(format!("request failed: {e}")))?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             let truncated = truncate_error(&text);
-            return Err(format!("Cloud API error {status}: {truncated}"));
+            return Err(NoxaMcpError::cloud(format!("error {status}: {truncated}")));
         }
 
         resp.json::<Value>()
             .await
-            .map_err(|e| format!("Cloud API response parse failed: {e}"))
+            .map_err(|e| NoxaMcpError::cloud(format!("response parse failed: {e}")))
     }
 }
 
@@ -217,12 +213,12 @@ pub async fn smart_fetch(
     exclude_selectors: &[String],
     only_main_content: bool,
     formats: &[&str],
-) -> Result<SmartFetchResult, String> {
+) -> Result<SmartFetchResult, NoxaMcpError> {
     // Step 1: Try local fetch (with timeout to avoid hanging on slow servers)
     let fetch_result = tokio::time::timeout(Duration::from_secs(30), client.fetch(url))
         .await
-        .map_err(|_| format!("Fetch timed out after 30s for {url}"))?
-        .map_err(|e| format!("Fetch failed: {e}"))?;
+        .map_err(|_| NoxaMcpError::message(format!("Fetch timed out after 30s for {url}")))?
+        .map_err(NoxaMcpError::Fetch)?;
 
     // Step 2: Check for bot protection
     if is_bot_protected(&fetch_result.html, &fetch_result.headers) {
@@ -248,7 +244,7 @@ pub async fn smart_fetch(
 
     let extraction =
         noxa_core::extract_with_options(&fetch_result.html, Some(&fetch_result.url), &options)
-            .map_err(|e| format!("Extraction failed: {e}"))?;
+            .map_err(NoxaMcpError::Extract)?;
 
     // Step 4: Check for JS-rendered pages (low content from large HTML)
     if needs_js_rendering(extraction.metadata.word_count, &fetch_result.html) {
@@ -279,7 +275,7 @@ async fn cloud_fallback(
     exclude_selectors: &[String],
     only_main_content: bool,
     formats: &[&str],
-) -> Result<SmartFetchResult, String> {
+) -> Result<SmartFetchResult, NoxaMcpError> {
     match cloud {
         Some(c) => {
             let resp = c
@@ -294,9 +290,9 @@ async fn cloud_fallback(
             info!(url, "cloud API fallback successful");
             Ok(SmartFetchResult::Cloud(resp))
         }
-        None => Err(format!(
+        None => Err(NoxaMcpError::cloud(format!(
             "Bot protection detected on {url}. Set NOXA_API_KEY for automatic cloud bypass. \
              Get a key at https://noxa.io"
-        )),
+        ))),
     }
 }

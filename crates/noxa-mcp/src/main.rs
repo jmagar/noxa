@@ -2,7 +2,7 @@
 /// Exposes web extraction tools over stdio transport for AI agents
 /// like Claude Desktop, Claude Code, and other MCP clients.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), noxa_mcp::NoxaMcpError> {
     dotenvy::dotenv().ok();
 
     // Log to stderr -- stdout is the MCP transport channel
