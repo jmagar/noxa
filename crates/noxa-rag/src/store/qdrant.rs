@@ -266,12 +266,13 @@ fn parse_collection_vector_size(vectors: serde_json::Value) -> Result<usize, Rag
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::QdrantStore;
     use super::parse_collection_vector_size;
     use crate::store::VectorStore;
-    use crate::types::SearchMetadataFilter;
+    use crate::types::{Point, SearchMetadataFilter};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -357,10 +358,10 @@ mod tests {
                         let mut parts = line.split_whitespace();
                         method = parts.next().unwrap_or_default().to_string();
                         path = parts.next().unwrap_or_default().to_string();
-                    } else if let Some((name, value)) = line.split_once(':') {
-                        if name.trim().eq_ignore_ascii_case("content-length") {
-                            content_length = value.trim().parse().unwrap_or(0);
-                        }
+                    } else if let Some((name, value)) = line.split_once(':')
+                        && name.trim().eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().unwrap_or(0);
                     }
                 }
 
@@ -540,7 +541,7 @@ mod tests {
                         .to_string()
                     }
                 }
-                ("PUT", path) if path == "/collections/noxa-test/index" => "{}".to_string(),
+                ("PUT", "/collections/noxa-test/index") => "{}".to_string(),
                 ("POST", "/collections/noxa-test/points/search") => serde_json::json!({
                     "result": [
                         {
@@ -628,6 +629,71 @@ mod tests {
         assert_eq!(results[0].file_path.as_deref(), Some("/tmp/report.md"));
         assert_eq!(results[0].git_branch.as_deref(), Some("main"));
     }
+
+    #[tokio::test]
+    async fn upsert_serializes_searchable_payload_metadata() {
+        use crate::types::PointPayload;
+
+        let (base_url, requests, handle) = spawn_test_server(|_request| "{}".to_string()).await;
+        let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+            .expect("store");
+
+        let point = Point {
+            id: uuid::Uuid::nil(),
+            vector: vec![0.25, 0.75],
+            payload: PointPayload {
+                text: "chunk text".to_string(),
+                url: "file:///tmp/report.md".to_string(),
+                domain: "example.com".to_string(),
+                chunk_index: 2,
+                total_chunks: 4,
+                token_estimate: 123,
+                title: Some("Report".to_string()),
+                author: None,
+                published_date: None,
+                language: Some("en".to_string()),
+                source_type: Some("file".to_string()),
+                content_hash: Some("hash-123".to_string()),
+                technologies: Vec::new(),
+                is_truncated: None,
+                file_path: Some("/tmp/report.md".to_string()),
+                last_modified: Some("2026-04-15T12:34:56Z".to_string()),
+                git_branch: Some("main".to_string()),
+                external_id: None,
+                platform_url: None,
+                seed_url: None,
+                search_query: None,
+                crawl_depth: None,
+                email_to: Vec::new(),
+                email_message_id: None,
+                email_thread_id: None,
+                email_has_attachments: None,
+                feed_url: None,
+                feed_item_id: None,
+                pptx_slide_count: None,
+                pptx_has_notes: None,
+                subtitle_start_s: None,
+                subtitle_end_s: None,
+                subtitle_source_file: None,
+            },
+        };
+
+        store.upsert(vec![point]).await.expect("upsert");
+        handle.abort();
+
+        let recorded = requests.lock().unwrap();
+        let request = recorded
+            .iter()
+            .find(|request| request.method == "PUT")
+            .expect("upsert request");
+        let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
+        let payload = &body["points"][0]["payload"];
+
+        assert_eq!(payload["content_hash"], "hash-123");
+        assert_eq!(payload["git_branch"], "main");
+        assert_eq!(payload["file_path"], "/tmp/report.md");
+        assert_eq!(payload["last_modified"], "2026-04-15T12:34:56Z");
+    }
 }
 
 #[async_trait]
@@ -642,98 +708,10 @@ impl VectorStore for QdrantStore {
 
         let qdrant_points: Vec<QdrantPoint> = points
             .iter()
-            .map(|p| {
-                let mut payload = std::collections::HashMap::new();
-                payload.insert("text".into(), json!(p.payload.text));
-                payload.insert("url".into(), json!(p.payload.url));
-                payload.insert("domain".into(), json!(p.payload.domain));
-                payload.insert("chunk_index".into(), json!(p.payload.chunk_index));
-                payload.insert("total_chunks".into(), json!(p.payload.total_chunks));
-                payload.insert("token_estimate".into(), json!(p.payload.token_estimate));
-                // Extended metadata — only insert when present so payload stays compact.
-                if let Some(v) = &p.payload.title {
-                    payload.insert("title".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.author {
-                    payload.insert("author".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.published_date {
-                    payload.insert("published_date".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.language {
-                    payload.insert("language".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.source_type {
-                    payload.insert("source_type".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.content_hash {
-                    payload.insert("content_hash".into(), json!(v));
-                }
-                if !p.payload.technologies.is_empty() {
-                    payload.insert("technologies".into(), json!(p.payload.technologies));
-                }
-                if let Some(v) = p.payload.is_truncated {
-                    payload.insert("is_truncated".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.file_path {
-                    payload.insert("file_path".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.last_modified {
-                    payload.insert("last_modified".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.external_id {
-                    payload.insert("external_id".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.platform_url {
-                    payload.insert("platform_url".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.seed_url {
-                    payload.insert("seed_url".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.search_query {
-                    payload.insert("search_query".into(), json!(v));
-                }
-                if let Some(v) = p.payload.crawl_depth {
-                    payload.insert("crawl_depth".into(), json!(v));
-                }
-                if !p.payload.email_to.is_empty() {
-                    payload.insert("email_to".into(), json!(p.payload.email_to));
-                }
-                if let Some(v) = &p.payload.email_message_id {
-                    payload.insert("email_message_id".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.email_thread_id {
-                    payload.insert("email_thread_id".into(), json!(v));
-                }
-                if let Some(v) = p.payload.email_has_attachments {
-                    payload.insert("email_has_attachments".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.feed_url {
-                    payload.insert("feed_url".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.feed_item_id {
-                    payload.insert("feed_item_id".into(), json!(v));
-                }
-                if let Some(v) = p.payload.pptx_slide_count {
-                    payload.insert("pptx_slide_count".into(), json!(v));
-                }
-                if let Some(v) = p.payload.pptx_has_notes {
-                    payload.insert("pptx_has_notes".into(), json!(v));
-                }
-                if let Some(v) = p.payload.subtitle_start_s {
-                    payload.insert("subtitle_start_s".into(), json!(v));
-                }
-                if let Some(v) = p.payload.subtitle_end_s {
-                    payload.insert("subtitle_end_s".into(), json!(v));
-                }
-                if let Some(v) = &p.payload.subtitle_source_file {
-                    payload.insert("subtitle_source_file".into(), json!(v));
-                }
-                QdrantPoint {
-                    id: p.id.to_string(),
-                    vector: p.vector.clone(),
-                    payload,
-                }
+            .map(|p| QdrantPoint {
+                id: p.id.to_string(),
+                vector: p.vector.clone(),
+                payload: p.payload.to_qdrant_payload(),
             })
             .collect();
 
@@ -932,144 +910,12 @@ impl VectorStore for QdrantStore {
             .into_iter()
             .filter_map(|hit| {
                 let payload = hit.payload?;
-                let text = payload
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let url = payload
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                match (text, url) {
-                    (Some(text), Some(url)) => {
-                        let chunk_index = payload
-                            .get("chunk_index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize;
-                        let token_estimate = payload
-                            .get("token_estimate")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize;
-                        let title = payload
-                            .get("title")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let author = payload
-                            .get("author")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let published_date = payload
-                            .get("published_date")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let language = payload
-                            .get("language")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let source_type = payload
-                            .get("source_type")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let content_hash = payload
-                            .get("content_hash")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let technologies = payload
-                            .get("technologies")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|t| t.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let file_path = payload
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let last_modified = payload
-                            .get("last_modified")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let git_branch = payload
-                            .get("git_branch")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let email_to = payload
-                            .get("email_to")
-                            .and_then(|v| v.as_array())
-                            .map(|values| {
-                                values
-                                    .iter()
-                                    .filter_map(|value| value.as_str().map(String::from))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        let email_message_id = payload
-                            .get("email_message_id")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let email_thread_id = payload
-                            .get("email_thread_id")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let email_has_attachments = payload
-                            .get("email_has_attachments")
-                            .and_then(|v| v.as_bool());
-                        let feed_url = payload
-                            .get("feed_url")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let feed_item_id = payload
-                            .get("feed_item_id")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let pptx_slide_count = payload
-                            .get("pptx_slide_count")
-                            .and_then(|v| v.as_u64())
-                            .and_then(|v| u32::try_from(v).ok());
-                        let pptx_has_notes =
-                            payload.get("pptx_has_notes").and_then(|v| v.as_bool());
-                        let subtitle_start_s =
-                            payload.get("subtitle_start_s").and_then(|v| v.as_f64());
-                        let subtitle_end_s = payload.get("subtitle_end_s").and_then(|v| v.as_f64());
-                        let subtitle_source_file = payload
-                            .get("subtitle_source_file")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        Some(SearchResult {
-                            text,
-                            url,
-                            score: hit.score,
-                            chunk_index,
-                            token_estimate,
-                            title,
-                            author,
-                            published_date,
-                            language,
-                            source_type,
-                            content_hash,
-                            technologies,
-                            file_path,
-                            last_modified,
-                            git_branch,
-                            email_to,
-                            email_message_id,
-                            email_thread_id,
-                            email_has_attachments,
-                            feed_url,
-                            feed_item_id,
-                            pptx_slide_count,
-                            pptx_has_notes,
-                            subtitle_start_s,
-                            subtitle_end_s,
-                            subtitle_source_file,
-                        })
-                    }
-                    _ => {
+                match SearchResult::from_qdrant_payload(payload, hit.score) {
+                    Ok(result) => Some(result),
+                    Err(error) => {
                         tracing::warn!(
-                            "search hit dropped: missing required payload field (text or url) \
-                             — possible schema mismatch or data corruption"
+                            error = %error,
+                            "search hit dropped: payload failed schema validation"
                         );
                         None
                     }

@@ -1088,13 +1088,7 @@ fn parse_email_file(
         .get_first_header("From")
         .and_then(|header| addrparse_header(header).ok())
         .and_then(|addresses| addresses.iter().flat_map(flatten_mail_addrs).next());
-    let has_attachments = parsed.parts().skip(1).any(|part| {
-        part.get_content_disposition().disposition == mailparse::DispositionType::Attachment
-            || part
-                .get_content_disposition()
-                .params
-                .contains_key("filename")
-    });
+    let has_attachments = mail_part_has_attachment(&parsed);
     let word_count = body.split_whitespace().count();
 
     let mut extraction =
@@ -1258,23 +1252,7 @@ fn email_thread_id(headers: &mailparse::headers::Headers<'_>) -> Option<String> 
 fn collect_email_body(parsed: &mailparse::ParsedMail<'_>) -> String {
     let mut plain_parts = Vec::new();
     let mut html_parts = Vec::new();
-    for part in parsed.parts() {
-        if part.ctype.mimetype == "text/plain" {
-            if let Ok(body) = part.get_body() {
-                let trimmed = body.trim();
-                if !trimmed.is_empty() {
-                    plain_parts.push(trimmed.to_string());
-                }
-            }
-        } else if part.ctype.mimetype == "text/html"
-            && let Ok(body) = part.get_body()
-        {
-            let trimmed = body.trim();
-            if !trimmed.is_empty() {
-                html_parts.push(trimmed.to_string());
-            }
-        }
-    }
+    collect_email_body_parts(parsed, &mut plain_parts, &mut html_parts);
 
     if !plain_parts.is_empty() {
         plain_parts.join("\n\n")
@@ -1283,6 +1261,46 @@ fn collect_email_body(parsed: &mailparse::ParsedMail<'_>) -> String {
     } else {
         parsed.get_body().unwrap_or_default()
     }
+}
+
+fn collect_email_body_parts(
+    part: &mailparse::ParsedMail<'_>,
+    plain_parts: &mut Vec<String>,
+    html_parts: &mut Vec<String>,
+) {
+    if !part.subparts.is_empty() {
+        for child in &part.subparts {
+            collect_email_body_parts(child, plain_parts, html_parts);
+        }
+        return;
+    }
+
+    if part.ctype.mimetype == "text/plain" {
+        if let Ok(body) = part.get_body() {
+            let trimmed = body.trim();
+            if !trimmed.is_empty() {
+                plain_parts.push(trimmed.to_string());
+            }
+        }
+    } else if part.ctype.mimetype == "text/html"
+        && let Ok(body) = part.get_body()
+    {
+        let trimmed = body.trim();
+        if !trimmed.is_empty() {
+            html_parts.push(trimmed.to_string());
+        }
+    }
+}
+
+fn mail_part_has_attachment(part: &mailparse::ParsedMail<'_>) -> bool {
+    let disposition = part.get_content_disposition();
+    if disposition.disposition == mailparse::DispositionType::Attachment
+        || disposition.params.contains_key("filename")
+    {
+        return true;
+    }
+
+    part.subparts.iter().any(mail_part_has_attachment)
 }
 
 fn subtitle_provenance(content: &str) -> IngestionProvenance {
@@ -1656,14 +1674,29 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, config: 
         "error": error.to_string(),
         "ts": chrono::Utc::now().to_rfc3339(),
     });
-    if let Ok(mut file) = tokio::fs::OpenOptions::new()
+    match tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path)
         .await
     {
-        use tokio::io::AsyncWriteExt;
-        let _ = file.write_all(format!("{}\n", entry).as_bytes()).await;
+        Ok(mut file) => {
+            use tokio::io::AsyncWriteExt;
+            if let Err(write_error) = file.write_all(format!("{}\n", entry).as_bytes()).await {
+                tracing::warn!(
+                    path = %log_path.display(),
+                    error = %write_error,
+                    "failed to append failed job log entry"
+                );
+            }
+        }
+        Err(open_error) => {
+            tracing::warn!(
+                path = %log_path.display(),
+                error = %open_error,
+                "failed to open failed job log"
+            );
+        }
     }
 }
 
@@ -1684,6 +1717,57 @@ async fn canonical_watch_root(watch_dir: &Path) -> Result<PathBuf, RagError> {
 
 fn path_is_within_watch_root(canonical_path: &Path, watch_root: &Path) -> bool {
     canonical_path.starts_with(watch_root)
+}
+
+#[cfg(unix)]
+fn hard_link_count(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.nlink()
+}
+
+#[cfg(not(unix))]
+fn hard_link_count(_metadata: &std::fs::Metadata) -> u64 {
+    1
+}
+
+fn file_is_safe_to_index(
+    canonical_path: &Path,
+    metadata: &std::fs::Metadata,
+    watch_root: &Path,
+) -> Result<(), RagError> {
+    if !path_is_within_watch_root(canonical_path, watch_root) {
+        return Err(RagError::Generic(format!(
+            "path {} is outside watch_dir",
+            canonical_path.display()
+        )));
+    }
+
+    if metadata.is_file() && hard_link_count(metadata) > 1 {
+        return Err(RagError::Generic(format!(
+            "path {} is hardlinked; only single-link files are indexed inside watch_dir",
+            canonical_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn maybe_fill_local_content_hash(result: &mut ExtractionResult, content_hash: &str) {
+    if result.metadata.content_hash.is_some() || content_hash.is_empty() {
+        return;
+    }
+
+    let is_file_url = result
+        .metadata
+        .url
+        .as_deref()
+        .and_then(|value| url::Url::parse(value).ok())
+        .is_some_and(|url| url.scheme() == "file");
+
+    if is_file_url {
+        result.metadata.content_hash = Some(content_hash.to_string());
+    }
 }
 
 async fn process_job(
@@ -1711,11 +1795,8 @@ async fn process_job(
             job.path.display()
         ))
     })?;
-    if !path_is_within_watch_root(&canonical, watch_root) {
-        tracing::warn!(
-            path = %job.path.display(),
-            "path outside watch_dir — skipping (potential TOCTOU attack)"
-        );
+    if let Err(error) = file_is_safe_to_index(&canonical, &file_meta, watch_root) {
+        tracing::warn!(path = %job.path.display(), error = %error, "unsafe file path — skipping");
         return Ok(JobStats {
             chunks: 0,
             embed_ms: 0,
@@ -1730,6 +1811,12 @@ async fn process_job(
             size,
             "file too large (>50MB), skipping"
         );
+        append_failed_job(
+            &job.path,
+            &RagError::Parse("payload too large".to_string()),
+            config,
+        )
+        .await;
         return Ok(JobStats {
             chunks: 0,
             embed_ms: 0,
@@ -1741,6 +1828,11 @@ async fn process_job(
     // Text formats convert bytes → String inside parse_file with UTF-8 replacement.
     let mut file_bytes: Vec<u8> = Vec::with_capacity(size as usize);
     file.read_to_end(&mut file_bytes).await?;
+    let file_content_hash = {
+        use sha2::Digest;
+
+        format!("{:x}", sha2::Sha256::digest(&file_bytes))
+    };
     let parse_ms = t0.elapsed().as_millis() as u64;
 
     // ── 2. Parse / ingest by file format ─────────────────────────────────────
@@ -1759,6 +1851,7 @@ async fn process_job(
         }
     };
     let mut result = parsed.extraction;
+    maybe_fill_local_content_hash(&mut result, &file_content_hash);
 
     // ── 3a. Populate filesystem provenance (noxa-9ww) ─────────────────────────
     // Set file_path and last_modified from job.path if not already populated
@@ -1951,8 +2044,8 @@ async fn process_job(
 mod tests {
     use super::{
         IngestionProvenance, build_point_payload, canonical_watch_root, collect_indexable_paths,
-        detect_git_branch, is_indexable, parse_file, path_is_within_watch_root,
-        validate_url_scheme,
+        detect_git_branch, file_is_safe_to_index, is_indexable, maybe_fill_local_content_hash,
+        parse_file, path_is_within_watch_root, validate_url_scheme,
     };
     use serde_json::json;
     use std::fs;
@@ -3044,6 +3137,149 @@ mod tests {
         assert!(
             !path_is_within_watch_root(&canonical_outside, &watch_root),
             "paths outside the cached watch root should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_is_safe_to_index_rejects_hardlinks_inside_watch_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let watch = tmp.path().join("watch");
+        let outside = tmp.path().join("outside");
+        tokio::fs::create_dir_all(&watch)
+            .await
+            .expect("create watch");
+        tokio::fs::create_dir_all(&outside)
+            .await
+            .expect("create outside");
+
+        let outside_file = outside.join("secret.txt");
+        tokio::fs::write(&outside_file, "top secret")
+            .await
+            .expect("write outside file");
+
+        let linked = watch.join("linked-secret.txt");
+        std::fs::hard_link(&outside_file, &linked).expect("create hardlink");
+
+        let watch_root = canonical_watch_root(&watch).await.expect("watch root");
+        let canonical_link = tokio::fs::canonicalize(&linked)
+            .await
+            .expect("canonical linked file");
+        let metadata = tokio::fs::metadata(&linked).await.expect("metadata");
+
+        let error =
+            file_is_safe_to_index(&canonical_link, &metadata, &watch_root).expect_err("reject");
+        assert!(
+            error.to_string().contains("hardlink"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_fill_local_content_hash_persists_hash_for_local_formats() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parsed = run_parse_file(tmp.path(), "notes.md", b"hello from markdown")
+            .await
+            .expect("parse markdown");
+        let mut extraction = parsed.extraction;
+
+        assert_eq!(extraction.metadata.content_hash, None);
+
+        maybe_fill_local_content_hash(&mut extraction, "abc123");
+
+        assert_eq!(extraction.metadata.content_hash.as_deref(), Some("abc123"));
+    }
+
+    #[tokio::test]
+    async fn maybe_fill_local_content_hash_preserves_non_file_sources() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("page.json");
+        let body = json!({
+            "metadata": {
+                "title": "Remote page",
+                "description": null,
+                "author": null,
+                "published_date": null,
+                "language": "en",
+                "url": "https://example.com/page",
+                "site_name": null,
+                "image": null,
+                "favicon": null,
+                "word_count": 2,
+                "content_hash": null,
+                "source_type": "web",
+                "file_path": null,
+                "last_modified": null,
+                "is_truncated": null,
+                "technologies": [],
+                "seed_url": null,
+                "crawl_depth": null,
+                "search_query": null,
+                "fetched_at": null
+            },
+            "content": {
+                "markdown": "remote body",
+                "plain_text": "remote body",
+                "links": [],
+                "images": [],
+                "code_blocks": [],
+                "raw_html": null
+            },
+            "domain_data": null,
+            "structured_data": []
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize json");
+        fs::write(&path, &bytes).expect("write file");
+        let mut extraction = parse_file(&path, bytes)
+            .await
+            .expect("parse json")
+            .extraction;
+
+        maybe_fill_local_content_hash(&mut extraction, "abc123");
+
+        assert_eq!(extraction.metadata.content_hash, None);
+    }
+
+    #[tokio::test]
+    async fn parse_file_eml_extracts_nested_multipart_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let eml = concat!(
+            "From: Sender <sender@example.com>\r\n",
+            "To: alpha@example.com\r\n",
+            "Subject: Nested body\r\n",
+            "Content-Type: multipart/mixed; boundary=outer\r\n",
+            "\r\n",
+            "--outer\r\n",
+            "Content-Type: multipart/alternative; boundary=inner\r\n",
+            "\r\n",
+            "--inner\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Plain nested body.\r\n",
+            "--inner\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>HTML nested body.</p>\r\n",
+            "--inner--\r\n",
+            "--outer\r\n",
+            "Content-Type: application/octet-stream\r\n",
+            "Content-Disposition: attachment; filename=\"demo.txt\"\r\n",
+            "\r\n",
+            "ZmlsZQ==\r\n",
+            "--outer--\r\n"
+        );
+
+        let result = run_parse_file(tmp.path(), "nested.eml", eml.as_bytes())
+            .await
+            .expect("parse nested eml");
+
+        assert!(
+            result
+                .extraction
+                .content
+                .markdown
+                .contains("Plain nested body."),
+            "nested multipart plain text should be extracted, got: {:?}",
+            result.extraction.content.markdown
         );
     }
 }

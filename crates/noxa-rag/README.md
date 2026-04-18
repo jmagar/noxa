@@ -175,7 +175,7 @@ noxa-cli (writes .json) → watch_dir
               │  4. chunk() → Vec<Chunk>             │
               │  5. embed() → Vec<Vec<f32>>          │
               │  6. UUID v5 point IDs                │
-              │  7. Per-URL mutex: delete + upsert   │
+              │  7. Per-URL mutex: upsert + stale delete │
               └─────────────────────────────────────┘
                                 ↓
                          Qdrant (REST)
@@ -185,6 +185,7 @@ noxa-cli (writes .json) → watch_dir
 
 - **Recursive watch**: The daemon watches `watch_dir` recursively, so crawl output saved under nested path-based directories is indexed automatically.
 - **Vim/Emacs compatibility**: The daemon watches all filesystem events (not just Create/Modify). Atomic saves via rename are detected correctly.
-- **Idempotent indexing**: Re-indexing the same URL deletes old chunks first (delete-before-upsert), so chunk count changes are handled correctly.
+- **Idempotent indexing**: Re-indexing the same URL upserts the new chunk set first, then deletes stale chunk IDs, so transient store failures do not leave the document empty.
 - **Point IDs**: UUID v5 deterministic — same URL + chunk index always produces the same Qdrant point ID.
-- **Failed jobs**: Parse failures and oversized files (>50MB) are logged to `failed_jobs_log` as NDJSON and skipped (the daemon keeps running).
+- **Failed jobs**: Parse failures and oversized files (>50MB) are appended to `failed_jobs_log` as NDJSON and skipped (the daemon keeps running).
+- **Watch-dir trust boundary**: Files must remain inside `watch_dir` after canonicalization and must not be hardlinked; hardlinked files are skipped to prevent watch-root escapes.

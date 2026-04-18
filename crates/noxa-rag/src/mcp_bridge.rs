@@ -762,9 +762,11 @@ mod tests {
 
     use super::*;
 
+    type ExecutorCall = (String, McpSource, String, Value);
+
     #[derive(Clone, Default)]
     struct MockExecutor {
-        calls: Arc<Mutex<Vec<(String, McpSource, String, Value)>>>,
+        calls: Arc<Mutex<Vec<ExecutorCall>>>,
         responses: Arc<Mutex<VecDeque<Result<Value, RagError>>>>,
     }
 
@@ -776,7 +778,7 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> Vec<(String, McpSource, String, Value)> {
+        fn calls(&self) -> Vec<ExecutorCall> {
             self.calls.lock().expect("calls lock").clone()
         }
     }
