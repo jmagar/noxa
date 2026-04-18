@@ -168,5 +168,9 @@ These items are not part of the current crate:
 - query/read APIs over `.operations.ndjson`
 - store-level refresh orchestration
 
+> **See also:** Refresh and retrieval orchestration currently lives in the CLI:
+> `crates/noxa-cli/src/app/refresh.rs` (domain re-fetch loop) and
+> `crates/noxa-cli/src/app/retrieve.rs` (fuzzy/exact retrieval entrypoint).
+
 If those features are added later, this document should be updated alongside the
 implementation.
