@@ -10,8 +10,8 @@ use noxa_core::{
     to_llm_text,
 };
 use noxa_fetch::{
-    BatchExtractResult, BrowserProfile, CrawlConfig, CrawlResult, Crawler, FetchClient,
-    FetchConfig, FetchResult, PageResult, SitemapEntry,
+    BatchExtractResult, BodyRetention, BrowserProfile, CrawlConfig, CrawlResult, Crawler,
+    FetchClient, FetchConfig, FetchResult, PageResult, SitemapEntry,
 };
 use noxa_llm::LlmProvider;
 use noxa_pdf::PdfMode;
@@ -77,7 +77,7 @@ pub(crate) use printing::{
 pub(crate) use refresh::{run_refresh, run_status};
 pub(crate) use research::run_research;
 pub(crate) use retrieve::run_retrieve;
-pub(crate) use store_ops::{collect_docs, run_grep, run_list, run_search};
+pub(crate) use store_ops::{run_grep, run_list, run_search};
 pub(crate) use watch::{fire_webhook, run_watch};
 
 #[cfg(test)]
@@ -86,8 +86,6 @@ pub(crate) use crawl_status::{crawl_log_path_for_home, crawl_status_path_for_hom
 pub(crate) use fetching::config::url_to_filename;
 #[cfg(test)]
 pub(crate) use formatting::default_search_dir;
-#[cfg(test)]
-pub(crate) use refresh::{collect_refresh_urls, refresh_domain_dir};
 #[cfg(test)]
 pub(crate) use watch::run_on_change_command;
 

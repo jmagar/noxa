@@ -137,6 +137,7 @@ pub(crate) async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> R
         progress_tx: Some(progress_tx),
         cancel_flag: Some(Arc::clone(&cancel_flag)),
         extraction_options: build_extraction_options(resolved),
+        body_retention: BodyRetention::Full,
     };
 
     // Load resume state if --crawl-state file exists
