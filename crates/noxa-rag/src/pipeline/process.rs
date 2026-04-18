@@ -134,6 +134,9 @@ async fn append_failed_job(
         if meta.len() >= FAILED_JOBS_LOG_MAX_BYTES {
             let mut rotated = log_path.to_path_buf();
             rotated.as_mut_os_string().push(".1");
+            // Remove any existing backup first; rename fails on Windows if the
+            // destination already exists.
+            let _ = tokio::fs::remove_file(&rotated).await;
             if let Err(e) = tokio::fs::rename(log_path, &rotated).await {
                 tracing::warn!(
                     log = %log_path.display(),

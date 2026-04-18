@@ -121,7 +121,13 @@ pub(crate) async fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
     let terms: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
 
     let store = FilesystemContentStore::new(&store_root);
-    let all_docs = store.list_all_docs().await.unwrap_or_default();
+    let all_docs = match store.list_all_docs().await {
+        Ok(docs) => docs,
+        Err(e) => {
+            eprintln!("error enumerating docs: {e}");
+            return;
+        }
+    };
     let total_docs = all_docs.len();
 
     let mut scored: Vec<(usize, String, std::path::PathBuf)> = all_docs
@@ -223,7 +229,10 @@ mod tests {
         let (looks_like_url, _) = classify_query("node.js");
         // The TLD "js" is 2 alphabetic chars, so this currently IS flagged as a
         // URL — documenting the known boundary behaviour (not a bug to fix here).
-        let _ = looks_like_url; // just assert it doesn't panic
+        assert!(
+            looks_like_url,
+            "node.js should be classified as URL-like due to .js TLD"
+        );
     }
 
     #[test]

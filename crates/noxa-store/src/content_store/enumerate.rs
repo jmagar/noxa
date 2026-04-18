@@ -164,8 +164,10 @@ impl FilesystemContentStore {
         // Populate the cache with the results of this walk.
         {
             let mut guard = self.manifest_cache.0.lock().await;
-            let map: HashMap<String, StoredDoc> =
-                docs.iter().map(|d| (d.url.clone(), d.clone())).collect();
+            let map: HashMap<String, StoredDoc> = docs
+                .iter()
+                .map(|d| (d.md_path.to_string_lossy().into_owned(), d.clone()))
+                .collect();
             *guard = Some(ManifestCache {
                 docs: map,
                 populated_at: Instant::now(),

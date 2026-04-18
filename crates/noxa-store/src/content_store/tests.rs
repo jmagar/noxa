@@ -728,16 +728,54 @@ async fn test_list_domain_urls_skips_symlink_escapes() {
         .await
         .unwrap();
 
-    // Plant a JSON file outside the store root
+    // Plant a fully-valid JSON sidecar outside the store root.
+    // Using a parseable payload is critical: if the symlink IS followed the URL
+    // "https://escaped.example.com/" will surface in the results, causing the
+    // assertion below to fail and exposing the traversal bug.  An invalid
+    // `current` block would silently fail to parse and the test would pass even
+    // when the escape was not prevented.
     tokio::fs::write(
         outside_dir.join("evil.json"),
         serde_json::json!({
             "schema_version": 1,
-            "url": "https://attacker.example/secret",
+            "url": "https://escaped.example.com/",
             "first_seen": "2024-01-01T00:00:00Z",
             "last_fetched": "2024-01-01T00:00:00Z",
             "fetch_count": 1,
-            "current": { "metadata": {}, "content": {} },
+            "current": {
+                "metadata": {
+                    "title": "Escaped",
+                    "description": null,
+                    "author": null,
+                    "published_date": null,
+                    "language": null,
+                    "url": "https://escaped.example.com/",
+                    "site_name": null,
+                    "image": null,
+                    "favicon": null,
+                    "word_count": 1,
+                    "content_hash": null,
+                    "source_type": null,
+                    "file_path": null,
+                    "last_modified": null,
+                    "is_truncated": null,
+                    "technologies": [],
+                    "seed_url": null,
+                    "crawl_depth": null,
+                    "search_query": null,
+                    "fetched_at": null
+                },
+                "content": {
+                    "markdown": "escaped",
+                    "plain_text": "escaped",
+                    "links": [],
+                    "images": [],
+                    "code_blocks": [],
+                    "raw_html": null
+                },
+                "domain_data": null,
+                "structured_data": []
+            },
             "changelog": []
         })
         .to_string(),
@@ -750,8 +788,15 @@ async fn test_list_domain_urls_skips_symlink_escapes() {
     symlink(&outside_dir, domain_dir.join("escape")).unwrap();
 
     let result = store.list_domain_urls("example.com").await.unwrap();
-    // Only the legit URL should appear; the symlink escape should be skipped
+    // Only the legit URL should appear; the symlink escape should be skipped.
+    // If the symlink IS followed the escaped URL would appear here, failing both assertions.
     assert_eq!(result.urls, vec!["https://example.com/legit".to_string()]);
+    assert!(
+        !result
+            .urls
+            .contains(&"https://escaped.example.com/".to_string()),
+        "symlink escape was not prevented: escaped URL appeared in results"
+    );
 }
 
 #[tokio::test]

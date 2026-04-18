@@ -144,7 +144,7 @@ The validation helpers fail closed on DNS resolution failure.
 
 | Method | Scope | Cost |
 |---|---|---|
-| `list_domains()` | store root (one level) | O(domain count), counts `.md` files per domain via sync recursive walk |
+| `list_domains()` | store root (one level) | O(total docs across all domains) — recursive `.md` count per domain via blocking walk |
 | `list_docs(domain)` | one domain directory | O(docs in domain), parses each `.json` sidecar |
 | `list_all_docs()` | entire store | O(total doc count), recursive walk + sidecar parse for every document |
 | `list_domain_urls(domain)` | one domain directory | O(docs in domain), recursive walk + sidecar parse |

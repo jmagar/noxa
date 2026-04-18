@@ -1,6 +1,6 @@
 //! In-memory manifest cache for [`FilesystemContentStore`].
 //!
-//! Stores a lazy-populated `HashMap<url, StoredDoc>` that is kept valid by
+//! Stores a lazy-populated `HashMap<file_path, StoredDoc>` that is kept valid by
 //! invalidating the whole cache on every write operation.  Subsequent calls to
 //! `list_all_docs()` avoid a full filesystem traversal as long as the cache is
 //! fresh.
@@ -33,7 +33,8 @@ pub(crate) const CACHE_TTL: Duration = Duration::from_secs(30);
 /// The payload stored inside the mutex.
 #[derive(Debug)]
 pub(crate) struct ManifestCache {
-    /// All documents in the store, keyed by URL for O(1) exact-URL lookup.
+    /// All documents in the store, keyed by file path (string form) to
+    /// preserve documents that share a URL (e.g. query-stripped duplicates).
     pub docs: HashMap<String, StoredDoc>,
     /// When the cache was last populated.
     pub populated_at: Instant,
@@ -61,6 +62,14 @@ impl ManifestCacheHandle {
 
     /// Invalidate the cache.  Called by every write path so that the next
     /// `list_all_docs()` call triggers a fresh walk.
+    ///
+    /// # Known TOCTOU race
+    /// A concurrent `list_all_docs()` call may observe the `None` set here,
+    /// perform a full walk, and then overwrite this invalidation by storing a
+    /// new snapshot that excludes the just-written document.  The 30-second TTL
+    /// bounds the drift window.  A generation counter (increment on invalidate,
+    /// check before committing the repopulated snapshot) would close this race
+    /// but is deferred as a future improvement.
     pub async fn invalidate(&self) {
         let mut guard = self.0.lock().await;
         *guard = None;
