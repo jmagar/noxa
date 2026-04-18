@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 /// A chunk produced from an ExtractionResult.
@@ -105,6 +108,15 @@ pub struct PointPayload {
     pub subtitle_source_file: Option<String>,
 }
 
+impl PointPayload {
+    pub fn to_qdrant_payload(&self) -> HashMap<String, Value> {
+        match serde_json::to_value(self).expect("point payload should serialize") {
+            Value::Object(map) => map.into_iter().collect(),
+            other => panic!("point payload serialized to non-object value: {other:?}"),
+        }
+    }
+}
+
 /// A search result returned by VectorStore::search().
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -156,6 +168,17 @@ pub struct SearchResult {
     pub subtitle_end_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle_source_file: Option<String>,
+}
+
+impl SearchResult {
+    pub fn from_qdrant_payload(
+        payload: HashMap<String, Value>,
+        score: f32,
+    ) -> Result<Self, serde_json::Error> {
+        let mut map: Map<String, Value> = payload.into_iter().collect();
+        map.insert("score".to_string(), Value::from(score));
+        serde_json::from_value(Value::Object(map))
+    }
 }
 
 /// Narrow metadata filter for vector search.
