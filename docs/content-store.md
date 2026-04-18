@@ -149,7 +149,7 @@ The validation helpers fail closed on DNS resolution failure.
 | `list_all_docs()` | entire store | O(total doc count), recursive walk + sidecar parse for every document |
 | `list_domain_urls(domain)` | one domain directory | O(docs in domain), recursive walk + sidecar parse |
 
-All four methods perform a filesystem traversal on every call. There is no persistent index. Latency scales linearly with document count and directory depth:
+The domain-scoped methods (`list_domains`, `list_docs`, `list_domain_urls`) perform a filesystem traversal on every call. `list_all_docs()` may return from a TTL-bounded in-memory manifest cache; on cache miss or TTL expiry it performs a full traversal. There is no persistent on-disk index. Latency scales linearly with document count and directory depth:
 
 - Small stores (< 1 000 docs): traversal typically completes in tens of milliseconds.
 - Large stores (10 000+ docs): traversal and sidecar-parsing overhead reaches several seconds.

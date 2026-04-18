@@ -156,12 +156,8 @@ fn compute_metadata_changes(
     changes
 }
 
-fn push_metadata_change<T>(
-    changes: &mut Vec<MetadataChange>,
-    field: &str,
-    old: &T,
-    new: &T,
-) where
+fn push_metadata_change<T>(changes: &mut Vec<MetadataChange>, field: &str, old: &T, new: &T)
+where
     T: serde::Serialize + PartialEq,
 {
     if old != new {

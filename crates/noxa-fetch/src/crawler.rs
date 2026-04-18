@@ -142,6 +142,22 @@ pub struct Crawler {
     seed_origin: String,
 }
 
+/// Clear heavy content fields from an extraction result, retaining only
+/// lightweight metadata (title, URL, word count, etc.).
+///
+/// Called in `MetadataOnly` body-retention mode after progress has been
+/// streamed so that large payloads are not held in the aggregate `CrawlResult`.
+fn clear_extraction_body_for_metadata_only(extraction: &mut noxa_core::ExtractionResult) {
+    extraction.content.markdown = String::new();
+    extraction.content.plain_text = String::new();
+    extraction.content.links = Vec::new();
+    extraction.content.images = Vec::new();
+    extraction.content.code_blocks = Vec::new();
+    extraction.content.raw_html = None;
+    extraction.structured_data = Vec::new();
+    extraction.domain_data = None;
+}
+
 impl Crawler {
     /// Build a new crawler from a seed URL and config.
     /// Constructs the underlying `FetchClient` from `config.fetch`.
@@ -397,14 +413,7 @@ impl Crawler {
                 // has been streamed and links have already been harvested above.
                 if self.config.body_retention == BodyRetention::MetadataOnly {
                     if let Some(ref mut extraction) = page.extraction {
-                        extraction.content.markdown = String::new();
-                        extraction.content.plain_text = String::new();
-                        extraction.content.links = Vec::new();
-                        extraction.content.images = Vec::new();
-                        extraction.content.code_blocks = Vec::new();
-                        extraction.content.raw_html = None;
-                        extraction.structured_data = Vec::new();
-                        extraction.domain_data = None;
+                        clear_extraction_body_for_metadata_only(extraction);
                     }
                 }
 
@@ -787,16 +796,9 @@ mod tests {
         // Simulate what the crawler does in MetadataOnly mode after streaming.
         let mut page = make_page_result("https://example.com/");
 
-        // Mimic the clearing block
+        // Mimic the clearing block via the production helper
         if let Some(ref mut extraction) = page.extraction {
-            extraction.content.markdown = String::new();
-            extraction.content.plain_text = String::new();
-            extraction.content.links = Vec::new();
-            extraction.content.images = Vec::new();
-            extraction.content.code_blocks = Vec::new();
-            extraction.content.raw_html = None;
-            extraction.structured_data = Vec::new();
-            extraction.domain_data = None;
+            clear_extraction_body_for_metadata_only(extraction);
         }
 
         // extraction is still Some — ok_count logic is preserved

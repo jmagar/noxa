@@ -18,8 +18,8 @@ mod scan;
 struct SessionCounters {
     files_indexed: std::sync::atomic::AtomicUsize,
     files_failed: std::sync::atomic::AtomicUsize,
-    /// Parse-level failures (returned Ok but no content) — distinct from hard
-    /// process errors so the heartbeat can report them separately.
+    /// Parse-level failures from `parse_file` errors — tracked separately from
+    /// broader process errors so the heartbeat can report them independently.
     parse_failures: std::sync::atomic::AtomicUsize,
     total_chunks: std::sync::atomic::AtomicUsize,
     total_embed_ms: std::sync::atomic::AtomicU64,

@@ -249,11 +249,11 @@ mod tests {
             .await
             .unwrap();
 
-        let result = store
-            .list_domain_urls("docs.rust-lang.org")
-            .await
-            .unwrap();
-        assert_eq!(result.urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
+        let result = store.list_domain_urls("docs.rust-lang.org").await.unwrap();
+        assert_eq!(
+            result.urls,
+            vec!["https://docs.rust-lang.org/book/".to_string()]
+        );
         assert_eq!(result.skipped, 0);
     }
 
@@ -291,11 +291,11 @@ mod tests {
 
         symlink(&outside_dir, domain_dir.join("escape")).unwrap();
 
-        let result = store
-            .list_domain_urls("docs.rust-lang.org")
-            .await
-            .unwrap();
-        assert_eq!(result.urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
+        let result = store.list_domain_urls("docs.rust-lang.org").await.unwrap();
+        assert_eq!(
+            result.urls,
+            vec!["https://docs.rust-lang.org/book/".to_string()]
+        );
     }
 
     #[test]
@@ -465,9 +465,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output_path = dir.path().join("payload.json");
         let payload = r#"{"status":"changed"}"#;
-        let quoted_output_path = output_path
-            .to_string_lossy()
-            .replace('\'', "'\"'\"'");
+        let quoted_output_path = output_path.to_string_lossy().replace('\'', "'\"'\"'");
         let cmd = format!("cat > '{quoted_output_path}'");
 
         run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))

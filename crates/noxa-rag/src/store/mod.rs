@@ -37,11 +37,8 @@ pub trait VectorStore: Send + Sync {
     /// Used for two-phase replace: upsert new points first, then call this to
     /// evict only the stale points, so a transient upsert failure never leaves
     /// the collection empty.
-    async fn delete_stale_by_url(
-        &self,
-        url: &str,
-        keep_ids: &[uuid::Uuid],
-    ) -> Result<(), RagError>;
+    async fn delete_stale_by_url(&self, url: &str, keep_ids: &[uuid::Uuid])
+    -> Result<(), RagError>;
     /// Search by vector similarity, optionally constrained by landed metadata.
     async fn search(
         &self,

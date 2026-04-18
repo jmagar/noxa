@@ -10,8 +10,8 @@ use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
 use super::QdrantStore;
 use super::http::{DeleteByFilterRequest, SearchRequest, SearchResponse, UpsertRequest};
-use crate::url_util::normalize_url;
 use super::payload::{point_to_qdrant_payload, search_filter, search_result_from_payload};
+use crate::url_util::normalize_url;
 
 #[async_trait]
 impl VectorStore for QdrantStore {
@@ -242,9 +242,7 @@ impl VectorStore for QdrantStore {
                 body = %preview,
                 "url_with_hash_exists_checked: non-success HTTP status — treating as backend error"
             );
-            return HashExistsResult::BackendError(format!(
-                "HTTP {status}: {preview}"
-            ));
+            return HashExistsResult::BackendError(format!("HTTP {status}: {preview}"));
         }
 
         let json: serde_json::Value = match resp.json().await {
@@ -259,7 +257,21 @@ impl VectorStore for QdrantStore {
             }
         };
 
-        if json["result"]["count"].as_u64().unwrap_or(0) > 0 {
+        let Some(count) = json
+            .get("result")
+            .and_then(|result| result.get("count"))
+            .and_then(|count| count.as_u64())
+        else {
+            tracing::warn!(
+                url = %normalized,
+                body = %json,
+                "url_with_hash_exists_checked: missing numeric result.count — treating as backend error"
+            );
+            return HashExistsResult::BackendError(
+                "missing or non-integer result.count in Qdrant response".to_string(),
+            );
+        };
+        if count > 0 {
             HashExistsResult::Exists
         } else {
             HashExistsResult::NotIndexed

@@ -15,24 +15,22 @@ pub(crate) fn classify_query(query: &str) -> (bool, String) {
         format!("https://{query}")
     };
     let looks_like_url = has_scheme
-        || (!query.contains(' ')
-            && query.contains('.')
-            && {
-                url::Url::parse(&url_candidate)
-                    .ok()
-                    .and_then(|u| u.host_str().map(|h| h.to_string()))
-                    .map(|host| {
-                        let parts: Vec<&str> = host.split('.').collect();
-                        parts.len() >= 2
-                            && parts
-                                .last()
-                                .map(|tld| {
-                                    tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
-                                })
-                                .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-            });
+        || (!query.contains(' ') && query.contains('.') && {
+            url::Url::parse(&url_candidate)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .map(|host| {
+                    let parts: Vec<&str> = host.split('.').collect();
+                    parts.len() >= 2
+                        && parts
+                            .last()
+                            .map(|tld| {
+                                tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+                            })
+                            .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        });
     (looks_like_url, url_candidate)
 }
 
@@ -279,7 +277,10 @@ mod tests {
 
     #[test]
     fn score_title_match_counts() {
-        let doc = make_doc("https://docs.example.com/page", Some("Authentication Guide"));
+        let doc = make_doc(
+            "https://docs.example.com/page",
+            Some("Authentication Guide"),
+        );
         let terms = vec!["authentication".to_string()];
         assert_eq!(score_doc(&doc, &terms), 1);
     }
@@ -514,7 +515,10 @@ mod tests {
         let store = FilesystemContentStore::new(&store_root);
         let url = "https://blog.example.com/rust-async";
         store
-            .write(url, &make_sample_extraction(url, "Rust async runtime internals"))
+            .write(
+                url,
+                &make_sample_extraction(url, "Rust async runtime internals"),
+            )
             .await
             .unwrap();
         run_retrieve("rust async", store_root).await;

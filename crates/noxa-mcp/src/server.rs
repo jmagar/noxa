@@ -7,11 +7,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use noxa_llm::LlmProvider;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
-use noxa_llm::LlmProvider;
 use serde_json::json;
 use tracing::{info, warn};
 

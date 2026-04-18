@@ -34,10 +34,7 @@ pub(crate) fn build_fetch_config(cli: &Cli, resolved: &config::ResolvedConfig) -
     // Parse -H "Key: Value" flags; normalise key to lowercase for dedup.
     for h in &cli.headers {
         if let Some((key, val)) = h.split_once(':') {
-            headers.insert(
-                key.trim().to_ascii_lowercase(),
-                val.trim().to_string(),
-            );
+            headers.insert(key.trim().to_ascii_lowercase(), val.trim().to_string());
         }
     }
 

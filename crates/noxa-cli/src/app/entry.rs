@@ -192,7 +192,11 @@ pub(crate) async fn run() {
     }
 
     // Extract the first URL from the already-collected entries to avoid re-reading --urls-file.
-    let first_url = entries.into_iter().next().map(|(url, _)| url).unwrap_or_default();
+    let first_url = entries
+        .into_iter()
+        .next()
+        .map(|(url, _)| url)
+        .unwrap_or_default();
 
     // Single-page extraction (handles both HTML and PDF via content-type detection)
     match fetch_and_extract(&cli, &resolved).await {
@@ -224,4 +228,3 @@ pub(crate) async fn run() {
         }
     }
 }
-

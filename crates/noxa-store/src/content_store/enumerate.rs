@@ -9,9 +9,9 @@ use std::time::Instant;
 
 use chrono::DateTime;
 
+use crate::content_store::FilesystemContentStore;
 use crate::content_store::manifest::ManifestCache;
 use crate::content_store::migrate::parse_sidecar_or_migrate;
-use crate::content_store::FilesystemContentStore;
 use crate::paths::sanitize_component;
 use crate::types::StoreError;
 
@@ -78,7 +78,9 @@ impl FilesystemContentStore {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            let doc_count = count_md_files_sync(&path);
+            let count_path = path.clone();
+            let doc_count =
+                tokio::task::spawn_blocking(move || count_md_files_sync(&count_path)).await?;
             entries.push(DomainEntry { name, doc_count });
         }
 
@@ -164,7 +166,10 @@ impl FilesystemContentStore {
             let mut guard = self.manifest_cache.0.lock().await;
             let map: HashMap<String, StoredDoc> =
                 docs.iter().map(|d| (d.url.clone(), d.clone())).collect();
-            *guard = Some(ManifestCache { docs: map, populated_at: Instant::now() });
+            *guard = Some(ManifestCache {
+                docs: map,
+                populated_at: Instant::now(),
+            });
         }
 
         Ok(docs)
@@ -183,11 +188,19 @@ impl FilesystemContentStore {
     pub async fn list_domain_urls(&self, domain: &str) -> Result<DomainUrlsResult, StoreError> {
         let dir = match self.domain_dir(domain) {
             Some(d) => d,
-            None => return Ok(DomainUrlsResult { urls: Vec::new(), skipped: 0 }),
+            None => {
+                return Ok(DomainUrlsResult {
+                    urls: Vec::new(),
+                    skipped: 0,
+                });
+            }
         };
 
         if !dir.exists() {
-            return Ok(DomainUrlsResult { urls: Vec::new(), skipped: 0 });
+            return Ok(DomainUrlsResult {
+                urls: Vec::new(),
+                skipped: 0,
+            });
         }
 
         let canonical_root = self.get_canonical_root()?;
@@ -363,7 +376,14 @@ async fn parse_sidecar_for_doc(json_path: &Path) -> (Option<String>, Option<Stri
             let title = sidecar.current.metadata.title.clone();
             (url, title)
         }
-        _ => (None, None),
+        Ok(Err(e)) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "skipping corrupt sidecar");
+            (None, None)
+        }
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "skipping corrupt sidecar");
+            (None, None)
+        }
     }
 }
 
@@ -383,10 +403,14 @@ fn count_md_files_sync(dir: &Path) -> usize {
     entries
         .flatten()
         .map(|e| {
-            let p = e.path();
-            if p.is_dir() {
-                count_md_files_sync(&p)
-            } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
+            let Ok(file_type) = e.file_type() else {
+                return 0;
+            };
+            if file_type.is_symlink() {
+                0
+            } else if file_type.is_dir() {
+                count_md_files_sync(&e.path())
+            } else if e.path().extension().and_then(|x| x.to_str()) == Some("md") {
                 1
             } else {
                 0

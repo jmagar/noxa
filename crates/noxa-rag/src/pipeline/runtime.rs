@@ -142,9 +142,8 @@ fn setup_watcher(
 ) -> Result<JoinHandle<()>, RagError> {
     let (notify_tx, notify_rx) = std::sync::mpsc::sync_channel::<DebounceEventResult>(256);
 
-    let mut debouncer =
-        new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
-            .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
+    let mut debouncer = new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
+        .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
 
     debouncer
         .watcher()
@@ -170,8 +169,7 @@ fn setup_watcher(
                     }
                     for event in events {
                         for path in scan::collect_indexable_paths(&event.path) {
-                            let span =
-                                tracing::info_span!("index_job", path = %path.display());
+                            let span = tracing::info_span!("index_job", path = %path.display());
                             let job = IndexJob { path, span };
                             let mut pending_job = job;
                             let mut saturated_logged = false;
@@ -419,8 +417,16 @@ async fn drain_and_report(
         .counters
         .total_upsert_ms
         .load(std::sync::atomic::Ordering::Relaxed);
-    let avg_embed_ms = if indexed > 0 { embed_ms / indexed as u64 } else { 0 };
-    let avg_upsert_ms = if indexed > 0 { upsert_ms / indexed as u64 } else { 0 };
+    let avg_embed_ms = if indexed > 0 {
+        embed_ms / indexed as u64
+    } else {
+        0
+    };
+    let avg_upsert_ms = if indexed > 0 {
+        upsert_ms / indexed as u64
+    } else {
+        0
+    };
     tracing::info!(
         indexed,
         failed,
@@ -442,9 +448,10 @@ async fn drain_and_report(
 pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     // --- validate config & extract source params ---
     let (watch_dir, debounce_ms) = match &pipeline.config.source {
-        SourceConfig::FsWatcher { watch_dir, debounce_ms } => {
-            (watch_dir.clone(), *debounce_ms)
-        }
+        SourceConfig::FsWatcher {
+            watch_dir,
+            debounce_ms,
+        } => (watch_dir.clone(), *debounce_ms),
     };
 
     if pipeline.config.pipeline.embed_concurrency == 0 {
@@ -516,12 +523,12 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use tempfile::tempdir;
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use crate::error::RagError;
@@ -603,10 +610,7 @@ mod tests {
 
     // ── Helper: run startup scan and drain all queued jobs ────────────────────
 
-    async fn run_scan_and_collect(
-        store: DynVectorStore,
-        watch_dir: PathBuf,
-    ) -> HashSet<PathBuf> {
+    async fn run_scan_and_collect(store: DynVectorStore, watch_dir: PathBuf) -> HashSet<PathBuf> {
         let shutdown = CancellationToken::new();
         let (tx, mut rx) = mpsc::channel::<super::super::IndexJob>(256);
 
@@ -677,10 +681,7 @@ mod tests {
 
         let queued = run_scan_and_collect(dyn_store, dir.path().to_path_buf()).await;
 
-        assert!(
-            !queued.contains(&path),
-            "Exists file should NOT be queued"
-        );
+        assert!(!queued.contains(&path), "Exists file should NOT be queued");
         assert_eq!(
             call_count.load(Ordering::Relaxed),
             1,
@@ -702,7 +703,10 @@ mod tests {
         let url = file_url(&path);
 
         let mut results = HashMap::new();
-        results.insert(url, HashExistsResult::BackendError("connection refused".to_string()));
+        results.insert(
+            url,
+            HashExistsResult::BackendError("connection refused".to_string()),
+        );
 
         let store = MockStore::new(results);
         let call_count = Arc::clone(&store.call_count);

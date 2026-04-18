@@ -42,7 +42,10 @@ pub fn load_env() -> Result<Option<PathBuf>, NoxaMcpError> {
 
     if let Some(path) = env_path {
         dotenvy::from_path(&path).map_err(|error| {
-            NoxaMcpError::message(format!("failed to load env file {}: {error}", path.display()))
+            NoxaMcpError::message(format!(
+                "failed to load env file {}: {error}",
+                path.display()
+            ))
         })?;
         Ok(Some(path))
     } else {

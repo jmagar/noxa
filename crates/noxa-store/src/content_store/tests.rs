@@ -278,8 +278,7 @@ async fn test_sidecar_bloat_triggers_guard_despite_small_markdown() {
     extraction.metadata.technologies = (0..500)
         .map(|i| format!("technology-framework-{i:04}"))
         .collect();
-    extraction.metadata.description =
-        Some("x".repeat(10_000)); // 10 KB description
+    extraction.metadata.description = Some("x".repeat(10_000)); // 10 KB description
 
     // Populate links to further inflate the sidecar's current.content.links array.
     extraction.content.links = (0..200)
@@ -617,9 +616,7 @@ async fn test_list_docs_legacy_sidecar_format() {
     tokio::fs::write(&json_path, serde_json::to_vec(&extraction).unwrap())
         .await
         .unwrap();
-    tokio::fs::write(&md_path, b"# Legacy")
-        .await
-        .unwrap();
+    tokio::fs::write(&md_path, b"# Legacy").await.unwrap();
 
     let docs = store.list_docs("example.com").await.unwrap();
     assert_eq!(docs.len(), 1);
@@ -705,10 +702,7 @@ async fn test_list_domain_urls_scoped_to_domain() {
         .await
         .unwrap();
 
-    let result = store
-        .list_domain_urls("docs.example.com")
-        .await
-        .unwrap();
+    let result = store.list_domain_urls("docs.example.com").await.unwrap();
     assert_eq!(result.urls.len(), 1);
     assert_eq!(result.urls[0], "https://docs.example.com/book");
     assert_eq!(result.skipped, 0);
@@ -782,7 +776,10 @@ async fn test_list_domain_urls_counts_corrupt_sidecars() {
 
     let result = store.list_domain_urls("example.com").await.unwrap();
     assert_eq!(result.urls, vec!["https://example.com/good".to_string()]);
-    assert_eq!(result.skipped, 1, "corrupt sidecar should be counted as skipped");
+    assert_eq!(
+        result.skipped, 1,
+        "corrupt sidecar should be counted as skipped"
+    );
 }
 
 // ── Manifest cache tests ──────────────────────────────────────────────────────
@@ -805,7 +802,10 @@ async fn test_manifest_cache_populates_on_first_call() {
 
     // After the call the cache should be populated.
     let guard = store.manifest_cache.0.lock().await;
-    assert!(guard.is_some(), "cache should be Some after first list_all_docs");
+    assert!(
+        guard.is_some(),
+        "cache should be Some after first list_all_docs"
+    );
     assert!(guard.as_ref().unwrap().is_fresh());
 }
 
@@ -880,12 +880,16 @@ async fn test_write_invalidates_cache() {
 
     // Next list_all_docs should re-walk and return both docs.
     let docs = store.list_all_docs().await.unwrap();
-    assert_eq!(docs.len(), 2, "should see both docs after cache invalidation");
+    assert_eq!(
+        docs.len(),
+        2,
+        "should see both docs after cache invalidation"
+    );
 }
 
 #[tokio::test]
 async fn test_manifest_cache_ttl_forces_rewalk() {
-    use crate::content_store::manifest::{ManifestCache, CACHE_TTL};
+    use crate::content_store::manifest::{CACHE_TTL, ManifestCache};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -912,5 +916,9 @@ async fn test_manifest_cache_ttl_forces_rewalk() {
 
     // list_all_docs should detect the stale cache and re-walk.
     let docs = store.list_all_docs().await.unwrap();
-    assert_eq!(docs.len(), 1, "stale cache should trigger re-walk and return real docs");
+    assert_eq!(
+        docs.len(),
+        1,
+        "stale cache should trigger re-walk and return real docs"
+    );
 }

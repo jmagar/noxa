@@ -2,8 +2,8 @@
 //!
 //! Stores a lazy-populated `HashMap<url, StoredDoc>` that is kept valid by
 //! invalidating the whole cache on every write operation.  Subsequent calls to
-//! `list_all_docs()` (and the domain-scoped helpers that filter it) avoid a
-//! full filesystem traversal as long as the cache is fresh.
+//! `list_all_docs()` avoid a full filesystem traversal as long as the cache is
+//! fresh.
 //!
 //! ## Design choices
 //!
@@ -66,4 +66,3 @@ impl ManifestCacheHandle {
         *guard = None;
     }
 }
-

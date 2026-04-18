@@ -123,11 +123,7 @@ pub(super) fn cell_has_block_content(cell: ElementRef<'_>) -> bool {
 
 /// Collect `<tr>` rows that belong directly to `table`, not to nested tables.
 /// Recursively walks children but stops descending when a nested `<table>` is found.
-fn collect_table_rows<'a>(
-    node: ElementRef<'a>,
-    rows: &mut Vec<ElementRef<'a>>,
-    is_root: bool,
-) {
+fn collect_table_rows<'a>(node: ElementRef<'a>, rows: &mut Vec<ElementRef<'a>>, is_root: bool) {
     for child in node.children().filter_map(ElementRef::wrap) {
         match child.value().name() {
             "table" if !is_root => {
@@ -166,8 +162,7 @@ pub(super) fn table_to_md(
             .children()
             .filter_map(ElementRef::wrap)
             .filter(|c| {
-                !exclude.contains(&c.id())
-                    && (c.value().name() == "th" || c.value().name() == "td")
+                !exclude.contains(&c.id()) && (c.value().name() == "th" || c.value().name() == "td")
             })
             .inspect(|&c| {
                 if !is_layout && cell_has_block_content(c) {

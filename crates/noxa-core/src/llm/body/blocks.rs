@@ -235,7 +235,11 @@ pub(crate) fn dedup_comma_lists(input: &str) -> String {
         .lines()
         .map(|line| {
             // Split on comma with optional surrounding whitespace, then trim each item
-            let items: Vec<&str> = line.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let items: Vec<&str> = line
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             if items.len() < 2 {
                 return line.to_string();
             }

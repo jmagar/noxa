@@ -472,9 +472,8 @@ async fn url_with_hash_exists_checked_returns_backend_error_on_5xx() {
     })
     .await;
 
-    let store =
-        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
-            .expect("store");
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
 
     let result = store
         .url_with_hash_exists_checked("https://example.com/doc.md", "abc123")
@@ -492,14 +491,11 @@ async fn url_with_hash_exists_checked_returns_backend_error_on_5xx() {
 /// `url_with_hash_exists_checked` must return `BackendError`.
 #[tokio::test]
 async fn url_with_hash_exists_checked_returns_backend_error_on_503() {
-    let (base_url, _requests, handle) = spawn_test_server_with_status(|_req| {
-        (503, "Service Unavailable".to_string())
-    })
-    .await;
+    let (base_url, _requests, handle) =
+        spawn_test_server_with_status(|_req| (503, "Service Unavailable".to_string())).await;
 
-    let store =
-        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
-            .expect("store");
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
 
     let result = store
         .url_with_hash_exists_checked("https://example.com/doc.md", "deadbeef")
@@ -525,9 +521,8 @@ async fn url_with_hash_exists_checked_returns_exists_on_match() {
     })
     .await;
 
-    let store =
-        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
-            .expect("store");
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
 
     let result = store
         .url_with_hash_exists_checked("https://example.com/doc.md", "abc123")
@@ -553,9 +548,8 @@ async fn url_with_hash_exists_checked_returns_not_indexed_on_zero_count() {
     })
     .await;
 
-    let store =
-        QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
-            .expect("store");
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
 
     let result = store
         .url_with_hash_exists_checked("https://example.com/doc.md", "abc123")

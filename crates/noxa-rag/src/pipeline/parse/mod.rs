@@ -79,23 +79,28 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
         "yaml" | "yml" | "toml" => Ok(parse_plain_text_file(bytes, file_url, title)),
         "log" => Ok(parse_log_file(bytes, file_url, title)),
         "html" | "htm" => parse_html_file(bytes, file_url).await,
-        "ipynb" => spawn_blocking_parse("ipynb", move || {
-            parse_ipynb_file(&bytes, file_url, title)
-        })
-        .await,
+        "ipynb" => {
+            spawn_blocking_parse("ipynb", move || parse_ipynb_file(&bytes, file_url, title)).await
+        }
         "pdf" => spawn_blocking_parse("PDF", move || parse_pdf_file(&bytes, file_url, title)).await,
-        "docx" => spawn_blocking_parse("DOCX", move || {
-            parse_office_zip_file(&bytes, file_url, title, "docx")
-        })
-        .await,
-        "odt" => spawn_blocking_parse("ODT", move || {
-            parse_office_zip_file(&bytes, file_url, title, "odt")
-        })
-        .await,
-        "pptx" => spawn_blocking_parse("PPTX", move || {
-            parse_office_zip_file(&bytes, file_url, title, "pptx")
-        })
-        .await,
+        "docx" => {
+            spawn_blocking_parse("DOCX", move || {
+                parse_office_zip_file(&bytes, file_url, title, "docx")
+            })
+            .await
+        }
+        "odt" => {
+            spawn_blocking_parse("ODT", move || {
+                parse_office_zip_file(&bytes, file_url, title, "odt")
+            })
+            .await
+        }
+        "pptx" => {
+            spawn_blocking_parse("PPTX", move || {
+                parse_office_zip_file(&bytes, file_url, title, "pptx")
+            })
+            .await
+        }
         "jsonl" => Ok(parse_jsonl_file(bytes, file_url, title)),
         "xml" | "opml" => Ok(parse_xml_file(bytes, file_url, title)),
         "rss" | "atom" => parse_feed_file(bytes, file_url, title),

@@ -23,9 +23,8 @@ pub(crate) fn strip_css_artifacts(input: &str) -> String {
 /// Remove CSS at-rule blocks (`@keyframes`, `@font-face`, etc.) from a line,
 /// handling nested braces so that `@media { .a { color: red; } }` is fully removed.
 fn strip_css_at_rules(line: &str) -> String {
-    static CSS_AT_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"@(?:keyframes|font-face|media|supports|layer)\s*[^{]*").unwrap()
-    });
+    static CSS_AT_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"@(?:keyframes|font-face|media|supports|layer)\s*[^{]*").unwrap());
 
     let mut result = line.to_string();
     // Iteratively remove at-rule blocks with balanced brace handling

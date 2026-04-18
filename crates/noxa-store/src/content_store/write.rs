@@ -60,6 +60,17 @@ impl FilesystemContentStore {
 
         // Invalidate the manifest cache so the next list_all_docs() call picks
         // up the newly written document.
+        //
+        // FIXME: TOCTOU — see PR #12 thread 9.  A concurrent list_all_docs()
+        // that began its filesystem walk *before* this write completes can
+        // finish its walk *after* this invalidation and repopulate the cache
+        // with a snapshot that is missing the document we just wrote.  The
+        // 30-second TTL in ManifestCache::is_fresh() bounds the staleness
+        // window: at most one TTL period elapses before the next cache miss
+        // forces a fresh walk.  A proper fix would require a generation counter
+        // that list_all_docs() stamps into the cache entry and compares against
+        // the value captured at walk-start, rejecting the result if the counter
+        // has advanced in the interim.
         self.manifest_cache.invalidate().await;
 
         Ok(StoreResult {

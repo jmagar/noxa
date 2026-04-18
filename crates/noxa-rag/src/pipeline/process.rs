@@ -132,8 +132,8 @@ async fn append_failed_job(
     // Rotate if the log has grown past the cap.
     if let Ok(meta) = tokio::fs::metadata(log_path).await {
         if meta.len() >= FAILED_JOBS_LOG_MAX_BYTES {
-            let mut rotated = log_path.as_os_str().to_owned();
-            rotated.push(".1");
+            let mut rotated = log_path.to_path_buf();
+            rotated.as_mut_os_string().push(".1");
             if let Err(e) = tokio::fs::rename(log_path, &rotated).await {
                 tracing::warn!(
                     log = %log_path.display(),
@@ -339,7 +339,6 @@ pub(crate) async fn process_job(
 
         tracing::info!(
             url = %url,
-            format = "json",
             chunks = upserted,
             embed_tokens = total_tokens,
             embed_tokens_per_sec,

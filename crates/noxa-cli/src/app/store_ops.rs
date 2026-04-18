@@ -12,7 +12,13 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
 
     if filter.is_empty() {
         // Top-level: list all domain directories with doc counts.
-        let domains = store.list_domains().await.unwrap_or_default();
+        let domains = match store.list_domains().await {
+            Ok(domains) => domains,
+            Err(e) => {
+                eprintln!("error listing stored docs: {e}");
+                return;
+            }
+        };
 
         if domains.is_empty() {
             eprintln!("{dim}no docs stored yet{reset}");
@@ -28,7 +34,13 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
     } else {
         // Domain view: list all docs for the given domain.
         let domain = filter.strip_prefix("www.").unwrap_or(filter);
-        let docs = store.list_docs(domain).await.unwrap_or_default();
+        let docs = match store.list_docs(domain).await {
+            Ok(docs) => docs,
+            Err(e) => {
+                eprintln!("error listing docs for {filter}: {e}");
+                return;
+            }
+        };
 
         if docs.is_empty() {
             eprintln!("{dim}no docs found for{reset} {bold}{filter}{reset}");
@@ -96,10 +108,16 @@ pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
             let mut matched_lines = 0usize;
 
             let store = FilesystemContentStore::new(&store_root);
-            let docs = store.list_all_docs().await.unwrap_or_default();
+            let docs = match store.list_all_docs().await {
+                Ok(docs) => docs,
+                Err(e) => {
+                    eprintln!("error enumerating docs: {e}");
+                    return;
+                }
+            };
 
             for doc in &docs {
-                let Ok(content) = std::fs::read_to_string(&doc.md_path) else {
+                let Ok(content) = tokio::fs::read_to_string(&doc.md_path).await else {
                     continue;
                 };
                 let hits: Vec<(usize, &str)> = content
@@ -108,7 +126,10 @@ pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
                     .filter(|(_, line)| line.to_lowercase().contains(&pattern_lower))
                     .collect();
                 if !hits.is_empty() {
-                    let rel = doc.md_path.strip_prefix(&store_root).unwrap_or(&doc.md_path);
+                    let rel = doc
+                        .md_path
+                        .strip_prefix(&store_root)
+                        .unwrap_or(&doc.md_path);
                     eprintln!("{pink}{}{reset}", rel.display());
                     for (lineno, line) in &hits {
                         let trimmed = line.trim();

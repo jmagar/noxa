@@ -6,10 +6,8 @@ use crate::types::{Image, Link};
 
 use super::{ConvertedAssets, resolve_url};
 
-static IMG_ALT_SEL: Lazy<Selector> =
-    Lazy::new(|| Selector::parse("img[alt]").unwrap());
-static A_HREF_SEL: Lazy<Selector> =
-    Lazy::new(|| Selector::parse("a[href]").unwrap());
+static IMG_ALT_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("img[alt]").unwrap());
+static A_HREF_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href]").unwrap());
 
 const KNOWN_LANGS: &[&str] = &[
     "javascript",
@@ -177,7 +175,8 @@ pub(super) fn collect_assets_from_noise(
             .unwrap_or_default();
         let text: String = link.text().collect::<String>().trim().to_string();
         // Accept http://, https://, and protocol-relative // URLs
-        if !href.is_empty() && !text.is_empty()
+        if !href.is_empty()
+            && !text.is_empty()
             && (href.starts_with("http") || href.starts_with("//"))
         {
             assets.links.push(Link { text, href });
