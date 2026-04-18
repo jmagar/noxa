@@ -128,7 +128,7 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref pattern) = cli.grep {
-        run_grep(pattern, content_store_root(resolved.output_dir.as_deref()));
+        run_grep(pattern, content_store_root(resolved.output_dir.as_deref())).await;
         return;
     }
 

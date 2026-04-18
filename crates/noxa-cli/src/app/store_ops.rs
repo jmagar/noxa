@@ -56,7 +56,7 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
     }
 }
 
-pub(crate) fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
+pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
     if !store_root.exists() {
         eprintln!(
             "{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}"
@@ -89,20 +89,38 @@ pub(crate) fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // rg not installed — fall back to a simple Rust walk
+            // rg not installed — fall back using the store enumeration API
             eprintln!("{dim}rg not found, using built-in search{reset}\n");
             let pattern_lower = pattern.to_lowercase();
             let mut matched_files = 0usize;
             let mut matched_lines = 0usize;
-            if let Ok(walker) = std::fs::read_dir(&store_root) {
-                grep_dir(
-                    walker,
-                    &pattern_lower,
-                    &store_root,
-                    &mut matched_files,
-                    &mut matched_lines,
-                );
+
+            let store = FilesystemContentStore::new(&store_root);
+            let docs = store.list_all_docs().await.unwrap_or_default();
+
+            for doc in &docs {
+                let Ok(content) = std::fs::read_to_string(&doc.md_path) else {
+                    continue;
+                };
+                let hits: Vec<(usize, &str)> = content
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.to_lowercase().contains(&pattern_lower))
+                    .collect();
+                if !hits.is_empty() {
+                    let rel = doc.md_path.strip_prefix(&store_root).unwrap_or(&doc.md_path);
+                    eprintln!("{pink}{}{reset}", rel.display());
+                    for (lineno, line) in &hits {
+                        let trimmed = line.trim();
+                        let display = truncate_display(trimmed, 120);
+                        eprintln!("  {dim}{:>4}{reset}  {bold}{display}{reset}", lineno + 1);
+                        matched_lines += 1;
+                    }
+                    eprintln!();
+                    matched_files += 1;
+                }
             }
+
             if matched_files == 0 {
                 eprintln!("{dim}no matches for {reset}{bold}\"{pattern}\"{reset}");
             } else {
@@ -112,45 +130,6 @@ pub(crate) fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
             }
         }
         Err(e) => eprintln!("error running rg: {e}"),
-    }
-}
-
-pub(crate) fn grep_dir(
-    entries: std::fs::ReadDir,
-    pattern: &str,
-    root: &std::path::Path,
-    matched_files: &mut usize,
-    matched_lines: &mut usize,
-) {
-    let mut paths: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
-        if path.is_dir() {
-            if let Ok(sub) = std::fs::read_dir(&path) {
-                grep_dir(sub, pattern, root, matched_files, matched_lines);
-            }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let hits: Vec<(usize, &str)> = content
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| line.to_lowercase().contains(pattern))
-                .collect();
-            if !hits.is_empty() {
-                let rel = path.strip_prefix(root).unwrap_or(&path);
-                eprintln!("{pink}{}{reset}", rel.display());
-                for (lineno, line) in &hits {
-                    let trimmed = line.trim();
-                    let display = truncate_display(trimmed, 120);
-                    eprintln!("  {dim}{:>4}{reset}  {bold}{display}{reset}", lineno + 1);
-                    *matched_lines += 1;
-                }
-                eprintln!();
-                *matched_files += 1;
-            }
-        }
     }
 }
 
