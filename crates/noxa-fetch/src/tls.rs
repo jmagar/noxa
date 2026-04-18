@@ -327,6 +327,8 @@ pub fn build_client(
     timeout: Duration,
     extra_headers: &std::collections::HashMap<String, String>,
     proxy: Option<&str>,
+    follow_redirects: bool,
+    max_redirects: u32,
 ) -> Result<Client, FetchError> {
     let (tls, h2, headers) = match variant {
         BrowserVariant::Chrome => (chrome_tls(), chrome_h2(), CHROME_HEADERS),
@@ -356,7 +358,7 @@ pub fn build_client(
 
     let mut builder = Client::builder()
         .emulation(emulation)
-        .redirect(wreq::redirect::Policy::limited(10))
+        .redirect(redirect_policy(follow_redirects, max_redirects))
         .cookie_store(true)
         .timeout(timeout);
 
@@ -369,4 +371,12 @@ pub fn build_client(
     builder
         .build()
         .map_err(|e| FetchError::Build(e.to_string()))
+}
+
+fn redirect_policy(follow_redirects: bool, max_redirects: u32) -> wreq::redirect::Policy {
+    if follow_redirects {
+        wreq::redirect::Policy::limited(max_redirects as usize)
+    } else {
+        wreq::redirect::Policy::none()
+    }
 }

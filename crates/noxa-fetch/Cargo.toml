@@ -14,6 +14,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
+# `wreq` release candidates currently expose the browser impersonation surface
+# this crate relies on. See `crates/noxa-fetch/README.md` for upgrade checks.
 wreq = { version = "6.0.0-rc.28", features = ["cookies", "gzip", "brotli", "zstd", "deflate"] }
 http = "1"
 bytes = "1"

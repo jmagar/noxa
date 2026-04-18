@@ -78,6 +78,7 @@ pub fn parse_reddit_json(json_bytes: &[u8], url: &str) -> Result<ExtractionResul
     }
 
     let word_count = markdown.split_whitespace().count();
+    let plain_text = crate::document::strip_markdown_formatting(&markdown);
     debug!(word_count, "reddit json extracted");
 
     Ok(ExtractionResult {
@@ -105,7 +106,7 @@ pub fn parse_reddit_json(json_bytes: &[u8], url: &str) -> Result<ExtractionResul
         },
         content: Content {
             markdown,
-            plain_text: String::new(),
+            plain_text,
             links: vec![],
             images: vec![],
             code_blocks: vec![],
@@ -179,4 +180,63 @@ enum Replies {
     Listing(Listing),
     #[allow(dead_code)]
     Empty(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_reddit_json_populates_plain_text() {
+        let json = serde_json::json!([
+            {
+                "data": {
+                    "children": [
+                        {
+                            "kind": "t3",
+                            "data": {
+                                "title": "Rust release thread",
+                                "selftext": "Rust 1.x is out now.",
+                                "subreddit_name_prefixed": "r/rust",
+                                "url_overridden_by_dest": "https://example.com/release",
+                                "author": "ferris"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "data": {
+                    "children": [
+                        {
+                            "kind": "t1",
+                            "data": {
+                                "author": "reader1",
+                                "body": "Thanks for the update!",
+                                "score": 42,
+                                "replies": ""
+                            }
+                        }
+                    ]
+                }
+            }
+        ]);
+
+        let result = parse_reddit_json(
+            json.to_string().as_bytes(),
+            "https://www.reddit.com/r/rust/comments/abc123/release_thread/",
+        )
+        .expect("reddit extraction should succeed");
+
+        assert!(
+            result.content.plain_text.contains("Rust release thread"),
+            "plain_text should include the title: {:?}",
+            result.content.plain_text
+        );
+        assert!(
+            result.content.plain_text.contains("Thanks for the update!"),
+            "plain_text should include comment text: {:?}",
+            result.content.plain_text
+        );
+    }
 }

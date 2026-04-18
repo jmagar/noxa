@@ -21,6 +21,8 @@ impl FetchClient {
                         config.timeout,
                         &config.headers,
                         config.proxy.as_deref(),
+                        config.follow_redirects,
+                        config.max_redirects,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -38,7 +40,14 @@ impl FetchClient {
                 .iter()
                 .map(|proxy| {
                     let variant = *variants.choose(&mut rng).unwrap();
-                    crate::tls::build_client(variant, config.timeout, &config.headers, Some(proxy))
+                    crate::tls::build_client(
+                        variant,
+                        config.timeout,
+                        &config.headers,
+                        Some(proxy),
+                        config.follow_redirects,
+                        config.max_redirects,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -74,7 +83,10 @@ impl FetchClient {
                     &clients[0]
                 }
             }
-            ClientPool::Rotating { clients } => pick_random(clients),
+            ClientPool::Rotating { clients } => {
+                let host = extract_host(url);
+                pick_for_host(clients, &host)
+            }
         }
     }
 }
@@ -102,10 +114,4 @@ pub(super) fn pick_for_host<'a>(clients: &'a [wreq::Client], host: &str) -> &'a 
         .bytes()
         .fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
     &clients[hash % clients.len()]
-}
-
-pub(super) fn pick_random(clients: &[wreq::Client]) -> &wreq::Client {
-    use rand::Rng;
-    let idx = rand::thread_rng().gen_range(0..clients.len());
-    &clients[idx]
 }
