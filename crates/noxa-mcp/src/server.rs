@@ -7,43 +7,31 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use noxa_store::{parse_http_url, validate_public_http_url};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde_json::json;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::cloud::{self, CloudClient, SmartFetchResult};
+use crate::config::NoxaMcpConfig;
+use crate::error::NoxaMcpError;
+use crate::research::{build_research_response, load_cached_research, save_research, slugify};
+use crate::serialization::to_pretty_json;
 use crate::tools::*;
+use crate::validation::{validate_url, validate_urls};
 
 const NO_LLM_PROVIDERS_MESSAGE: &str = "No LLM providers available (priority: Gemini CLI -> OpenAI -> Ollama -> Anthropic). Install gemini on PATH, set OPENAI_API_KEY, OLLAMA_HOST / OLLAMA_MODEL, or ANTHROPIC_API_KEY, or set NOXA_API_KEY for cloud fallback.";
+type ToolResult = Result<String, String>;
 
 pub struct NoxaMcp {
     tool_router: ToolRouter<Self>,
+    config: Arc<NoxaMcpConfig>,
     fetch_client: Arc<noxa_fetch::FetchClient>,
     llm_chain: Option<noxa_llm::ProviderChain>,
     cloud: Option<CloudClient>,
     store: noxa_store::FilesystemContentStore,
-}
-
-/// Parse a browser string into a BrowserProfile.
-fn parse_browser(browser: Option<&str>) -> noxa_fetch::BrowserProfile {
-    match browser {
-        Some("firefox") => noxa_fetch::BrowserProfile::Firefox,
-        Some("random") => noxa_fetch::BrowserProfile::Random,
-        _ => noxa_fetch::BrowserProfile::Chrome,
-    }
-}
-
-/// Validate that a URL is non-empty, has an http/https scheme, and does not target
-/// private/loopback/reserved hosts (SSRF prevention).
-///
-/// For literal IP addresses the check is synchronous. For hostnames all A/AAAA
-/// records are resolved and rejected if any resolves to a private range.
-async fn validate_url(url: &str) -> Result<(), String> {
-    validate_public_http_url(url).await
 }
 
 /// Timeout for local fetch calls (prevents hanging on tarpitting servers).
@@ -54,50 +42,11 @@ const RESEARCH_MAX_POLLS: u32 = 200;
 
 #[tool_router]
 impl NoxaMcp {
-    pub async fn new() -> Self {
-        let mut config = noxa_fetch::FetchConfig::default();
-
-        // Load proxy config from env vars or local file
-        if let Ok(proxy) = std::env::var("NOXA_PROXY") {
-            info!("using single proxy from NOXA_PROXY");
-            config.proxy = Some(proxy);
-        }
-
-        let proxy_file = std::env::var("NOXA_PROXY_FILE")
-            .ok()
-            .unwrap_or_else(|| "proxies.txt".to_string());
-        if std::path::Path::new(&proxy_file).exists()
-            && let Ok(pool) = noxa_fetch::parse_proxy_file(&proxy_file)
-            && !pool.is_empty()
-        {
-            info!(count = pool.len(), file = %proxy_file, "loaded proxy pool");
-            config.proxy_pool = pool;
-        }
-
-        // Create the content store first so we can clone it into FetchConfig.
-        let store = noxa_store::FilesystemContentStore::open().unwrap_or_else(|e| {
-            error!("content store init failed: {e}");
-            std::process::exit(1);
-        });
-        // Ensure the root directory exists so that resolve_path can canonicalize it.
-        // A fresh install would otherwise fail because std::fs::canonicalize errors
-        // on non-existent paths.
-        if let Err(e) = std::fs::create_dir_all(store.root()) {
-            error!("failed to create content store directory: {e}");
-            std::process::exit(1);
-        }
-        info!("content store ready");
-
-        // Inject store into FetchConfig so FetchClient auto-persists all extractions.
-        config.store = Some(store.clone());
-
-        let fetch_client = match noxa_fetch::FetchClient::new(config) {
-            Ok(client) => client,
-            Err(e) => {
-                error!("failed to build FetchClient: {e}");
-                std::process::exit(1);
-            }
-        };
+    pub async fn new() -> Result<Self, NoxaMcpError> {
+        let config = Arc::new(NoxaMcpConfig::from_env()?);
+        let store = config.store.clone();
+        let fetch_client = noxa_fetch::FetchClient::new(config.fetch.clone())
+            .map_err(NoxaMcpError::FetchClientInit)?;
 
         let chain = noxa_llm::ProviderChain::default().await;
         let llm_chain = if chain.is_empty() {
@@ -108,7 +57,11 @@ impl NoxaMcp {
             Some(chain)
         };
 
-        let cloud = CloudClient::from_env();
+        let cloud = config
+            .cloud_api_key
+            .clone()
+            .map(CloudClient::new)
+            .transpose()?;
         if cloud.is_some() {
             info!("cloud API fallback enabled (NOXA_API_KEY set)");
         } else {
@@ -118,17 +71,18 @@ impl NoxaMcp {
             );
         }
 
-        Self {
+        Ok(Self {
             tool_router: Self::tool_router(),
+            config,
             fetch_client: Arc::new(fetch_client),
             llm_chain,
             cloud,
             store,
-        }
+        })
     }
 
     /// Helper: smart fetch with LLM format for extract/summarize tools.
-    async fn smart_fetch_llm(&self, url: &str) -> Result<SmartFetchResult, String> {
+    async fn smart_fetch_llm(&self, url: &str) -> Result<SmartFetchResult, NoxaMcpError> {
         cloud::smart_fetch(
             &self.fetch_client,
             self.cloud.as_ref(),
@@ -141,13 +95,43 @@ impl NoxaMcp {
         .await
     }
 
+    fn custom_client(
+        &self,
+        browser: noxa_fetch::BrowserProfile,
+        cookie_header: Option<String>,
+    ) -> Result<Option<noxa_fetch::FetchClient>, NoxaMcpError> {
+        let is_default_browser = matches!(browser, noxa_fetch::BrowserProfile::Chrome);
+        if is_default_browser && cookie_header.is_none() {
+            return Ok(None);
+        }
+
+        let mut config = self.config.fetch.clone();
+        config.browser = browser;
+        config
+            .headers
+            .insert("Accept-Language".to_string(), "en-US,en;q=0.9".to_string());
+        if let Some(cookies) = cookie_header {
+            config.headers.insert("Cookie".to_string(), cookies);
+        }
+
+        noxa_fetch::FetchClient::new(config)
+            .map(Some)
+            .map_err(NoxaMcpError::FetchClientInit)
+    }
+
+    fn map_tool_error(error: NoxaMcpError) -> String {
+        error.to_string()
+    }
+
     /// Scrape a single URL and extract its content as markdown, LLM-optimized text, plain text, or full JSON.
     /// Automatically falls back to the noxa cloud API when bot protection or JS rendering is detected.
     #[tool]
-    async fn scrape(&self, Parameters(params): Parameters<ScrapeParams>) -> Result<String, String> {
-        validate_url(&params.url).await?;
-        let format = params.format.as_deref().unwrap_or("markdown");
-        let browser = parse_browser(params.browser.as_deref());
+    async fn scrape(&self, Parameters(params): Parameters<ScrapeParams>) -> ToolResult {
+        validate_url(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?;
+        let format = params.resolved_format();
+        let browser = params.resolved_browser();
         let include = params.include_selectors.unwrap_or_default();
         let exclude = params.exclude_selectors.unwrap_or_default();
         let main_only = params.only_main_content.unwrap_or(false);
@@ -159,30 +143,14 @@ impl NoxaMcp {
             .filter(|c| !c.is_empty())
             .map(|c| c.join("; "));
 
-        // Use a custom client if non-default browser or cookies are provided
-        let is_default_browser = matches!(browser, noxa_fetch::BrowserProfile::Chrome);
-        let needs_custom = !is_default_browser || cookie_header.is_some();
-        let custom_client;
-        let client: &noxa_fetch::FetchClient = if needs_custom {
-            let mut headers = std::collections::HashMap::new();
-            headers.insert("Accept-Language".to_string(), "en-US,en;q=0.9".to_string());
-            if let Some(ref cookies) = cookie_header {
-                headers.insert("Cookie".to_string(), cookies.clone());
-            }
-            let config = noxa_fetch::FetchConfig {
-                browser,
-                headers,
-                store: Some(self.store.clone()),
-                ..Default::default()
-            };
-            custom_client = noxa_fetch::FetchClient::new(config)
-                .map_err(|e| format!("Failed to build client: {e}"))?;
-            &custom_client
-        } else {
-            &self.fetch_client
-        };
+        let custom_client = self
+            .custom_client(browser, cookie_header)
+            .map_err(Self::map_tool_error)?;
+        let client = custom_client
+            .as_ref()
+            .unwrap_or_else(|| self.fetch_client.as_ref());
 
-        let formats = [format];
+        let formats = [format.as_str()];
         let result = cloud::smart_fetch(
             client,
             self.cloud.as_ref(),
@@ -192,29 +160,31 @@ impl NoxaMcp {
             main_only,
             &formats,
         )
-        .await?;
+        .await
+        .map_err(Self::map_tool_error)?;
 
         match result {
             SmartFetchResult::Local(extraction) => {
                 let output = match format {
-                    "llm" => noxa_core::to_llm_text(&extraction, Some(&params.url)),
-                    "text" => extraction.content.plain_text,
-                    "json" => serde_json::to_string_pretty(&extraction).unwrap_or_default(),
-                    _ => extraction.content.markdown,
+                    ScrapeFormat::Llm => noxa_core::to_llm_text(&extraction, Some(&params.url)),
+                    ScrapeFormat::Text => extraction.content.plain_text,
+                    ScrapeFormat::Json => to_pretty_json(&extraction, "scrape local extraction")
+                        .map_err(Self::map_tool_error)?,
+                    ScrapeFormat::Markdown => extraction.content.markdown,
                 };
                 Ok(output)
             }
             SmartFetchResult::Cloud(resp) => {
                 // Extract the requested format from the API response
                 let content = resp
-                    .get(format)
+                    .get(format.as_str())
                     .or_else(|| resp.get("markdown"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
                 if content.is_empty() {
                     // Return full JSON if no content in the expected format
-                    Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
+                    to_pretty_json(&resp, "scrape cloud response").map_err(Self::map_tool_error)
                 } else {
                     Ok(content.to_string())
                 }
@@ -224,8 +194,10 @@ impl NoxaMcp {
 
     /// Crawl a website starting from a seed URL, following links breadth-first up to a configurable depth and page limit.
     #[tool]
-    async fn crawl(&self, Parameters(params): Parameters<CrawlParams>) -> Result<String, String> {
-        validate_url(&params.url).await?;
+    async fn crawl(&self, Parameters(params): Parameters<CrawlParams>) -> ToolResult {
+        validate_url(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?;
 
         if let Some(max) = params.max_pages
             && max > 500
@@ -233,7 +205,7 @@ impl NoxaMcp {
             return Err("max_pages cannot exceed 500".into());
         }
 
-        let format = params.format.as_deref().unwrap_or("markdown");
+        let format = params.resolved_format();
 
         let concurrency = params.concurrency.unwrap_or(5);
         if concurrency == 0 || concurrency > 20 {
@@ -249,7 +221,7 @@ impl NoxaMcp {
             use_sitemap: params.use_sitemap.unwrap_or(false),
             fetch: noxa_fetch::FetchConfig {
                 store: Some(self.store.clone()),
-                ..Default::default()
+                ..self.config.fetch.clone()
             },
             ..Default::default()
         };
@@ -268,9 +240,9 @@ impl NoxaMcp {
             output.push_str(&format!("--- {} (depth {}) ---\n", page.url, page.depth));
             if let Some(ref extraction) = page.extraction {
                 let content = match format {
-                    "llm" => noxa_core::to_llm_text(extraction, Some(&page.url)),
-                    "text" => extraction.content.plain_text.clone(),
-                    _ => extraction.content.markdown.clone(),
+                    ContentFormat::Llm => noxa_core::to_llm_text(extraction, Some(&page.url)),
+                    ContentFormat::Text => extraction.content.plain_text.clone(),
+                    ContentFormat::Markdown => extraction.content.markdown.clone(),
                 };
                 output.push_str(&content);
             } else if let Some(ref err) = page.error {
@@ -284,8 +256,10 @@ impl NoxaMcp {
 
     /// Discover URLs from a website's sitemaps (robots.txt + sitemap.xml).
     #[tool]
-    async fn map(&self, Parameters(params): Parameters<MapParams>) -> Result<String, String> {
-        validate_url(&params.url).await?;
+    async fn map(&self, Parameters(params): Parameters<MapParams>) -> ToolResult {
+        validate_url(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?;
         let entries = noxa_fetch::sitemap::discover(&self.fetch_client, &params.url)
             .await
             .map_err(|e| format!("Sitemap discovery failed: {e}"))?;
@@ -300,18 +274,18 @@ impl NoxaMcp {
 
     /// Extract content from multiple URLs concurrently.
     #[tool]
-    async fn batch(&self, Parameters(params): Parameters<BatchParams>) -> Result<String, String> {
+    async fn batch(&self, Parameters(params): Parameters<BatchParams>) -> ToolResult {
         if params.urls.is_empty() {
             return Err("urls must not be empty".into());
         }
         if params.urls.len() > 100 {
             return Err("batch is limited to 100 URLs per request".into());
         }
-        for u in &params.urls {
-            validate_url(u).await?;
-        }
+        validate_urls(&params.urls)
+            .await
+            .map_err(Self::map_tool_error)?;
 
-        let format = params.format.as_deref().unwrap_or("markdown");
+        let format = params.resolved_format();
         let concurrency = params.concurrency.unwrap_or(5);
         if concurrency == 0 || concurrency > 20 {
             return Err(format!(
@@ -332,9 +306,9 @@ impl NoxaMcp {
             match &r.result {
                 Ok(extraction) => {
                     let content = match format {
-                        "llm" => noxa_core::to_llm_text(extraction, Some(&r.url)),
-                        "text" => extraction.content.plain_text.clone(),
-                        _ => extraction.content.markdown.clone(),
+                        ContentFormat::Llm => noxa_core::to_llm_text(extraction, Some(&r.url)),
+                        ContentFormat::Text => extraction.content.plain_text.clone(),
+                        ContentFormat::Markdown => extraction.content.markdown.clone(),
                     };
                     output.push_str(&content);
                 }
@@ -351,15 +325,13 @@ impl NoxaMcp {
     /// Extract structured data from a web page using an LLM. Provide either a JSON schema or a natural language prompt.
     /// Falls back to the noxa cloud API when no local LLM is available or bot protection is detected.
     #[tool]
-    async fn extract(
-        &self,
-        Parameters(params): Parameters<ExtractParams>,
-    ) -> Result<String, String> {
-        validate_url(&params.url).await?;
-
-        if params.schema.is_none() && params.prompt.is_none() {
-            return Err("Either 'schema' or 'prompt' is required for extraction.".into());
-        }
+    async fn extract(&self, Parameters(params): Parameters<ExtractParams>) -> ToolResult {
+        validate_url(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?;
+        params
+            .validate()
+            .map_err(|e| Self::map_tool_error(NoxaMcpError::invalid_parameter(e)))?;
 
         // No local LLM — fall back to cloud API directly
         if self.llm_chain.is_none() {
@@ -371,13 +343,20 @@ impl NoxaMcp {
             if let Some(ref prompt) = params.prompt {
                 body["prompt"] = json!(prompt);
             }
-            let resp = cloud.post("extract", body).await?;
-            return Ok(serde_json::to_string_pretty(&resp).unwrap_or_default());
+            let resp = cloud
+                .post("extract", body)
+                .await
+                .map_err(Self::map_tool_error)?;
+            return to_pretty_json(&resp, "extract cloud response").map_err(Self::map_tool_error);
         }
 
         let chain = self.llm_chain.as_ref().unwrap();
 
-        let llm_content = match self.smart_fetch_llm(&params.url).await? {
+        let llm_content = match self
+            .smart_fetch_llm(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?
+        {
             SmartFetchResult::Local(extraction) => {
                 noxa_core::to_llm_text(&extraction, Some(&params.url))
             }
@@ -392,25 +371,24 @@ impl NoxaMcp {
         let data = if let Some(ref schema) = params.schema {
             noxa_llm::extract::extract_json(&llm_content, schema, chain, None)
                 .await
-                .map_err(|e| format!("LLM extraction failed: {e}"))?
+                .map_err(|e| Self::map_tool_error(NoxaMcpError::llm(e.to_string())))?
         } else {
             let prompt = params.prompt.as_deref().unwrap();
             noxa_llm::extract::extract_with_prompt(&llm_content, prompt, chain, None)
                 .await
-                .map_err(|e| format!("LLM extraction failed: {e}"))?
+                .map_err(|e| Self::map_tool_error(NoxaMcpError::llm(e.to_string())))?
         };
 
-        Ok(serde_json::to_string_pretty(&data).unwrap_or_default())
+        to_pretty_json(&data, "extract result").map_err(Self::map_tool_error)
     }
 
     /// Summarize the content of a web page using an LLM.
     /// Falls back to the noxa cloud API when no local LLM is available or bot protection is detected.
     #[tool]
-    async fn summarize(
-        &self,
-        Parameters(params): Parameters<SummarizeParams>,
-    ) -> Result<String, String> {
-        validate_url(&params.url).await?;
+    async fn summarize(&self, Parameters(params): Parameters<SummarizeParams>) -> ToolResult {
+        validate_url(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?;
 
         // No local LLM — fall back to cloud API directly
         if self.llm_chain.is_none() {
@@ -419,17 +397,25 @@ impl NoxaMcp {
             if let Some(sentences) = params.max_sentences {
                 body["max_sentences"] = json!(sentences);
             }
-            let resp = cloud.post("summarize", body).await?;
+            let resp = cloud
+                .post("summarize", body)
+                .await
+                .map_err(Self::map_tool_error)?;
             let summary = resp.get("summary").and_then(|v| v.as_str()).unwrap_or("");
             if summary.is_empty() {
-                return Ok(serde_json::to_string_pretty(&resp).unwrap_or_default());
+                return to_pretty_json(&resp, "summarize cloud response")
+                    .map_err(Self::map_tool_error);
             }
             return Ok(summary.to_string());
         }
 
         let chain = self.llm_chain.as_ref().unwrap();
 
-        let llm_content = match self.smart_fetch_llm(&params.url).await? {
+        let llm_content = match self
+            .smart_fetch_llm(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?
+        {
             SmartFetchResult::Local(extraction) => {
                 noxa_core::to_llm_text(&extraction, Some(&params.url))
             }
@@ -443,14 +429,16 @@ impl NoxaMcp {
 
         noxa_llm::summarize::summarize(&llm_content, params.max_sentences, chain, None)
             .await
-            .map_err(|e| format!("Summarization failed: {e}"))
+            .map_err(|e| Self::map_tool_error(NoxaMcpError::llm(e.to_string())))
     }
 
     /// Compare the current content of a URL against a previous extraction snapshot, showing what changed.
     /// Automatically falls back to the noxa cloud API when bot protection is detected.
     #[tool]
-    async fn diff(&self, Parameters(params): Parameters<DiffParams>) -> Result<String, String> {
-        validate_url(&params.url).await?;
+    async fn diff(&self, Parameters(params): Parameters<DiffParams>) -> ToolResult {
+        validate_url(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?;
 
         // Load the previous snapshot. IMPORTANT: this read must complete and bind
         // to `previous` before any fetch for the same URL — otherwise the fetch
@@ -532,12 +520,13 @@ impl NoxaMcp {
             false,
             &["markdown"],
         )
-        .await?;
+        .await
+        .map_err(Self::map_tool_error)?;
 
         match result {
             SmartFetchResult::Local(current) => {
                 let content_diff = noxa_core::diff::diff(&previous, &current);
-                Ok(serde_json::to_string_pretty(&content_diff).unwrap_or_default())
+                to_pretty_json(&content_diff, "diff result").map_err(Self::map_tool_error)
             }
             SmartFetchResult::Cloud(resp) => {
                 // Extract markdown from the cloud response and build a minimal
@@ -587,7 +576,7 @@ impl NoxaMcp {
                 };
 
                 let content_diff = noxa_core::diff::diff(&previous, &current);
-                Ok(serde_json::to_string_pretty(&content_diff).unwrap_or_default())
+                to_pretty_json(&content_diff, "diff result").map_err(Self::map_tool_error)
             }
         }
     }
@@ -595,8 +584,10 @@ impl NoxaMcp {
     /// Extract brand identity (colors, fonts, logo, favicon) from a website's HTML and CSS.
     /// Automatically falls back to the noxa cloud API when bot protection is detected.
     #[tool]
-    async fn brand(&self, Parameters(params): Parameters<BrandParams>) -> Result<String, String> {
-        validate_url(&params.url).await?;
+    async fn brand(&self, Parameters(params): Parameters<BrandParams>) -> ToolResult {
+        validate_url(&params.url)
+            .await
+            .map_err(Self::map_tool_error)?;
         let fetch_result =
             tokio::time::timeout(LOCAL_FETCH_TIMEOUT, self.fetch_client.fetch(&params.url))
                 .await
@@ -608,8 +599,9 @@ impl NoxaMcp {
             if let Some(ref c) = self.cloud {
                 let resp = c
                     .post("brand", serde_json::json!({"url": params.url}))
-                    .await?;
-                return Ok(serde_json::to_string_pretty(&resp).unwrap_or_default());
+                    .await
+                    .map_err(Self::map_tool_error)?;
+                return to_pretty_json(&resp, "brand cloud response").map_err(Self::map_tool_error);
             } else {
                 return Err(format!(
                     "Bot protection detected on {}. Set NOXA_API_KEY for automatic cloud bypass. \
@@ -621,29 +613,34 @@ impl NoxaMcp {
 
         let identity = noxa_core::brand::extract_brand(&fetch_result.html, Some(&fetch_result.url));
 
-        Ok(serde_json::to_string_pretty(&identity).unwrap_or_default())
+        to_pretty_json(&identity, "brand result").map_err(Self::map_tool_error)
     }
 
     /// Run a deep research investigation on a topic or question. Requires NOXA_API_KEY.
     /// Saves full result to ~/.noxa/research/ and returns the file path + key findings.
     /// Checks cache first — same query returns the cached result without spending credits.
     #[tool]
-    async fn research(
-        &self,
-        Parameters(params): Parameters<ResearchParams>,
-    ) -> Result<String, String> {
+    async fn research(&self, Parameters(params): Parameters<ResearchParams>) -> ToolResult {
         let cloud = self
             .cloud
             .as_ref()
             .ok_or("Research requires NOXA_API_KEY. Get a key at https://noxa.io")?;
 
-        let research_dir = research_dir();
+        let research_dir = &self.config.research_dir;
         let slug = slugify(&params.query);
 
         // Check cache first
-        if let Some(cached) = load_cached_research(&research_dir, &slug) {
+        if let Some(cached) =
+            load_cached_research(research_dir, &slug).map_err(Self::map_tool_error)?
+        {
             info!(query = %params.query, "returning cached research");
-            return Ok(cached);
+            let artifacts = crate::research::ResearchArtifacts {
+                report_path: research_dir.join(format!("{slug}.md")),
+                json_path: research_dir.join(format!("{slug}.json")),
+            };
+            let response = build_research_response(&params.query, &cached, &artifacts, true);
+            return to_pretty_json(&response, "cached research response")
+                .map_err(Self::map_tool_error);
         }
 
         let mut body = json!({ "query": params.query });
@@ -655,7 +652,10 @@ impl NoxaMcp {
         }
 
         // Start the research job
-        let start_resp = cloud.post("research", body).await?;
+        let start_resp = cloud
+            .post("research", body)
+            .await
+            .map_err(Self::map_tool_error)?;
         let job_id = start_resp
             .get("id")
             .and_then(|v| v.as_str())
@@ -668,7 +668,10 @@ impl NoxaMcp {
         for poll in 0..RESEARCH_MAX_POLLS {
             tokio::time::sleep(Duration::from_secs(3)).await;
 
-            let status_resp = cloud.get(&format!("research/{job_id}")).await?;
+            let status_resp = cloud
+                .get(&format!("research/{job_id}"))
+                .await
+                .map_err(Self::map_tool_error)?;
             let status = status_resp
                 .get("status")
                 .and_then(|v| v.as_str())
@@ -677,8 +680,8 @@ impl NoxaMcp {
             match status {
                 "completed" => {
                     // Save full result to file
-                    let (report_path, json_path) =
-                        save_research(&research_dir, &slug, &status_resp);
+                    let artifacts = save_research(research_dir, &slug, &status_resp)
+                        .map_err(Self::map_tool_error)?;
 
                     // Build compact response: file paths + findings (no full report)
                     let sources_count = status_resp
@@ -690,23 +693,12 @@ impl NoxaMcp {
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0);
 
-                    let mut response = json!({
-                        "status": "completed",
-                        "query": params.query,
-                        "report_file": report_path,
-                        "json_file": json_path,
-                        "sources_count": sources_count,
-                        "findings_count": findings_count,
-                    });
-
-                    if let Some(findings) = status_resp.get("findings") {
-                        response["findings"] = findings.clone();
-                    }
-                    if let Some(sources) = status_resp.get("sources") {
-                        response["sources"] = sources.clone();
-                    }
-
-                    return Ok(serde_json::to_string_pretty(&response).unwrap_or_default());
+                    let mut response =
+                        build_research_response(&params.query, &status_resp, &artifacts, false);
+                    response["sources_count"] = json!(sources_count);
+                    response["findings_count"] = json!(findings_count);
+                    return to_pretty_json(&response, "research response")
+                        .map_err(Self::map_tool_error);
                 }
                 "failed" => {
                     let error = status_resp
@@ -731,22 +723,15 @@ impl NoxaMcp {
 
     /// Search using SearXNG (`SEARXNG_URL`) or cloud (`NOXA_API_KEY`).
     #[tool]
-    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Result<String, String> {
+    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> ToolResult {
         if params.query.trim().is_empty() {
             return Err("query must not be empty".into());
         }
         let num = params.num_results.unwrap_or(10).clamp(1, 50);
 
-        let searxng_url = std::env::var("SEARXNG_URL")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        if let Some(base_url) = searxng_url {
-            parse_http_url(&base_url)?;
-
+        if let Some(base_url) = self.config.searxng_url.as_ref() {
             let results =
-                noxa_fetch::searxng_search(&self.fetch_client, &base_url, &params.query, num)
+                noxa_fetch::searxng_search(&self.fetch_client, base_url, &params.query, num)
                     .await
                     .map_err(|e| format!("SearXNG search failed: {e}"))?;
 
@@ -756,8 +741,8 @@ impl NoxaMcp {
 
             let mut valid_results: Vec<&noxa_fetch::SearxngResult> = Vec::new();
             for result in &results {
-                if let Err(e) = validate_url(&result.url).await {
-                    warn!("skipping result URL {}: {e}", result.url);
+                if let Err(error) = validate_url(&result.url).await {
+                    warn!("skipping result URL {}: {}", result.url, error);
                 } else {
                     valid_results.push(result);
                 }
@@ -794,7 +779,10 @@ impl NoxaMcp {
              Set SEARXNG_URL to your SearXNG instance URL.",
         )?;
         let body = json!({ "query": params.query, "num_results": num });
-        let resp = cloud.post("search", body).await?;
+        let resp = cloud
+            .post("search", body)
+            .await
+            .map_err(Self::map_tool_error)?;
 
         if let Some(results) = resp.get("results").and_then(|v| v.as_array()) {
             let mut out = String::with_capacity(results.len() * 256);
@@ -815,7 +803,7 @@ impl NoxaMcp {
             }
             Ok(out)
         } else {
-            Ok(serde_json::to_string_pretty(&resp).unwrap_or_default())
+            to_pretty_json(&resp, "search cloud response").map_err(Self::map_tool_error)
         }
     }
 }
@@ -829,178 +817,5 @@ impl ServerHandler for NoxaMcp {
                 "Noxa MCP server -- web content extraction for AI agents. \
                  Tools: scrape, crawl, map, batch, extract, summarize, diff, brand, research, search.",
             ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Research file helpers
-// ---------------------------------------------------------------------------
-
-fn research_dir() -> std::path::PathBuf {
-    let dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".noxa")
-        .join("research");
-    std::fs::create_dir_all(&dir).ok();
-    dir
-}
-
-fn slugify(query: &str) -> String {
-    let s: String = query
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' {
-                c
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-")
-        .to_lowercase();
-    if s.len() > 60 { s[..60].to_string() } else { s }
-}
-
-/// Check for a cached research result. Returns the compact response if found.
-fn load_cached_research(dir: &std::path::Path, slug: &str) -> Option<String> {
-    let json_path = dir.join(format!("{slug}.json"));
-    let report_path = dir.join(format!("{slug}.md"));
-
-    if !json_path.exists() || !report_path.exists() {
-        return None;
-    }
-
-    let json_str = std::fs::read_to_string(&json_path).ok()?;
-    let data: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-
-    // Build compact response from cache
-    let mut response = json!({
-        "status": "completed",
-        "cached": true,
-        "query": data.get("query").cloned().unwrap_or(json!("")),
-        "report_file": report_path.to_string_lossy(),
-        "json_file": json_path.to_string_lossy(),
-        "sources_count": data.get("sources_count").cloned().unwrap_or(json!(0)),
-        "findings_count": data.get("findings_count").cloned().unwrap_or(json!(0)),
-    });
-
-    if let Some(findings) = data.get("findings") {
-        response["findings"] = findings.clone();
-    }
-    if let Some(sources) = data.get("sources") {
-        response["sources"] = sources.clone();
-    }
-
-    Some(serde_json::to_string_pretty(&response).unwrap_or_default())
-}
-
-/// Save research result to disk. Returns (report_path, json_path) as strings.
-fn save_research(dir: &std::path::Path, slug: &str, data: &serde_json::Value) -> (String, String) {
-    let json_path = dir.join(format!("{slug}.json"));
-    let report_path = dir.join(format!("{slug}.md"));
-
-    // Save full JSON
-    if let Ok(json_str) = serde_json::to_string_pretty(data) {
-        std::fs::write(&json_path, json_str).ok();
-    }
-
-    // Save report as markdown
-    if let Some(report) = data.get("report").and_then(|v| v.as_str()) {
-        std::fs::write(&report_path, report).ok();
-    }
-
-    (
-        report_path.to_string_lossy().to_string(),
-        json_path.to_string_lossy().to_string(),
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn validate_rejects_loopback() {
-        assert!(validate_url("http://127.0.0.1/secret").await.is_err());
-        assert!(validate_url("http://127.0.0.1:8080/secret").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_localhost() {
-        assert!(validate_url("http://localhost/secret").await.is_err());
-        assert!(validate_url("http://localhost:8080/secret").await.is_err());
-        assert!(validate_url("http://foo.localhost/secret").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_rfc1918() {
-        assert!(validate_url("http://10.0.0.1/").await.is_err());
-        assert!(validate_url("http://172.16.0.1/").await.is_err());
-        assert!(validate_url("http://172.31.255.255/").await.is_err());
-        assert!(validate_url("http://192.168.1.1/").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_link_local() {
-        assert!(
-            validate_url("http://169.254.169.254/latest/meta-data/")
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_tailscale() {
-        assert!(validate_url("http://100.100.1.1/").await.is_err());
-        assert!(validate_url("http://100.127.255.255/").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_ipv6_loopback() {
-        assert!(validate_url("http://[::1]/secret").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_ipv6_link_local() {
-        assert!(validate_url("http://[fe80::1]/").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_ipv6_ula() {
-        assert!(validate_url("http://[fd00::1]/").await.is_err());
-        assert!(validate_url("http://[fc00::1]/").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_ipv4_mapped_ipv6() {
-        assert!(validate_url("http://[::ffff:127.0.0.1]/").await.is_err());
-        assert!(
-            validate_url("http://[::ffff:169.254.169.254]/latest/meta-data/")
-                .await
-                .is_err()
-        );
-        assert!(validate_url("http://[::ffff:10.0.0.1]/").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn validate_accepts_public_ip() {
-        // Uses a literal IP — no DNS needed, fast.
-        assert!(validate_url("http://8.8.8.8/").await.is_ok());
-        assert!(validate_url("http://1.1.1.1/").await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_ipv6_link_local_and_ula() {
-        assert!(validate_url("http://[fe80::1]/").await.is_err());
-        assert!(validate_url("http://[fc00::1]/").await.is_err());
-    }
-
-    #[test]
-    fn test_num_results_clamp() {
-        assert_eq!(0_u32.clamp(1, 50), 1);
-        assert_eq!(100_u32.clamp(1, 50), 50);
-        assert_eq!(10_u32.clamp(1, 50), 10);
     }
 }
