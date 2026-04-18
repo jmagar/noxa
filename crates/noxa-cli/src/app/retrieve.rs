@@ -378,4 +378,145 @@ mod tests {
         let docs: Vec<noxa_store::StoredDoc> = vec![];
         assert!(select_best(&docs, "anything").is_none());
     }
+
+    // ── run_retrieve behavioural smoke tests ──────────────────────────────────
+    //
+    // run_retrieve returns () and writes to stdout/stderr, so these tests
+    // exercise code paths by asserting the function completes without panicking
+    // and without hanging.
+
+    fn make_sample_extraction(url: &str, markdown: &str) -> noxa_core::ExtractionResult {
+        noxa_core::ExtractionResult {
+            metadata: noxa_core::Metadata {
+                title: Some("Sample Page".to_string()),
+                description: None,
+                author: None,
+                published_date: None,
+                language: Some("en".to_string()),
+                url: Some(url.to_string()),
+                site_name: None,
+                image: None,
+                favicon: None,
+                word_count: markdown.split_whitespace().count(),
+                content_hash: None,
+                source_type: None,
+                file_path: None,
+                last_modified: None,
+                is_truncated: None,
+                technologies: Vec::new(),
+                seed_url: None,
+                crawl_depth: None,
+                search_query: None,
+                fetched_at: None,
+            },
+            content: noxa_core::Content {
+                markdown: markdown.to_string(),
+                plain_text: markdown.to_string(),
+                links: Vec::new(),
+                images: Vec::new(),
+                code_blocks: Vec::new(),
+                raw_html: None,
+            },
+            domain_data: None,
+            structured_data: Vec::new(),
+        }
+    }
+
+    /// run_retrieve on a non-existent store root returns immediately without
+    /// panicking (early-return guard at the top of the function).
+    #[tokio::test]
+    async fn run_retrieve_nonexistent_store_root_returns_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("does_not_exist");
+        // Must not panic or hang.
+        run_retrieve("rust async runtime", store_root).await;
+    }
+
+    /// Fuzzy query against an empty (but existing) store — hits the
+    /// "no cached docs match" branch.
+    #[tokio::test]
+    async fn run_retrieve_fuzzy_query_empty_store_returns_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("content");
+        tokio::fs::create_dir_all(&store_root).await.unwrap();
+        // No docs written — store is empty.
+        run_retrieve("authentication oauth guide", store_root).await;
+    }
+
+    /// Exact URL query for a URL that is NOT cached — hits the "not cached"
+    /// branch (looks_like_url=true but md_path doesn't exist on disk).
+    #[tokio::test]
+    async fn run_retrieve_exact_url_not_cached_returns_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("content");
+        tokio::fs::create_dir_all(&store_root).await.unwrap();
+        run_retrieve("https://docs.example.com/api", store_root).await;
+    }
+
+    /// Exact URL query for a URL that IS cached — hits the happy-path FS probe
+    /// (md_path.exists() == true, reads and prints content).
+    #[tokio::test]
+    async fn run_retrieve_exact_url_cached_returns_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("content");
+        tokio::fs::create_dir_all(&store_root).await.unwrap();
+        let store = FilesystemContentStore::new(&store_root);
+        let url = "https://docs.example.com/api";
+        store
+            .write(url, &make_sample_extraction(url, "API reference docs"))
+            .await
+            .unwrap();
+        run_retrieve(url, store_root).await;
+    }
+
+    /// Fuzzy multi-word query against a populated store — exercises the full
+    /// scoring + sorting + "best match" display branch, including the multi-doc
+    /// header that appears when scored.len() > 1.
+    #[tokio::test]
+    async fn run_retrieve_fuzzy_multiword_populated_store_returns_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("content");
+        tokio::fs::create_dir_all(&store_root).await.unwrap();
+        let store = FilesystemContentStore::new(&store_root);
+
+        // Write several docs so fuzzy scoring selects the best match.
+        let docs = [
+            (
+                "https://docs.example.com/authentication",
+                "OAuth authentication guide",
+            ),
+            ("https://docs.example.com/quickstart", "Getting started"),
+            (
+                "https://docs.example.com/oauth-tokens",
+                "OAuth token reference",
+            ),
+        ];
+        for (url, content) in &docs {
+            store
+                .write(url, &make_sample_extraction(url, content))
+                .await
+                .unwrap();
+        }
+
+        // Multi-word query — "oauth authentication" should score highest on the
+        // first doc (matches both terms) while still exercising the multi-doc
+        // display path.
+        run_retrieve("oauth authentication", store_root).await;
+    }
+
+    /// Single-doc store with a fuzzy query — exercises the path where
+    /// scored.len() == 1 (no multi-doc header printed).
+    #[tokio::test]
+    async fn run_retrieve_fuzzy_single_doc_store_returns_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("content");
+        tokio::fs::create_dir_all(&store_root).await.unwrap();
+        let store = FilesystemContentStore::new(&store_root);
+        let url = "https://blog.example.com/rust-async";
+        store
+            .write(url, &make_sample_extraction(url, "Rust async runtime internals"))
+            .await
+            .unwrap();
+        run_retrieve("rust async", store_root).await;
+    }
 }
