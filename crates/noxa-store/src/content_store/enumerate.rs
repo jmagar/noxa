@@ -3,10 +3,13 @@
 //! This module consolidates filesystem traversal, sidecar parsing, and legacy-envelope
 //! compatibility that previously lived in the CLI layer.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use chrono::DateTime;
 
+use crate::content_store::manifest::ManifestCache;
 use crate::content_store::migrate::parse_sidecar_or_migrate;
 use crate::content_store::FilesystemContentStore;
 use crate::paths::sanitize_component;
@@ -111,8 +114,25 @@ impl FilesystemContentStore {
 
     /// Return all documents in the entire store, sorted by path.
     ///
+    /// Results are served from the in-memory manifest cache when available and
+    /// fresh (TTL: 30 s).  The cache is populated on the first call and
+    /// invalidated whenever a document is written.
+    ///
     /// Corrupt sidecars are skipped with a warning.
     pub async fn list_all_docs(&self) -> Result<Vec<StoredDoc>, StoreError> {
+        // --- Fast path: cache hit ---
+        {
+            let guard = self.manifest_cache.0.lock().await;
+            if let Some(cache) = guard.as_ref() {
+                if cache.is_fresh() {
+                    let mut docs: Vec<StoredDoc> = cache.docs.values().cloned().collect();
+                    docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+                    return Ok(docs);
+                }
+            }
+        }
+
+        // --- Slow path: full walk ---
         if !self.root.exists() {
             return Ok(Vec::new());
         }
@@ -138,6 +158,15 @@ impl FilesystemContentStore {
         }
 
         docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+
+        // Populate the cache with the results of this walk.
+        {
+            let mut guard = self.manifest_cache.0.lock().await;
+            let map: HashMap<String, StoredDoc> =
+                docs.iter().map(|d| (d.url.clone(), d.clone())).collect();
+            *guard = Some(ManifestCache { docs: map, populated_at: Instant::now() });
+        }
+
         Ok(docs)
     }
 

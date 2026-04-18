@@ -784,3 +784,133 @@ async fn test_list_domain_urls_counts_corrupt_sidecars() {
     assert_eq!(result.urls, vec!["https://example.com/good".to_string()]);
     assert_eq!(result.skipped, 1, "corrupt sidecar should be counted as skipped");
 }
+
+// ── Manifest cache tests ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_manifest_cache_populates_on_first_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://cache.example.com/doc",
+            &make_extraction_with_url("body", "https://cache.example.com/doc", "Doc"),
+        )
+        .await
+        .unwrap();
+
+    // First call: cache is None → walk happens.
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(docs.len(), 1);
+
+    // After the call the cache should be populated.
+    let guard = store.manifest_cache.0.lock().await;
+    assert!(guard.is_some(), "cache should be Some after first list_all_docs");
+    assert!(guard.as_ref().unwrap().is_fresh());
+}
+
+#[tokio::test]
+async fn test_manifest_cache_hit_does_not_see_out_of_band_file() {
+    // Write a file directly to disk (bypassing the store API) *after* the
+    // cache has been populated.  A cache-hit call should NOT see it, proving
+    // the cache is actually being used.
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://hit.example.com/a",
+            &make_extraction_with_url("a", "https://hit.example.com/a", "A"),
+        )
+        .await
+        .unwrap();
+
+    // Prime the cache.
+    let docs_first = store.list_all_docs().await.unwrap();
+    assert_eq!(docs_first.len(), 1);
+
+    // Plant a new .md file on disk without going through write() so the
+    // cache is NOT invalidated.
+    let rel = url_to_store_path("https://hit.example.com/b");
+    let md_path = dir.path().join(&rel).with_extension("md");
+    tokio::fs::create_dir_all(md_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&md_path, b"sneaky").await.unwrap();
+
+    // Second call within TTL should still return 1 (cached).
+    let docs_cached = store.list_all_docs().await.unwrap();
+    assert_eq!(
+        docs_cached.len(),
+        1,
+        "cache hit should not reflect out-of-band file write"
+    );
+}
+
+#[tokio::test]
+async fn test_write_invalidates_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://inv.example.com/a",
+            &make_extraction_with_url("a", "https://inv.example.com/a", "A"),
+        )
+        .await
+        .unwrap();
+
+    // Prime the cache.
+    let _ = store.list_all_docs().await.unwrap();
+    {
+        let guard = store.manifest_cache.0.lock().await;
+        assert!(guard.is_some(), "cache should be populated");
+    }
+
+    // Another write should invalidate the cache.
+    store
+        .write(
+            "https://inv.example.com/b",
+            &make_extraction_with_url("b", "https://inv.example.com/b", "B"),
+        )
+        .await
+        .unwrap();
+    {
+        let guard = store.manifest_cache.0.lock().await;
+        assert!(guard.is_none(), "cache should be invalidated after write");
+    }
+
+    // Next list_all_docs should re-walk and return both docs.
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(docs.len(), 2, "should see both docs after cache invalidation");
+}
+
+#[tokio::test]
+async fn test_manifest_cache_ttl_forces_rewalk() {
+    use crate::content_store::manifest::{ManifestCache, CACHE_TTL};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://ttl.example.com/a",
+            &make_extraction_with_url("a", "https://ttl.example.com/a", "A"),
+        )
+        .await
+        .unwrap();
+
+    // Manually insert a stale cache entry (populated_at = now - TTL - 1s).
+    {
+        let mut guard = store.manifest_cache.0.lock().await;
+        *guard = Some(ManifestCache {
+            docs: HashMap::new(), // empty — would return 0 if served
+            populated_at: Instant::now()
+                .checked_sub(CACHE_TTL + Duration::from_secs(1))
+                .expect("time arithmetic should not overflow"),
+        });
+    }
+
+    // list_all_docs should detect the stale cache and re-walk.
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(docs.len(), 1, "stale cache should trigger re-walk and return real docs");
+}

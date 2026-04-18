@@ -58,6 +58,10 @@ impl FilesystemContentStore {
         )
         .await?;
 
+        // Invalidate the manifest cache so the next list_all_docs() call picks
+        // up the newly written document.
+        self.manifest_cache.invalidate().await;
+
         Ok(StoreResult {
             md_path,
             json_path,
