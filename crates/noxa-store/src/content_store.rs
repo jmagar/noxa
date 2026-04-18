@@ -3,10 +3,12 @@
 //! The `.json` sidecar next to each `.md` now uses a versioned envelope format
 //! (`Sidecar`) that keeps the full `ExtractionResult` in `current` plus a
 //! `changelog` of every content change over time.
+mod enumerate;
 mod migrate;
 mod permissions;
 mod write;
 
+pub use enumerate::{DomainEntry, StoredDoc};
 use migrate::parse_sidecar_or_migrate;
 
 use std::path::{Component, PathBuf};

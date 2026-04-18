@@ -1,117 +1,5 @@
 use super::*;
 
-pub(crate) fn sidecar_url_from_value(value: &serde_json::Value) -> Option<String> {
-    if let Some(url) = value["url"].as_str().filter(|s| !s.is_empty()) {
-        return Some(url.to_string());
-    }
-    if let Some(url) = value["current"]["metadata"]["url"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-    {
-        return Some(url.to_string());
-    }
-    value["metadata"]["url"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|url| url.to_string())
-}
-
-pub(crate) fn refresh_domain_dir(store_root: &Path, domain: &str) -> Result<PathBuf, String> {
-    let normalized = normalize_url(domain.trim());
-    let component = url_to_store_path(&normalized)
-        .components()
-        .next()
-        .map(|part| part.as_os_str().to_owned())
-        .ok_or_else(|| format!("invalid refresh domain: {domain}"))?;
-    Ok(store_root.join(component))
-}
-
-pub(crate) async fn read_refresh_sidecar_url(json_path: &Path) -> Result<Option<String>, String> {
-    let contents = tokio::fs::read_to_string(json_path)
-        .await
-        .map_err(|e| format!("failed to read {}: {e}", json_path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&contents)
-        .map_err(|e| format!("failed to parse {}: {e}", json_path.display()))?;
-    Ok(sidecar_url_from_value(&value))
-}
-
-pub(crate) async fn collect_refresh_urls(
-    store_root: &Path,
-    domain: &str,
-) -> Result<Vec<String>, String> {
-    if !tokio::fs::try_exists(store_root)
-        .await
-        .map_err(|e| format!("failed to inspect {}: {e}", store_root.display()))?
-    {
-        return Ok(Vec::new());
-    }
-
-    let domain_dir = refresh_domain_dir(store_root, domain)?;
-    if !tokio::fs::try_exists(&domain_dir)
-        .await
-        .map_err(|e| format!("failed to inspect {}: {e}", domain_dir.display()))?
-    {
-        return Ok(Vec::new());
-    }
-
-    let canonical_root = tokio::fs::canonicalize(store_root)
-        .await
-        .map_err(|e| format!("failed to canonicalize {}: {e}", store_root.display()))?;
-    let mut stack = vec![domain_dir];
-    let mut urls = Vec::new();
-
-    while let Some(dir) = stack.pop() {
-        let canonical_dir = tokio::fs::canonicalize(&dir)
-            .await
-            .map_err(|e| format!("failed to canonicalize {}: {e}", dir.display()))?;
-        if !canonical_dir.starts_with(&canonical_root) {
-            return Err(format!(
-                "refresh traversal escaped content-store root: {}",
-                dir.display()
-            ));
-        }
-
-        let mut entries = tokio::fs::read_dir(&dir)
-            .await
-            .map_err(|e| format!("failed to read {}: {e}", dir.display()))?;
-        let mut paths = Vec::new();
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
-        {
-            paths.push(entry.path());
-        }
-        paths.sort();
-
-        for path in paths {
-            let metadata = tokio::fs::symlink_metadata(&path)
-                .await
-                .map_err(|e| format!("failed to inspect {}: {e}", path.display()))?;
-            let file_type = metadata.file_type();
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            match read_refresh_sidecar_url(&path).await {
-                Ok(Some(url)) => urls.push(url),
-                Ok(None) => {}
-                Err(error) => eprintln!("{yellow}warning:{reset} {error}"),
-            }
-        }
-    }
-
-    urls.sort();
-    urls.dedup();
-    Ok(urls)
-}
-
 pub(crate) async fn run_refresh(
     domain: &str,
     cli: &Cli,
@@ -127,7 +15,12 @@ pub(crate) async fn run_refresh(
     }
 
     let store_root = content_store_root(resolved.output_dir.as_deref());
-    let urls = collect_refresh_urls(&store_root, domain).await?;
+    let store = FilesystemContentStore::new(&store_root);
+    let urls = store
+        .list_domain_urls(domain)
+        .await
+        .map_err(|e| format!("failed to enumerate domain URLs: {e}"))?;
+
     if urls.is_empty() {
         eprintln!("{dim}no cached docs found for{reset} {bold}{domain}{reset}");
         eprintln!("{dim}run:{reset} {cyan}noxa --list {domain}{reset}");
@@ -137,7 +30,6 @@ pub(crate) async fn run_refresh(
     let mut fetch_config = build_fetch_config(cli, resolved);
     fetch_config.store = None;
     let client = FetchClient::new(fetch_config).map_err(|e| format!("client error: {e}"))?;
-    let store = FilesystemContentStore::new(&store_root);
     let options = build_extraction_options(resolved);
 
     let mut unchanged = 0usize;

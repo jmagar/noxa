@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
+pub(crate) async fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
     if !store_root.exists() {
         eprintln!(
             "{dim}no local docs — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --crawl <url>{reset}"
@@ -55,41 +55,29 @@ pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
         return;
     }
 
-    // Fuzzy query — score docs by how many query words appear in URL + title
+    // Fuzzy query — score docs by how many query words appear in URL + title.
     let terms: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
 
-    let mut scored: Vec<(usize, String, std::path::PathBuf)> = Vec::new();
-
-    // Walk and score inline to avoid a second pass
-    let mut all_docs: Vec<(String, std::path::PathBuf)> = Vec::new();
-    collect_docs(&store_root, &store_root, &mut all_docs);
-
+    let store = FilesystemContentStore::new(&store_root);
+    let all_docs = store.list_all_docs().await.unwrap_or_default();
     let total_docs = all_docs.len();
 
-    for (url, path) in all_docs {
-        let url_lower = url.to_lowercase();
-        // Also pull title from JSON sidecar if present.
-        // Support both new Sidecar envelope and legacy raw ExtractionResult.
-        let title_lower = std::fs::read_to_string(path.with_extension("json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| {
-                // New sidecar: nested under current.metadata.title.
-                if let Some(t) = v["current"]["metadata"]["title"].as_str() {
-                    return Some(t.to_lowercase());
-                }
-                // Legacy format: metadata.title at top level.
-                v["metadata"]["title"].as_str().map(|t| t.to_lowercase())
-            })
-            .unwrap_or_default();
-        let score = terms
-            .iter()
-            .filter(|t| url_lower.contains(t.as_str()) || title_lower.contains(t.as_str()))
-            .count();
-        if score > 0 {
-            scored.push((score, url, path));
-        }
-    }
+    let mut scored: Vec<(usize, String, std::path::PathBuf)> = all_docs
+        .into_iter()
+        .filter_map(|doc| {
+            let url_lower = doc.url.to_lowercase();
+            let title_lower = doc.title.as_deref().unwrap_or("").to_lowercase();
+            let score = terms
+                .iter()
+                .filter(|t| url_lower.contains(t.as_str()) || title_lower.contains(t.as_str()))
+                .count();
+            if score > 0 {
+                Some((score, doc.url, doc.md_path))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     if scored.is_empty() {
         eprintln!("{yellow}no cached docs match:{reset} {bold}\"{query}\"{reset}");
@@ -123,4 +111,3 @@ pub(crate) fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
         Err(e) => eprintln!("error reading {}: {e}", best_path.display()),
     }
 }
-

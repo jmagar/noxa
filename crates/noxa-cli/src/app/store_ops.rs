@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn run_list(filter: &str, store_root: std::path::PathBuf) {
+pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
     if !store_root.exists() {
         eprintln!(
             "{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}"
@@ -8,138 +8,51 @@ pub(crate) fn run_list(filter: &str, store_root: std::path::PathBuf) {
         return;
     }
 
+    let store = FilesystemContentStore::new(&store_root);
+
     if filter.is_empty() {
-        // Top-level: list all domain directories with doc counts
-        let mut domains: Vec<(String, usize)> = std::fs::read_dir(&store_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                let count = count_md_files(&e.path());
-                (name, count)
-            })
-            .collect();
-        domains.sort_by(|a, b| a.0.cmp(&b.0));
+        // Top-level: list all domain directories with doc counts.
+        let domains = store.list_domains().await.unwrap_or_default();
 
         if domains.is_empty() {
             eprintln!("{dim}no docs stored yet{reset}");
             return;
         }
 
-        let total: usize = domains.iter().map(|(_, c)| c).sum();
+        let total: usize = domains.iter().map(|d| d.doc_count).sum();
         eprintln!("\n{bold}{cyan}stored docs{reset}  {dim}{total} total{reset}\n");
-        for (domain, count) in &domains {
-            eprintln!("  {bold}{domain}{reset}  {dim}({count}){reset}");
+        for d in &domains {
+            eprintln!("  {bold}{}{reset}  {dim}({}){reset}", d.name, d.doc_count);
         }
         eprintln!("\n{dim}noxa --list <domain>{reset}  {dim}to see individual docs{reset}\n");
     } else {
-        // Domain view: list all docs for matching domain dir, URL → path
+        // Domain view: list all docs for the given domain.
         let domain = filter.strip_prefix("www.").unwrap_or(filter);
-        let Some(domain_component) = validated_domain_component(domain) else {
-            eprintln!("error: invalid domain filter: {filter}");
-            return;
-        };
-        let domain_dir = store_root.join(&domain_component);
-        if !domain_dir.exists() {
-            // Try sanitized form (dots → underscores)
+        let docs = store.list_docs(domain).await.unwrap_or_default();
+
+        if docs.is_empty() {
             eprintln!("{dim}no docs found for{reset} {bold}{filter}{reset}");
             return;
         }
-        list_domain_docs(&domain_dir, &store_root, filter);
-    }
-}
 
-pub(crate) fn count_md_files(dir: &std::path::Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|e| {
-            let p = e.path();
-            if p.is_dir() {
-                count_md_files(&p)
-            } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                1
-            } else {
-                0
-            }
-        })
-        .sum()
-}
+        let url_width = docs.iter().map(|d| d.url.len()).max().unwrap_or(0);
 
-pub(crate) fn list_domain_docs(dir: &std::path::Path, store_root: &std::path::Path, filter: &str) {
-    let mut docs: Vec<(String, std::path::PathBuf)> = Vec::new();
-    collect_docs(dir, store_root, &mut docs);
-    docs.sort_by(|a, b| a.1.cmp(&b.1));
-
-    if docs.is_empty() {
-        eprintln!("{dim}no docs found for {reset}{bold}{filter}{reset}");
-        return;
-    }
-
-    // Measure URL column width for alignment.
-    // Note: uses byte length (url.len()), which is correct for ASCII store keys
-    // (normalized URLs are always ASCII). Non-ASCII display widths would require
-    // the unicode-width crate but are not needed in practice here.
-    let url_width = docs.iter().map(|(url, _)| url.len()).max().unwrap_or(0);
-
-    eprintln!(
-        "\n{bold}{cyan}{filter}{reset}  {dim}({} docs){reset}\n",
-        docs.len()
-    );
-    for (url, path) in &docs {
-        let rel = path.strip_prefix(store_root).unwrap_or(path);
         eprintln!(
-            "  {blue}{url:<url_width$}{reset}  {dim}{}{reset}",
-            rel.display()
+            "\n{bold}{cyan}{filter}{reset}  {dim}({} docs){reset}\n",
+            docs.len()
         );
-    }
-    eprintln!();
-}
-
-#[allow(clippy::only_used_in_recursion)]
-pub(crate) fn collect_docs(
-    dir: &std::path::Path,
-    store_root: &std::path::Path,
-    out: &mut Vec<(String, std::path::PathBuf)>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
-        if path.is_dir() {
-            collect_docs(&path, store_root, out);
-        } else if path.extension().and_then(|x| x.to_str()) == Some("md") {
-            // Read URL from JSON sidecar; fall back to reconstructing from path.
-            // Support both the new Sidecar envelope (url at top-level, metadata
-            // nested under "current") and the legacy raw ExtractionResult format
-            // (metadata at top-level).
-            let json_path = path.with_extension("json");
-            let url = std::fs::read_to_string(&json_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| {
-                    // New sidecar: top-level "url" field.
-                    if let Some(u) = v["url"].as_str().filter(|s| !s.is_empty()) {
-                        return Some(u.to_string());
-                    }
-                    // New sidecar: nested under current.metadata.url.
-                    if let Some(u) = v["current"]["metadata"]["url"].as_str() {
-                        return Some(u.to_string());
-                    }
-                    // Legacy format: metadata.url at top level.
-                    v["metadata"]["url"].as_str().map(|u| u.to_string())
-                });
-            let url = url.or_else(|| reconstruct_url_from_store_path(&path, store_root));
-            if let Some(url) = url {
-                out.push((url, path));
-            }
+        for doc in &docs {
+            let rel = doc
+                .md_path
+                .strip_prefix(&store_root)
+                .unwrap_or(&doc.md_path);
+            eprintln!(
+                "  {blue}{:<url_width$}{reset}  {dim}{}{reset}",
+                doc.url,
+                rel.display()
+            );
         }
+        eprintln!();
     }
 }
 
@@ -239,55 +152,6 @@ pub(crate) fn grep_dir(
             }
         }
     }
-}
-
-fn validated_domain_component(filter: &str) -> Option<String> {
-    let normalized = filter.trim();
-    if normalized.is_empty()
-        || normalized.contains('\0')
-        || normalized.starts_with(['/', '\\'])
-        || normalized
-            .split(['/', '\\'])
-            .any(|part| part == "." || part == "..")
-    {
-        return None;
-    }
-    Some(
-        normalized
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect(),
-    )
-}
-
-fn reconstruct_url_from_store_path(
-    path: &std::path::Path,
-    store_root: &std::path::Path,
-) -> Option<String> {
-    let rel = path.strip_prefix(store_root).ok()?;
-    let mut components = rel.components();
-    let domain = components.next()?.as_os_str().to_str()?.replace('_', ".");
-    let stem = rel.with_extension("");
-    let mut segments = stem
-        .components()
-        .skip(1)
-        .filter_map(|part| part.as_os_str().to_str())
-        .collect::<Vec<_>>();
-    if segments.last().copied() == Some("index") {
-        segments.pop();
-    }
-    let mut url = format!("https://{domain}");
-    if !segments.is_empty() {
-        url.push('/');
-        url.push_str(&segments.join("/"));
-    }
-    Some(url)
 }
 
 fn truncate_display(line: &str, max_chars: usize) -> &str {

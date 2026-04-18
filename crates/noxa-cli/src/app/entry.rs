@@ -60,7 +60,7 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref query) = cli.retrieve {
-        run_retrieve(query, content_store_root(resolved.output_dir.as_deref()));
+        run_retrieve(query, content_store_root(resolved.output_dir.as_deref())).await;
         return;
     }
 
@@ -123,7 +123,7 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref filter) = cli.list {
-        run_list(filter, content_store_root(resolved.output_dir.as_deref()));
+        run_list(filter, content_store_root(resolved.output_dir.as_deref())).await;
         return;
     }
 

@@ -4,6 +4,43 @@ use crate::content_store::FilesystemContentStore;
 use crate::paths::url_to_store_path;
 use crate::types::StoreError;
 
+fn make_extraction_with_url(markdown: &str, url: &str, title: &str) -> noxa_core::ExtractionResult {
+    noxa_core::ExtractionResult {
+        metadata: noxa_core::Metadata {
+            title: Some(title.into()),
+            description: None,
+            author: None,
+            published_date: None,
+            language: None,
+            url: Some(url.to_string()),
+            site_name: None,
+            image: None,
+            favicon: None,
+            word_count: markdown.split_whitespace().count(),
+            content_hash: None,
+            source_type: None,
+            file_path: None,
+            last_modified: None,
+            is_truncated: None,
+            technologies: vec![],
+            seed_url: None,
+            crawl_depth: None,
+            search_query: None,
+            fetched_at: None,
+        },
+        content: noxa_core::Content {
+            markdown: markdown.to_string(),
+            plain_text: markdown.to_string(),
+            links: vec![],
+            images: vec![],
+            code_blocks: vec![],
+            raw_html: None,
+        },
+        domain_data: None,
+        structured_data: vec![],
+    }
+}
+
 fn make_extraction(markdown: &str) -> noxa_core::ExtractionResult {
     noxa_core::ExtractionResult {
         metadata: noxa_core::Metadata {
@@ -412,4 +449,258 @@ async fn test_atomic_write_no_tmp_files_after_completion() {
             "tmp file left behind: {rendered}"
         );
     }
+}
+
+// ── Enumeration API tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_domains_empty_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path().join("nonexistent"));
+    let domains = store.list_domains().await.unwrap();
+    assert!(domains.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_domains_returns_entries_with_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://example.com/page1",
+            &make_extraction_with_url("content a", "https://example.com/page1", "Page 1"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://example.com/page2",
+            &make_extraction_with_url("content b", "https://example.com/page2", "Page 2"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://docs.example.com/intro",
+            &make_extraction_with_url("intro", "https://docs.example.com/intro", "Intro"),
+        )
+        .await
+        .unwrap();
+
+    let domains = store.list_domains().await.unwrap();
+    assert_eq!(domains.len(), 2);
+    // Alphabetical order
+    assert_eq!(domains[0].name, "docs_example_com");
+    assert_eq!(domains[0].doc_count, 1);
+    assert_eq!(domains[1].name, "example_com");
+    assert_eq!(domains[1].doc_count, 2);
+}
+
+#[tokio::test]
+async fn test_list_docs_filters_by_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://example.com/page",
+            &make_extraction_with_url("content", "https://example.com/page", "Page"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://other.com/page",
+            &make_extraction_with_url("other", "https://other.com/page", "Other"),
+        )
+        .await
+        .unwrap();
+
+    let docs = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].url, "https://example.com/page");
+    assert_eq!(docs[0].title.as_deref(), Some("Page"));
+}
+
+#[tokio::test]
+async fn test_list_docs_strips_www_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://example.com/about",
+            &make_extraction_with_url("about", "https://example.com/about", "About"),
+        )
+        .await
+        .unwrap();
+
+    let docs_with_www = store.list_docs("www.example.com").await.unwrap();
+    let docs_without_www = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs_with_www.len(), 1);
+    assert_eq!(docs_without_www.len(), 1);
+    assert_eq!(docs_with_www[0].url, docs_without_www[0].url);
+}
+
+#[tokio::test]
+async fn test_list_docs_nonexistent_domain_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let docs = store.list_docs("nothere.example.com").await.unwrap();
+    assert!(docs.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_docs_legacy_sidecar_format() {
+    // Write a legacy raw ExtractionResult (no Sidecar envelope) directly to disk.
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let extraction = make_extraction_with_url("# Legacy", "https://example.com/legacy", "Legacy");
+    let rel = url_to_store_path("https://example.com/legacy");
+    let json_path = dir.path().join(&rel).with_extension("json");
+    let md_path = dir.path().join(&rel).with_extension("md");
+    tokio::fs::create_dir_all(json_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&json_path, serde_json::to_vec(&extraction).unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&md_path, b"# Legacy")
+        .await
+        .unwrap();
+
+    let docs = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs.len(), 1);
+    assert!(docs[0].url.contains("example.com"));
+}
+
+#[tokio::test]
+async fn test_list_docs_missing_sidecar_falls_back_to_url_reconstruction() {
+    // Write only the .md file, no .json sidecar.
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let rel = url_to_store_path("https://example.com/noside");
+    let md_path = dir.path().join(&rel).with_extension("md");
+    tokio::fs::create_dir_all(md_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&md_path, b"content").await.unwrap();
+
+    let docs = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs.len(), 1);
+    // Reconstructed URL should at least contain the domain
+    assert!(docs[0].url.contains("example.com"));
+}
+
+#[tokio::test]
+async fn test_list_all_docs_empty_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path().join("nonexistent"));
+    let docs = store.list_all_docs().await.unwrap();
+    assert!(docs.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_all_docs_spans_multiple_domains() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://alpha.com/a",
+            &make_extraction_with_url("a", "https://alpha.com/a", "A"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://beta.com/b",
+            &make_extraction_with_url("b", "https://beta.com/b", "B"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://alpha.com/c",
+            &make_extraction_with_url("c", "https://alpha.com/c", "C"),
+        )
+        .await
+        .unwrap();
+
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(docs.len(), 3);
+    let urls: Vec<&str> = docs.iter().map(|d| d.url.as_str()).collect();
+    assert!(urls.contains(&"https://alpha.com/a"));
+    assert!(urls.contains(&"https://alpha.com/c"));
+    assert!(urls.contains(&"https://beta.com/b"));
+}
+
+#[tokio::test]
+async fn test_list_domain_urls_scoped_to_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://docs.example.com/book",
+            &make_extraction_with_url("book", "https://docs.example.com/book", "Book"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://other.com/page",
+            &make_extraction_with_url("page", "https://other.com/page", "Page"),
+        )
+        .await
+        .unwrap();
+
+    let urls = store
+        .list_domain_urls("docs.example.com")
+        .await
+        .unwrap();
+    assert_eq!(urls.len(), 1);
+    assert_eq!(urls[0], "https://docs.example.com/book");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_list_domain_urls_skips_symlink_escapes() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store_root = dir.path().join("content");
+    let outside_dir = dir.path().join("outside");
+    tokio::fs::create_dir_all(&store_root).await.unwrap();
+    tokio::fs::create_dir_all(&outside_dir).await.unwrap();
+
+    let store = FilesystemContentStore::new(&store_root);
+    store
+        .write(
+            "https://example.com/legit",
+            &make_extraction_with_url("legit", "https://example.com/legit", "Legit"),
+        )
+        .await
+        .unwrap();
+
+    // Plant a JSON file outside the store root
+    tokio::fs::write(
+        outside_dir.join("evil.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "url": "https://attacker.example/secret",
+            "first_seen": "2024-01-01T00:00:00Z",
+            "last_fetched": "2024-01-01T00:00:00Z",
+            "fetch_count": 1,
+            "current": { "metadata": {}, "content": {} },
+            "changelog": []
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+
+    // Create a symlink inside the domain dir pointing outside
+    let domain_dir = store_root.join("example_com");
+    symlink(&outside_dir, domain_dir.join("escape")).unwrap();
+
+    let urls = store.list_domain_urls("example.com").await.unwrap();
+    // Only the legit URL should appear; the symlink escape should be skipped
+    assert_eq!(urls, vec!["https://example.com/legit".to_string()]);
 }

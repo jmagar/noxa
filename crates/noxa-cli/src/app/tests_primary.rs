@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collect_refresh_urls_is_domain_scoped() {
+    async fn list_domain_urls_is_domain_scoped() {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("content");
         tokio::fs::create_dir_all(&store_root).await.unwrap();
@@ -249,7 +249,8 @@ mod tests {
             .await
             .unwrap();
 
-        let urls = collect_refresh_urls(&store_root, "docs.rust-lang.org")
+        let urls = store
+            .list_domain_urls("docs.rust-lang.org")
             .await
             .unwrap();
         assert_eq!(urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
@@ -257,7 +258,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn collect_refresh_urls_skips_symlink_escapes() {
+    async fn list_domain_urls_skips_symlink_escapes() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -273,7 +274,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let domain_dir = refresh_domain_dir(&store_root, "docs.rust-lang.org").unwrap();
+
+        // Compute the domain dir path inline (was refresh_domain_dir).
+        let domain_dir = store_root.join("docs_rust-lang_org");
         tokio::fs::write(
             outside_dir.join("evil.json"),
             serde_json::json!({
@@ -287,7 +290,8 @@ mod tests {
 
         symlink(&outside_dir, domain_dir.join("escape")).unwrap();
 
-        let urls = collect_refresh_urls(&store_root, "docs.rust-lang.org")
+        let urls = store
+            .list_domain_urls("docs.rust-lang.org")
             .await
             .unwrap();
         assert_eq!(urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
