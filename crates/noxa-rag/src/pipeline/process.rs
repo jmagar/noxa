@@ -197,7 +197,7 @@ pub(crate) async fn process_job(
             upsert_ms: 0,
         });
     }
-    let url = crate::store::qdrant::normalize_url(&raw_url);
+    let url = crate::url_util::normalize_url(&raw_url);
 
     let t1 = std::time::Instant::now();
     let chunks = crate::chunker::chunk(&result, &config.chunker, tokenizer);
