@@ -1,17 +1,17 @@
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+
 use reqwest::header::HeaderMap;
 
 use crate::error::RagError;
 
 mod http;
 mod lifecycle;
-mod normalize;
 mod payload;
 mod vector_store;
 
 #[cfg(test)]
 mod tests;
-
-pub(crate) use normalize::normalize_url;
 
 /// Qdrant-backed vector store.
 pub struct QdrantStore {
@@ -19,6 +19,9 @@ pub struct QdrantStore {
     base_url: String,
     collection: String,
     _uuid_namespace: uuid::Uuid,
+    /// Cumulative count of payload decode failures observed during search.
+    /// Incremented atomically so tests can assert failures were counted.
+    pub(crate) decode_errors: Arc<AtomicU64>,
 }
 
 impl QdrantStore {
@@ -48,6 +51,7 @@ impl QdrantStore {
             base_url: url.trim_end_matches('/').to_string(),
             collection,
             _uuid_namespace: uuid_namespace,
+            decode_errors: Arc::new(AtomicU64::new(0)),
         })
     }
 }

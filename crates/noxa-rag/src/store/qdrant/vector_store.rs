@@ -1,5 +1,8 @@
+use std::sync::atomic::Ordering;
+
 use async_trait::async_trait;
 use serde_json::json;
+use tracing::warn;
 
 use crate::error::RagError;
 use crate::store::{HashExistsResult, VectorStore};
@@ -44,34 +47,8 @@ impl VectorStore for QdrantStore {
     }
 
     /// POST /collections/{name}/points/delete?wait=true filtered by url payload.
-    async fn delete_by_url(&self, url: &str) -> Result<u64, RagError> {
+    async fn delete_by_url(&self, url: &str) -> Result<(), RagError> {
         let normalized = normalize_url(url);
-        let count_endpoint = format!(
-            "{}/collections/{}/points/count",
-            self.base_url, self.collection
-        );
-        let count_body = json!({
-            "filter": {
-                "must": [{ "key": "url", "match": { "value": normalized } }]
-            },
-            "exact": true
-        });
-        let stale_count: u64 = match self
-            .client
-            .post(&count_endpoint)
-            .json(&count_body)
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v["result"]["count"].as_u64())
-                .unwrap_or(0),
-            _ => 0,
-        };
-
         let endpoint = format!(
             "{}/collections/{}/points/delete?wait=true",
             self.base_url, self.collection
@@ -89,14 +66,14 @@ impl VectorStore for QdrantStore {
             return Err(RagError::Store(format!("delete_by_url failed: {preview}")));
         }
 
-        Ok(stale_count)
+        Ok(())
     }
 
     async fn delete_stale_by_url(
         &self,
         url: &str,
         keep_ids: &[uuid::Uuid],
-    ) -> Result<u64, RagError> {
+    ) -> Result<(), RagError> {
         let normalized = normalize_url(url);
         let filter = if keep_ids.is_empty() {
             json!({
@@ -109,42 +86,6 @@ impl VectorStore for QdrantStore {
                 "must_not": [{ "has_id": id_strs }]
             })
         };
-
-        let count_endpoint = format!(
-            "{}/collections/{}/points/count",
-            self.base_url, self.collection
-        );
-        let stale_count: u64 = match self
-            .client
-            .post(&count_endpoint)
-            .json(&json!({ "filter": filter.clone(), "exact": true }))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v["result"]["count"].as_u64())
-                .unwrap_or(0),
-            Ok(r) => {
-                let status = r.status();
-                let text = r.text().await.unwrap_or_default();
-                let preview: String = text.chars().take(512).collect();
-                return Err(RagError::Store(format!(
-                    "delete_stale_by_url count failed with HTTP {status}: {preview}"
-                )));
-            }
-            Err(e) => {
-                return Err(RagError::Store(format!(
-                    "delete_stale_by_url count request failed: {e}"
-                )));
-            }
-        };
-
-        if stale_count == 0 {
-            return Ok(0);
-        }
 
         let endpoint = format!(
             "{}/collections/{}/points/delete?wait=true",
@@ -164,7 +105,7 @@ impl VectorStore for QdrantStore {
             )));
         }
 
-        Ok(stale_count)
+        Ok(())
     }
 
     async fn search(
@@ -193,14 +134,46 @@ impl VectorStore for QdrantStore {
         }
 
         let response: SearchResponse = resp.json().await?;
+        let mut decode_failures: u64 = 0;
         let results = response
             .result
             .into_iter()
             .filter_map(|hit| {
-                hit.payload
-                    .and_then(|payload| search_result_from_payload(hit.score, payload))
+                let point_id = hit.id.as_ref().map(|v| v.to_string());
+                match hit.payload {
+                    None => {
+                        decode_failures += 1;
+                        self.decode_errors.fetch_add(1, Ordering::Relaxed);
+                        warn!(
+                            point_id = ?point_id,
+                            "qdrant search hit has no payload; dropping from results"
+                        );
+                        None
+                    }
+                    Some(payload) => match search_result_from_payload(hit.score, payload) {
+                        Ok(result) => Some(result),
+                        Err(err) => {
+                            decode_failures += 1;
+                            self.decode_errors.fetch_add(1, Ordering::Relaxed);
+                            warn!(
+                                point_id = ?point_id,
+                                error = %err,
+                                "qdrant search payload decode failed; dropping from results"
+                            );
+                            None
+                        }
+                    },
+                }
             })
             .collect();
+
+        if decode_failures > 0 {
+            warn!(
+                count = decode_failures,
+                collection = %self.collection,
+                "qdrant search returned {decode_failures} point(s) with malformed or missing payloads"
+            );
+        }
 
         Ok(results)
     }

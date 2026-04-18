@@ -48,7 +48,7 @@ pub(crate) fn search_filter(filter: Option<&SearchMetadataFilter>) -> Option<ser
 pub(crate) fn search_result_from_payload(
     score: f32,
     payload: HashMap<String, serde_json::Value>,
-) -> Option<SearchResult> {
+) -> Result<SearchResult, serde_json::Error> {
     let json = serde_json::Value::Object(payload.into_iter().collect());
     #[derive(Debug, Deserialize)]
     struct SearchResultPayload {
@@ -102,9 +102,9 @@ pub(crate) fn search_result_from_payload(
         subtitle_source_file: Option<String>,
     }
 
-    let point_payload: SearchResultPayload = serde_json::from_value(json).ok()?;
+    let point_payload: SearchResultPayload = serde_json::from_value(json)?;
 
-    Some(SearchResult {
+    Ok(SearchResult {
         text: point_payload.text,
         url: point_payload.url,
         score,

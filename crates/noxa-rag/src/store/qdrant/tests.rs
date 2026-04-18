@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::config::{
@@ -566,5 +567,108 @@ async fn url_with_hash_exists_checked_returns_not_indexed_on_zero_count() {
         result,
         HashExistsResult::NotIndexed,
         "expected NotIndexed when count == 0"
+    );
+}
+
+/// Search responses with one valid hit and one malformed payload should:
+/// - Return only the valid result (malformed hit is excluded).
+/// - Increment the `decode_errors` counter on the store so the failure is observable.
+#[tokio::test]
+async fn search_logs_and_counts_malformed_payload_without_dropping_valid_results() {
+    let (base_url, _requests, handle) = spawn_test_server(|_request| {
+        serde_json::json!({
+            "result": [
+                {
+                    // Valid hit — all required fields present.
+                    "id": "aaaaaaaa-0000-0000-0000-000000000001",
+                    "score": 0.85,
+                    "payload": {
+                        "text": "valid chunk",
+                        "url": "https://example.com/page",
+                        "chunk_index": 0,
+                        "token_estimate": 42
+                    }
+                },
+                {
+                    // Malformed hit — missing required `text` and `url` fields.
+                    "id": "aaaaaaaa-0000-0000-0000-000000000002",
+                    "score": 0.72,
+                    "payload": {
+                        "chunk_index": 1,
+                        "token_estimate": 10
+                    }
+                }
+            ]
+        })
+        .to_string()
+    })
+    .await;
+
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
+
+    let results = store
+        .search(&[0.1, 0.9], 5, None)
+        .await
+        .expect("search should succeed despite malformed hit");
+
+    handle.abort();
+
+    // Only the valid hit should be returned.
+    assert_eq!(results.len(), 1, "expected exactly 1 valid result");
+    assert_eq!(results[0].text, "valid chunk");
+    assert_eq!(results[0].url, "https://example.com/page");
+
+    // The decode_errors counter must reflect the one malformed hit.
+    let errors = store.decode_errors.load(Ordering::Relaxed);
+    assert_eq!(
+        errors, 1,
+        "expected decode_errors counter to be 1 after one malformed payload"
+    );
+}
+
+/// When a search hit has no payload at all (None), it should be excluded from
+/// results and counted in decode_errors — not silently vanish.
+#[tokio::test]
+async fn search_counts_missing_payload_as_decode_error() {
+    let (base_url, _requests, handle) = spawn_test_server(|_request| {
+        serde_json::json!({
+            "result": [
+                {
+                    "id": "bbbbbbbb-0000-0000-0000-000000000001",
+                    "score": 0.90,
+                    "payload": {
+                        "text": "good chunk",
+                        "url": "https://example.com/good"
+                    }
+                },
+                {
+                    // Hit with no payload key at all.
+                    "id": "bbbbbbbb-0000-0000-0000-000000000002",
+                    "score": 0.60
+                }
+            ]
+        })
+        .to_string()
+    })
+    .await;
+
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
+
+    let results = store
+        .search(&[0.5, 0.5], 5, None)
+        .await
+        .expect("search should succeed despite missing payload");
+
+    handle.abort();
+
+    assert_eq!(results.len(), 1, "expected exactly 1 valid result");
+    assert_eq!(results[0].text, "good chunk");
+
+    let errors = store.decode_errors.load(Ordering::Relaxed);
+    assert_eq!(
+        errors, 1,
+        "expected decode_errors counter to be 1 after one missing payload"
     );
 }
