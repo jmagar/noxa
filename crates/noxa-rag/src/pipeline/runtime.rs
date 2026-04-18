@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -6,11 +7,12 @@ use futures::stream::{self, StreamExt};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
 use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use crate::config::SourceConfig;
 use crate::error::RagError;
-use crate::store::HashExistsResult;
+use crate::store::{DynVectorStore, HashExistsResult};
 
 use super::process;
 use super::scan;
@@ -19,31 +21,29 @@ use super::{IndexJob, Pipeline};
 /// Maximum concurrent Qdrant existence probes during startup delta scan.
 const STARTUP_SCAN_CONCURRENCY: usize = 16;
 
-pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
-    let (watch_dir, debounce_ms) = match &pipeline.config.source {
-        SourceConfig::FsWatcher {
-            watch_dir,
-            debounce_ms,
-        } => (watch_dir.clone(), *debounce_ms),
-    };
+// ---------------------------------------------------------------------------
+// BoundedSender — sync bridge for notify_debouncer_mini events into a bounded
+// std::sync::mpsc channel.  Must NOT be pub.
+// ---------------------------------------------------------------------------
 
-    if pipeline.config.pipeline.embed_concurrency == 0 {
-        return Err(RagError::Config(
-            "pipeline.embed_concurrency must be > 0 or no workers will run".to_string(),
-        ));
+struct BoundedSender(std::sync::mpsc::SyncSender<DebounceEventResult>);
+
+impl notify_debouncer_mini::DebounceEventHandler for BoundedSender {
+    fn handle_event(&mut self, event: DebounceEventResult) {
+        let _ = self.0.send(event);
     }
+}
 
-    tracing::info!(
-        watch_dir = %watch_dir.display(),
-        debounce_ms,
-        embed_concurrency = pipeline.config.pipeline.embed_concurrency,
-        "pipeline starting"
-    );
+// ---------------------------------------------------------------------------
+// Component: worker pool
+// ---------------------------------------------------------------------------
 
-    let watch_root = Arc::new(scan::canonical_watch_root(&watch_dir).await?);
-    let (tx, rx) = mpsc::channel::<IndexJob>(256);
-    let rx = Arc::new(Mutex::new(rx));
-    let mut worker_handles = Vec::with_capacity(pipeline.config.pipeline.embed_concurrency);
+fn spawn_workers(
+    pipeline: &Pipeline,
+    rx: Arc<Mutex<mpsc::Receiver<IndexJob>>>,
+    watch_root: Arc<PathBuf>,
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(pipeline.config.pipeline.embed_concurrency);
 
     for worker_id in 0..pipeline.config.pipeline.embed_concurrency {
         let rx = rx.clone();
@@ -115,23 +115,37 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
             }
         });
 
-        worker_handles.push(handle);
+        handles.push(handle);
     }
 
-    struct BoundedSender(std::sync::mpsc::SyncSender<DebounceEventResult>);
-    impl notify_debouncer_mini::DebounceEventHandler for BoundedSender {
-        fn handle_event(&mut self, event: DebounceEventResult) {
-            let _ = self.0.send(event);
-        }
-    }
+    handles
+}
 
+// ---------------------------------------------------------------------------
+// Component: fs watcher + blocking bridge
+// ---------------------------------------------------------------------------
+
+/// Creates the fs debouncer, registers the watch directory, and spawns the
+/// blocking bridge task that forwards events into `tx`.  Returns the bridge
+/// `JoinHandle` so the caller can await it during shutdown.
+///
+/// The debouncer is moved into the `spawn_blocking` closure so it stays alive
+/// for the entire lifetime of the bridge task.
+fn setup_watcher(
+    watch_dir: &Path,
+    debounce_ms: u64,
+    tx: mpsc::Sender<IndexJob>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<JoinHandle<()>, RagError> {
     let (notify_tx, notify_rx) = std::sync::mpsc::sync_channel::<DebounceEventResult>(256);
-    let mut debouncer = new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
-        .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
+
+    let mut debouncer =
+        new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
+            .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
 
     debouncer
         .watcher()
-        .watch(&watch_dir, RecursiveMode::Recursive)
+        .watch(watch_dir, RecursiveMode::Recursive)
         .map_err(|e| {
             RagError::Generic(format!(
                 "failed to watch directory {}: {e}",
@@ -141,28 +155,28 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
 
     tracing::info!(path = %watch_dir.display(), "watching directory recursively");
 
-    let shutdown_clone = pipeline.shutdown.clone();
-    let tx_clone = tx.clone();
     let bridge_handle = tokio::task::spawn_blocking(move || {
+        // Keep debouncer alive for the duration of the bridge.
         let _debouncer = debouncer;
 
         loop {
             match notify_rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(Ok(events)) => {
-                    if shutdown_clone.is_cancelled() {
+                    if shutdown.is_cancelled() {
                         break;
                     }
                     for event in events {
                         for path in scan::collect_indexable_paths(&event.path) {
-                            let span = tracing::info_span!("index_job", path = %path.display());
+                            let span =
+                                tracing::info_span!("index_job", path = %path.display());
                             let job = IndexJob { path, span };
                             let mut pending_job = job;
                             let mut saturated_logged = false;
                             loop {
-                                match tx_clone.try_send(pending_job) {
+                                match tx.try_send(pending_job) {
                                     Ok(()) => break,
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(job)) => {
-                                        if shutdown_clone.is_cancelled() {
+                                        if shutdown.is_cancelled() {
                                             break;
                                         }
                                         if !saturated_logged {
@@ -186,7 +200,7 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
                     tracing::warn!(error = ?e, "fs watcher error");
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if shutdown_clone.is_cancelled() {
+                    if shutdown.is_cancelled() {
                         break;
                     }
                 }
@@ -199,13 +213,22 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         tracing::info!("fs watcher bridge exiting");
     });
 
-    let scan_tx = tx.clone();
-    let scan_store = pipeline.store.clone();
-    let scan_shutdown = pipeline.shutdown.clone();
-    let scan_watch_dir = watch_dir.clone();
-    let startup_handle = tokio::spawn(async move {
+    Ok(bridge_handle)
+}
+
+// ---------------------------------------------------------------------------
+// Component: startup delta scan
+// ---------------------------------------------------------------------------
+
+fn spawn_startup_scan(
+    tx: mpsc::Sender<IndexJob>,
+    store: DynVectorStore,
+    shutdown: tokio_util::sync::CancellationToken,
+    watch_dir: PathBuf,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         let paths = match tokio::task::spawn_blocking({
-            let dir = scan_watch_dir.clone();
+            let dir = watch_dir.clone();
             move || scan::collect_indexable_paths(&dir)
         })
         .await
@@ -226,15 +249,15 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
 
         stream::iter(paths)
             .for_each_concurrent(STARTUP_SCAN_CONCURRENCY, |path| {
-                let scan_tx = scan_tx.clone();
-                let scan_store = scan_store.clone();
-                let scan_shutdown = scan_shutdown.clone();
+                let tx = tx.clone();
+                let store = store.clone();
+                let shutdown = shutdown.clone();
                 let queued = Arc::clone(&queued);
                 let skipped = Arc::clone(&skipped);
                 let backend_errors = Arc::clone(&backend_errors);
 
                 async move {
-                    if scan_shutdown.is_cancelled() {
+                    if shutdown.is_cancelled() {
                         return;
                     }
 
@@ -252,17 +275,18 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
                                 path = %path.display(),
                                 "startup scan: no url/hash, queuing"
                             );
-                            let span = tracing::info_span!("index_job", path = %path.display());
+                            let span =
+                                tracing::info_span!("index_job", path = %path.display());
                             tokio::select! {
-                                _ = scan_tx.send(IndexJob { path, span }) => {}
-                                _ = scan_shutdown.cancelled() => {}
+                                _ = tx.send(IndexJob { path, span }) => {}
+                                _ = shutdown.cancelled() => {}
                             }
                             queued.fetch_add(1, Ordering::Relaxed);
                             return;
                         }
                     };
 
-                    match scan_store.url_with_hash_exists_checked(&url, &hash).await {
+                    match store.url_with_hash_exists_checked(&url, &hash).await {
                         HashExistsResult::Exists => {
                             skipped.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(
@@ -272,10 +296,11 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
                             );
                         }
                         HashExistsResult::NotIndexed => {
-                            let span = tracing::info_span!("index_job", path = %path.display());
+                            let span =
+                                tracing::info_span!("index_job", path = %path.display());
                             tokio::select! {
-                                _ = scan_tx.send(IndexJob { path, span }) => {}
-                                _ = scan_shutdown.cancelled() => {}
+                                _ = tx.send(IndexJob { path, span }) => {}
+                                _ = shutdown.cancelled() => {}
                             }
                             queued.fetch_add(1, Ordering::Relaxed);
                         }
@@ -310,12 +335,19 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         } else {
             tracing::info!(total, queued, skipped, "startup scan complete");
         }
-    });
+    })
+}
 
-    let heartbeat_counters = pipeline.counters.clone();
-    let heartbeat_shutdown = pipeline.shutdown.clone();
-    let session_start = Instant::now();
-    let heartbeat_handle = tokio::spawn(async move {
+// ---------------------------------------------------------------------------
+// Component: heartbeat / metrics ticker
+// ---------------------------------------------------------------------------
+
+fn spawn_heartbeat(
+    counters: Arc<super::SessionCounters>,
+    shutdown: tokio_util::sync::CancellationToken,
+    session_start: Instant,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.tick().await;
         loop {
@@ -323,26 +355,27 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
                 _ = interval.tick() => {
                     let uptime_m = session_start.elapsed().as_secs() / 60;
                     tracing::info!(
-                        indexed = heartbeat_counters.files_indexed.load(std::sync::atomic::Ordering::Relaxed),
-                        failed = heartbeat_counters.files_failed.load(std::sync::atomic::Ordering::Relaxed),
+                        indexed = counters.files_indexed.load(std::sync::atomic::Ordering::Relaxed),
+                        failed  = counters.files_failed.load(std::sync::atomic::Ordering::Relaxed),
                         uptime_m,
                         "pipeline alive"
                     );
                 }
-                _ = heartbeat_shutdown.cancelled() => break,
+                _ = shutdown.cancelled() => break,
             }
         }
-    });
+    })
+}
 
-    pipeline.shutdown.cancelled().await;
-    tracing::info!("shutdown signal received, draining pipeline");
+// ---------------------------------------------------------------------------
+// Component: shutdown drain + final metrics
+// ---------------------------------------------------------------------------
 
-    drop(tx);
-
-    let _ = bridge_handle.await;
-    let _ = heartbeat_handle.await;
-    let _ = startup_handle.await;
-
+async fn drain_and_report(
+    worker_handles: Vec<JoinHandle<()>>,
+    pipeline: &Pipeline,
+    session_start: Instant,
+) -> Result<(), RagError> {
     let drain = async {
         for handle in worker_handles {
             let _ = handle.await;
@@ -378,16 +411,8 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         .counters
         .total_upsert_ms
         .load(std::sync::atomic::Ordering::Relaxed);
-    let avg_embed_ms = if indexed > 0 {
-        embed_ms / indexed as u64
-    } else {
-        0
-    };
-    let avg_upsert_ms = if indexed > 0 {
-        upsert_ms / indexed as u64
-    } else {
-        0
-    };
+    let avg_embed_ms = if indexed > 0 { embed_ms / indexed as u64 } else { 0 };
+    let avg_upsert_ms = if indexed > 0 { upsert_ms / indexed as u64 } else { 0 };
     tracing::info!(
         indexed,
         failed,
@@ -399,4 +424,77 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point — thin composer
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
+    // --- validate config & extract source params ---
+    let (watch_dir, debounce_ms) = match &pipeline.config.source {
+        SourceConfig::FsWatcher { watch_dir, debounce_ms } => {
+            (watch_dir.clone(), *debounce_ms)
+        }
+    };
+
+    if pipeline.config.pipeline.embed_concurrency == 0 {
+        return Err(RagError::Config(
+            "pipeline.embed_concurrency must be > 0 or no workers will run".to_string(),
+        ));
+    }
+
+    tracing::info!(
+        watch_dir = %watch_dir.display(),
+        debounce_ms,
+        embed_concurrency = pipeline.config.pipeline.embed_concurrency,
+        "pipeline starting"
+    );
+
+    let session_start = Instant::now();
+    let watch_root = Arc::new(scan::canonical_watch_root(&watch_dir).await?);
+
+    // --- channel ---
+    let (tx, rx) = mpsc::channel::<IndexJob>(256);
+    let rx = Arc::new(Mutex::new(rx));
+
+    // --- spawn workers ---
+    let worker_handles = spawn_workers(pipeline, rx, watch_root);
+
+    // --- setup fs watcher + blocking bridge ---
+    let bridge_handle = setup_watcher(
+        &watch_dir,
+        debounce_ms,
+        tx.clone(),
+        pipeline.shutdown.clone(),
+    )?;
+
+    // --- startup delta scan ---
+    let startup_handle = spawn_startup_scan(
+        tx.clone(),
+        pipeline.store.clone(),
+        pipeline.shutdown.clone(),
+        watch_dir.clone(),
+    );
+
+    // --- heartbeat ---
+    let heartbeat_handle = spawn_heartbeat(
+        pipeline.counters.clone(),
+        pipeline.shutdown.clone(),
+        session_start,
+    );
+
+    // --- wait for shutdown signal ---
+    pipeline.shutdown.cancelled().await;
+    tracing::info!("shutdown signal received, draining pipeline");
+
+    // Drop tx BEFORE awaiting workers so their recv loops see channel closed.
+    drop(tx);
+
+    let _ = bridge_handle.await;
+    let _ = heartbeat_handle.await;
+    let _ = startup_handle.await;
+
+    // --- drain workers + log final metrics ---
+    drain_and_report(worker_handles, pipeline, session_start).await
 }
