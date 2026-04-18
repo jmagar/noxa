@@ -190,6 +190,7 @@ pub fn extract_linkedin_post(html: &str, url: &str) -> Option<ExtractionResult> 
     }
 
     let word_count = markdown.split_whitespace().count();
+    let plain_text = crate::document::strip_markdown_formatting(&markdown);
     debug!(
         word_count,
         comments = comments.len(),
@@ -229,7 +230,7 @@ pub fn extract_linkedin_post(html: &str, url: &str) -> Option<ExtractionResult> 
         },
         content: Content {
             markdown,
-            plain_text: String::new(),
+            plain_text,
             links: vec![],
             images: vec![],
             code_blocks: vec![],
@@ -286,4 +287,56 @@ fn html_unescape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_linkedin_post_populates_plain_text() {
+        let payload = serde_json::json!({
+            "included": [
+                {
+                    "$type": "com.linkedin.voyager.feed.render.Update",
+                    "actor": {
+                        "name": { "text": "Alice Example" },
+                        "description": { "text": "Founder" }
+                    },
+                    "commentary": {
+                        "text": {
+                            "text": "Shipping the new parser\\nwith better extraction."
+                        }
+                    }
+                },
+                {
+                    "$type": "com.linkedin.voyager.feed.Comment",
+                    "commenter": { "title": { "text": "Bob Reader" } },
+                    "commentary": { "text": "Looks good to me." }
+                }
+            ],
+            "padding": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        });
+        let html = format!("<html><body><code>{payload}</code></body></html>");
+
+        let result = extract_linkedin_post(
+            &html,
+            "https://www.linkedin.com/feed/update/urn:li:activity:1",
+        )
+        .expect("linkedin extraction should succeed");
+
+        assert!(
+            result
+                .content
+                .plain_text
+                .contains("Shipping the new parser"),
+            "plain_text should include post body: {:?}",
+            result.content.plain_text
+        );
+        assert!(
+            result.content.plain_text.contains("Looks good to me."),
+            "plain_text should include comment text: {:?}",
+            result.content.plain_text
+        );
+    }
 }

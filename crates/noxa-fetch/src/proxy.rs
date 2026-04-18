@@ -13,13 +13,29 @@ use crate::error::FetchError;
 pub fn parse_proxy_line(line: &str) -> Option<String> {
     let parts: Vec<&str> = line.trim().splitn(4, ':').collect();
     match parts.len() {
-        4 => Some(format!(
-            "http://{}:{}@{}:{}",
-            parts[2], parts[3], parts[0], parts[1]
-        )),
-        2 => Some(format!("http://{}:{}", parts[0], parts[1])),
+        4 => build_proxy_url(parts[0], parts[1], Some(parts[2]), Some(parts[3])),
+        2 => build_proxy_url(parts[0], parts[1], None, None),
         _ => None,
     }
+}
+
+fn build_proxy_url(
+    host: &str,
+    port: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Option<String> {
+    let port = port.parse::<u16>().ok()?;
+    let mut url = url::Url::parse("http://placeholder").ok()?;
+    url.set_host(Some(host)).ok()?;
+    url.set_port(Some(port)).ok()?;
+    if let Some(username) = username {
+        url.set_username(username).ok()?;
+    }
+    if let Some(password) = password {
+        url.set_password(Some(password)).ok()?;
+    }
+    Some(url.to_string().trim_end_matches('/').to_string())
 }
 
 /// Load proxies from a file, returning parsed HTTP proxy URLs.
@@ -78,10 +94,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_percent_encodes_credentials() {
+        let result = parse_proxy_line("proxy.example.com:8080:alice@example.com:p@ss word");
+        assert_eq!(
+            result.as_deref(),
+            Some("http://alice%40example.com:p%40ss%20word@proxy.example.com:8080")
+        );
+    }
+
+    #[test]
     fn parse_invalid_returns_none() {
         assert!(parse_proxy_line("just-a-hostname").is_none());
         assert!(parse_proxy_line("a:b:c").is_none()); // 3 parts is invalid
         assert!(parse_proxy_line("").is_none());
+        assert!(parse_proxy_line("proxy.example.com:notaport").is_none());
     }
 
     #[test]

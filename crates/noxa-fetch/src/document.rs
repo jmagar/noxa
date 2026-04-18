@@ -7,6 +7,9 @@ use tracing::debug;
 
 use crate::error::FetchError;
 
+const MAX_DOCX_ARCHIVE_ENTRIES: usize = 256;
+const MAX_DOCX_XML_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocType {
     Docx,
@@ -141,10 +144,23 @@ fn extract_docx(bytes: &[u8]) -> Result<String, FetchError> {
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| FetchError::Build(format!("DOCX zip: {e}")))?;
 
+    if archive.len() > MAX_DOCX_ARCHIVE_ENTRIES {
+        return Err(FetchError::Limit(format!(
+            "DOCX archive has too many entries: {} > {MAX_DOCX_ARCHIVE_ENTRIES}",
+            archive.len()
+        )));
+    }
+
     let xml = {
         let mut file = archive
             .by_name("word/document.xml")
             .map_err(|e| FetchError::Build(format!("DOCX missing document.xml: {e}")))?;
+        if file.size() > MAX_DOCX_XML_BYTES {
+            return Err(FetchError::Limit(format!(
+                "DOCX document.xml too large: {} > {MAX_DOCX_XML_BYTES} bytes",
+                file.size()
+            )));
+        }
         let mut buf = String::new();
         file.read_to_string(&mut buf)
             .map_err(|e| FetchError::BodyDecode(format!("DOCX read: {e}")))?;
@@ -459,7 +475,7 @@ fn rows_to_markdown_table(rows: &[Vec<String>]) -> String {
 }
 
 /// Strip markdown formatting to get plain text.
-fn strip_markdown_formatting(markdown: &str) -> String {
+pub(crate) fn strip_markdown_formatting(markdown: &str) -> String {
     let mut plain = String::with_capacity(markdown.len());
     for line in markdown.lines() {
         let trimmed = line.trim_start_matches('#').trim();
@@ -484,7 +500,11 @@ fn strip_markdown_formatting(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
     use http::HeaderMap;
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
 
     fn headers_with(name: &str, value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -493,6 +513,21 @@ mod tests {
             value.parse().unwrap(),
         );
         h
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            for (name, contents) in entries {
+                writer.start_file(name, options).unwrap();
+                writer.write_all(contents).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
     }
 
     // --- Content-type detection ---
@@ -739,6 +774,52 @@ mod tests {
         assert!(result.metadata.word_count > 0);
         assert!(result.content.links.is_empty());
         assert!(result.domain_data.is_none());
+    }
+
+    #[test]
+    fn test_extract_docx_rejects_oversized_document_xml() {
+        let oversized_text = "A".repeat(9 * 1024 * 1024);
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r><w:t>{oversized_text}</w:t></w:r></w:p></w:body>
+</w:document>"#
+        );
+        let bytes = zip_bytes(&[("word/document.xml", xml.as_bytes())]);
+
+        let err = extract_document(&bytes, DocType::Docx).unwrap_err();
+
+        assert!(
+            err.to_string().contains("too large"),
+            "expected DOCX size guard error, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_extract_docx_rejects_too_many_archive_entries() {
+        let mut entries: Vec<(String, Vec<u8>)> = vec![(
+            "word/document.xml".to_string(),
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body>
+</w:document>"#
+                .to_vec(),
+        )];
+        for idx in 0..400 {
+            entries.push((format!("word/media/{idx}.bin"), vec![idx as u8]));
+        }
+        let borrowed: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(name, contents)| (name.as_str(), contents.as_slice()))
+            .collect();
+        let bytes = zip_bytes(&borrowed);
+
+        let err = extract_document(&bytes, DocType::Docx).unwrap_err();
+
+        assert!(
+            err.to_string().contains("too many"),
+            "expected DOCX entry-count guard error, got {err}"
+        );
     }
 
     // --- Strip markdown ---

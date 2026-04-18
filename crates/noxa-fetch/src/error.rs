@@ -13,6 +13,9 @@ pub enum FetchError {
     #[error("response body decode failed: {0}")]
     BodyDecode(String),
 
+    #[error("resource limit exceeded: {0}")]
+    Limit(String),
+
     #[error("extraction failed: {0}")]
     Extraction(#[from] noxa_core::ExtractError),
 

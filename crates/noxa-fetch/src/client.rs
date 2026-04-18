@@ -22,6 +22,11 @@ use tracing::{debug, instrument, warn};
 use crate::browser::{self, BrowserProfile, BrowserVariant};
 use crate::error::FetchError;
 
+const MAX_HTML_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_JSON_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DOCUMENT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PDF_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
 /// Configuration for building a [`FetchClient`].
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
@@ -100,19 +105,40 @@ struct Response {
 
 impl Response {
     /// Buffer a wreq response into an owned Response.
-    async fn from_wreq(resp: wreq::Response) -> Result<Self, FetchError> {
+    async fn from_wreq(mut resp: wreq::Response) -> Result<Self, FetchError> {
         let status = resp.status().as_u16();
         let url = resp.uri().to_string();
         let headers = resp.headers().clone();
-        let body = resp
-            .bytes()
+        let limit = response_body_limit(&headers, &url);
+
+        if resp.content_length().is_some_and(|len| len > limit as u64) {
+            return Err(FetchError::Limit(format!(
+                "response body too large for {}: {} > {limit} bytes",
+                response_kind(&headers, &url),
+                resp.content_length().unwrap_or_default()
+            )));
+        }
+
+        let mut body = bytes::BytesMut::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| FetchError::BodyDecode(e.to_string()))?;
+            .map_err(|e| FetchError::BodyDecode(e.to_string()))?
+        {
+            if body.len() + chunk.len() > limit {
+                return Err(FetchError::Limit(format!(
+                    "response body too large for {}: {} > {limit} bytes",
+                    response_kind(&headers, &url),
+                    body.len() + chunk.len()
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(Self {
             status,
             url,
             headers,
-            body,
+            body: body.freeze(),
         })
     }
 
@@ -188,6 +214,8 @@ impl FetchClient {
                         config.timeout,
                         &config.headers,
                         config.proxy.as_deref(),
+                        config.follow_redirects,
+                        config.max_redirects,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -207,7 +235,14 @@ impl FetchClient {
                 .iter()
                 .map(|proxy| {
                     let v = *variants.choose(&mut rng).unwrap();
-                    crate::tls::build_client(v, config.timeout, &config.headers, Some(proxy))
+                    crate::tls::build_client(
+                        v,
+                        config.timeout,
+                        &config.headers,
+                        Some(proxy),
+                        config.follow_redirects,
+                        config.max_redirects,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -370,99 +405,13 @@ impl FetchClient {
         url: &str,
         options: &noxa_core::ExtractionOptions,
     ) -> Result<noxa_core::ExtractionResult, FetchError> {
-        // Reddit fallback: use their JSON API to get post + full comment tree.
-        if crate::reddit::is_reddit_url(url) {
-            let json_url = crate::reddit::json_url(url);
-            debug!("reddit detected, fetching {json_url}");
-
-            let client = self.pick_client(url);
-            let resp = client.get(&json_url).send().await?;
-            let response = Response::from_wreq(resp).await?;
-            if response.is_success() {
-                let bytes = response.body();
-                match crate::reddit::parse_reddit_json(bytes, url) {
-                    Ok(result) => return Ok(result),
-                    Err(e) => warn!("reddit json fallback failed: {e}, falling back to HTML"),
-                }
-            }
+        if let Some(result) = self.try_fetch_reddit_json(url).await? {
+            return Ok(result);
         }
 
         let start = Instant::now();
-        let client = self.pick_client(url);
-        let resp = client.get(url).send().await?;
-        let mut response = Response::from_wreq(resp).await?;
-
-        // Cookie warmup: if we get a challenge page, visit the homepage first
-        // to collect Akamai cookies (_abck, bm_sz, etc.), then retry.
-        if is_challenge_response(&response)
-            && let Some(homepage) = extract_homepage(url)
-        {
-            debug!("challenge detected, warming cookies via {homepage}");
-            let _ = client.get(&homepage).send().await;
-            let resp = client.get(url).send().await?;
-            response = Response::from_wreq(resp).await?;
-            debug!("retried after cookie warmup: status={}", response.status());
-        }
-
-        let status = response.status();
-        let final_url = response.url().to_string();
-
-        let headers = response.headers().clone();
-
-        let is_pdf = is_pdf_content_type(&headers);
-
-        if is_pdf {
-            debug!(status, "detected PDF response, using pdf extraction");
-
-            let bytes = response.body();
-
-            let elapsed = start.elapsed();
-            debug!(
-                status,
-                bytes = bytes.len(),
-                elapsed_ms = %elapsed.as_millis(),
-                "PDF fetch complete"
-            );
-
-            let pdf_result = noxa_pdf::extract_pdf(bytes, self.pdf_mode.clone())?;
-            Ok(pdf_to_extraction_result(&pdf_result, &final_url))
-        } else if let Some(doc_type) =
-            crate::document::is_document_content_type(&headers, &final_url)
-        {
-            debug!(status, doc_type = ?doc_type, "detected document response, extracting");
-
-            let bytes = response.body();
-
-            let elapsed = start.elapsed();
-            debug!(
-                status,
-                bytes = bytes.len(),
-                elapsed_ms = %elapsed.as_millis(),
-                "document fetch complete"
-            );
-
-            let mut result = crate::document::extract_document(bytes, doc_type)?;
-            result.metadata.url = Some(final_url);
-            Ok(result)
-        } else {
-            let html = response.into_text();
-
-            let elapsed = start.elapsed();
-            debug!(status, elapsed_ms = %elapsed.as_millis(), "fetch complete");
-
-            // LinkedIn: extract from embedded <code> JSON blobs
-            if crate::linkedin::is_linkedin_post(&final_url) {
-                if let Some(result) = crate::linkedin::extract_linkedin_post(&html, &final_url) {
-                    debug!("linkedin extraction succeeded");
-                    return Ok(result);
-                }
-                debug!("linkedin extraction failed, falling back to standard");
-            }
-
-            let extraction = noxa_core::extract_with_options(&html, Some(&final_url), options)?;
-
-            Ok(extraction)
-        }
+        let response = self.fetch_response_with_warmup(url).await?;
+        self.extract_buffered_response(response, start, options)
     }
 
     /// Fetch multiple URLs concurrently with bounded parallelism.
@@ -471,6 +420,7 @@ impl FetchClient {
         urls: &[&str],
         concurrency: usize,
     ) -> Vec<BatchResult> {
+        let concurrency = concurrency.max(1);
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let mut handles = Vec::with_capacity(urls.len());
 
@@ -510,6 +460,7 @@ impl FetchClient {
         concurrency: usize,
         options: &noxa_core::ExtractionOptions,
     ) -> Vec<BatchExtractResult> {
+        let concurrency = concurrency.max(1);
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let mut handles = Vec::with_capacity(urls.len());
 
@@ -548,8 +499,112 @@ impl FetchClient {
                     &clients[0]
                 }
             }
-            ClientPool::Rotating { clients } => pick_random(clients),
+            ClientPool::Rotating { clients } => {
+                let host = extract_host(url);
+                pick_for_host(clients, &host)
+            }
         }
+    }
+
+    async fn try_fetch_reddit_json(
+        &self,
+        url: &str,
+    ) -> Result<Option<noxa_core::ExtractionResult>, FetchError> {
+        if !crate::reddit::is_reddit_url(url) {
+            return Ok(None);
+        }
+
+        let json_url = crate::reddit::json_url(url);
+        debug!("reddit detected, fetching {json_url}");
+
+        let client = self.pick_client(url);
+        let resp = client.get(&json_url).send().await?;
+        let response = Response::from_wreq(resp).await?;
+        if !response.is_success() {
+            return Ok(None);
+        }
+
+        match crate::reddit::parse_reddit_json(response.body(), url) {
+            Ok(result) => Ok(Some(result)),
+            Err(e) => {
+                warn!("reddit json fallback failed: {e}, falling back to HTML");
+                Ok(None)
+            }
+        }
+    }
+
+    async fn fetch_response_with_warmup(&self, url: &str) -> Result<Response, FetchError> {
+        let client = self.pick_client(url);
+        let resp = client.get(url).send().await?;
+        let mut response = Response::from_wreq(resp).await?;
+
+        if is_challenge_response(&response)
+            && let Some(homepage) = extract_homepage(url)
+        {
+            debug!("challenge detected, warming cookies via {homepage}");
+            let _ = client.get(&homepage).send().await;
+            let retry = client.get(url).send().await?;
+            response = Response::from_wreq(retry).await?;
+            debug!("retried after cookie warmup: status={}", response.status());
+        }
+
+        Ok(response)
+    }
+
+    fn extract_buffered_response(
+        &self,
+        response: Response,
+        start: Instant,
+        options: &noxa_core::ExtractionOptions,
+    ) -> Result<noxa_core::ExtractionResult, FetchError> {
+        let status = response.status();
+        let final_url = response.url().to_string();
+        let headers = response.headers().clone();
+
+        if is_pdf_content_type(&headers) {
+            debug!(status, "detected PDF response, using pdf extraction");
+            let bytes = response.body();
+            let elapsed = start.elapsed();
+            debug!(
+                status,
+                bytes = bytes.len(),
+                elapsed_ms = %elapsed.as_millis(),
+                "PDF fetch complete"
+            );
+
+            let pdf_result = noxa_pdf::extract_pdf(bytes, self.pdf_mode.clone())?;
+            return Ok(pdf_to_extraction_result(&pdf_result, &final_url));
+        }
+
+        if let Some(doc_type) = crate::document::is_document_content_type(&headers, &final_url) {
+            debug!(status, doc_type = ?doc_type, "detected document response, extracting");
+            let bytes = response.body();
+            let elapsed = start.elapsed();
+            debug!(
+                status,
+                bytes = bytes.len(),
+                elapsed_ms = %elapsed.as_millis(),
+                "document fetch complete"
+            );
+
+            let mut result = crate::document::extract_document(bytes, doc_type)?;
+            result.metadata.url = Some(final_url);
+            return Ok(result);
+        }
+
+        let html = response.into_text();
+        let elapsed = start.elapsed();
+        debug!(status, elapsed_ms = %elapsed.as_millis(), "fetch complete");
+
+        if crate::linkedin::is_linkedin_post(&final_url) {
+            if let Some(result) = crate::linkedin::extract_linkedin_post(&html, &final_url) {
+                debug!("linkedin extraction succeeded");
+                return Ok(result);
+            }
+            debug!("linkedin extraction failed, falling back to standard");
+        }
+
+        noxa_core::extract_with_options(&html, Some(&final_url), options).map_err(Into::into)
     }
 }
 
@@ -589,19 +644,33 @@ fn extract_host(url: &str) -> String {
         .unwrap_or_default()
 }
 
+fn response_body_limit(headers: &http::HeaderMap, url: &str) -> usize {
+    match response_kind(headers, url) {
+        "pdf" => MAX_PDF_RESPONSE_BYTES,
+        "document" => MAX_DOCUMENT_RESPONSE_BYTES,
+        "json" => MAX_JSON_RESPONSE_BYTES,
+        _ => MAX_HTML_RESPONSE_BYTES,
+    }
+}
+
+fn response_kind(headers: &http::HeaderMap, url: &str) -> &'static str {
+    if is_pdf_content_type(headers) {
+        "pdf"
+    } else if crate::document::is_document_content_type(headers, url).is_some() {
+        "document"
+    } else if is_json_content_type(headers, url) {
+        "json"
+    } else {
+        "html"
+    }
+}
+
 /// Pick a client deterministically based on a host string.
 /// Same host always gets the same client, enabling HTTP/2 connection reuse.
 fn pick_for_host<'a>(clients: &'a [wreq::Client], host: &str) -> &'a wreq::Client {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     host.hash(&mut hasher);
     let idx = (hasher.finish() as usize) % clients.len();
-    &clients[idx]
-}
-
-/// Pick a random client from the pool for per-request rotation.
-fn pick_random(clients: &[wreq::Client]) -> &wreq::Client {
-    use rand::Rng;
-    let idx = rand::thread_rng().gen_range(0..clients.len());
     &clients[idx]
 }
 
@@ -634,6 +703,15 @@ fn is_pdf_content_type(headers: &http::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+fn is_json_content_type(headers: &http::HeaderMap, url: &str) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|ct| ct.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or("").trim())
+        .is_some_and(|mime| mime.eq_ignore_ascii_case("application/json"))
+        || url.ends_with(".json")
+}
+
 /// Detect if a response looks like a bot protection challenge page.
 fn is_challenge_response(response: &Response) -> bool {
     let len = response.body().len();
@@ -657,9 +735,10 @@ fn is_challenge_response(response: &Response) -> bool {
 
 /// Extract the homepage URL (scheme + host) from a full URL.
 fn extract_homepage(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .map(|u| format!("{}://{}/", u.scheme(), u.host_str().unwrap_or("")))
+    url::Url::parse(url).ok().map(|u| match u.port() {
+        Some(port) => format!("{}://{}:{port}/", u.scheme(), u.host_str().unwrap_or("")),
+        None => format!("{}://{}/", u.scheme(), u.host_str().unwrap_or("")),
+    })
 }
 
 /// Convert a noxa-pdf PdfResult into a noxa-core ExtractionResult.
@@ -727,6 +806,71 @@ async fn collect_ordered<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_redirect_test_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let base_url_for_task = base_url.clone();
+
+        tokio::spawn(async move {
+            for _ in 0..8 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let base_url = base_url_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let read = stream.read(&mut buf).await.unwrap();
+                    let request = String::from_utf8_lossy(&buf[..read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+
+                    let (status_line, extra_headers, body) = match path {
+                        "/start" => (
+                            "302 Found",
+                            format!("Location: {base_url}/final\r\n"),
+                            "redirecting",
+                        ),
+                        "/hop1" => (
+                            "302 Found",
+                            format!("Location: {base_url}/hop2\r\n"),
+                            "hop1",
+                        ),
+                        "/hop2" => (
+                            "302 Found",
+                            format!("Location: {base_url}/final\r\n"),
+                            "hop2",
+                        ),
+                        "/final" => ("200 OK", String::new(), "ok"),
+                        "/oversized" => (
+                            "200 OK",
+                            format!("Content-Length: {}\r\n", MAX_HTML_RESPONSE_BYTES as u64 + 1),
+                            "tiny",
+                        ),
+                        _ => ("404 Not Found", String::new(), "missing"),
+                    };
+
+                    let content_length_header = if extra_headers.contains("Content-Length:") {
+                        String::new()
+                    } else {
+                        format!("Content-Length: {}\r\n", body.len())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: text/plain\r\n{content_length_header}Connection: close\r\n{extra_headers}\r\n{body}",
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+
+        base_url
+    }
 
     #[test]
     fn test_batch_result_struct() {
@@ -786,6 +930,85 @@ mod tests {
         assert_eq!(results[1], "third");
     }
 
+    #[tokio::test]
+    async fn test_fetch_batch_zero_concurrency_does_not_hang() {
+        let base_url = spawn_redirect_test_server().await;
+        let client = Arc::new(FetchClient::new(FetchConfig::default()).unwrap());
+        let url = format!("{base_url}/final");
+        let results = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.fetch_batch(&[url.as_str()], 0),
+        )
+        .await
+        .expect("fetch_batch should not hang with zero concurrency");
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_and_extract_batch_zero_concurrency_does_not_hang() {
+        let base_url = spawn_redirect_test_server().await;
+        let client = Arc::new(FetchClient::new(FetchConfig::default()).unwrap());
+        let url = format!("{base_url}/final");
+        let results = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.fetch_and_extract_batch(&[url.as_str()], 0),
+        )
+        .await
+        .expect("fetch_and_extract_batch should not hang with zero concurrency");
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_respects_follow_redirects_false() {
+        let base_url = spawn_redirect_test_server().await;
+        let client = FetchClient::new(FetchConfig {
+            follow_redirects: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let result = client.fetch(&format!("{base_url}/start")).await.unwrap();
+
+        assert_eq!(result.status, 302);
+        assert_eq!(result.url, format!("{base_url}/start"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_respects_max_redirects() {
+        let base_url = spawn_redirect_test_server().await;
+        let client = FetchClient::new(FetchConfig {
+            follow_redirects: true,
+            max_redirects: 1,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let err = client.fetch(&format!("{base_url}/hop1")).await.unwrap_err();
+
+        assert!(
+            matches!(&err, FetchError::Request(source) if source.is_redirect()),
+            "expected redirect error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_rejects_oversized_html_response() {
+        let base_url = spawn_redirect_test_server().await;
+        let client = FetchClient::new(FetchConfig::default()).unwrap();
+
+        let err = client
+            .fetch(&format!("{base_url}/oversized"))
+            .await
+            .expect_err("oversized HTML responses should be rejected");
+
+        assert!(
+            matches!(err, FetchError::Limit(_)),
+            "expected size limit error, got {err:?}"
+        );
+    }
+
     #[test]
     fn test_is_pdf_content_type() {
         let mut headers = http::HeaderMap::new();
@@ -806,6 +1029,42 @@ mod tests {
 
         let empty = http::HeaderMap::new();
         assert!(!is_pdf_content_type(&empty));
+    }
+
+    #[test]
+    fn test_response_body_limit_matches_detected_kind() {
+        let mut html_headers = http::HeaderMap::new();
+        html_headers.insert("content-type", "text/html".parse().unwrap());
+        assert_eq!(
+            response_body_limit(&html_headers, "https://example.com"),
+            MAX_HTML_RESPONSE_BYTES
+        );
+
+        let mut pdf_headers = http::HeaderMap::new();
+        pdf_headers.insert("content-type", "application/pdf".parse().unwrap());
+        assert_eq!(
+            response_body_limit(&pdf_headers, "https://example.com/file.pdf"),
+            MAX_PDF_RESPONSE_BYTES
+        );
+
+        let mut doc_headers = http::HeaderMap::new();
+        doc_headers.insert(
+            "content-type",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            response_body_limit(&doc_headers, "https://example.com/file.docx"),
+            MAX_DOCUMENT_RESPONSE_BYTES
+        );
+
+        let mut json_headers = http::HeaderMap::new();
+        json_headers.insert("content-type", "application/json".parse().unwrap());
+        assert_eq!(
+            response_body_limit(&json_headers, "https://example.com/data.json"),
+            MAX_JSON_RESPONSE_BYTES
+        );
     }
 
     #[test]
@@ -857,6 +1116,35 @@ mod tests {
         };
         let client = FetchClient::new(config).unwrap();
         assert_eq!(client.proxy_pool_size(), 3);
+    }
+
+    #[test]
+    fn test_rotating_pool_is_host_sticky() {
+        let config = FetchConfig {
+            proxy_pool: (0..10).map(|i| format!("http://proxy{i}:8080")).collect(),
+            ..Default::default()
+        };
+        let client = FetchClient::new(config).unwrap();
+
+        let picks: HashSet<usize> = (0..8)
+            .map(|_| {
+                let ptr = client.pick_client("https://example.com/path") as *const _;
+                match &client.pool {
+                    ClientPool::Static { clients, .. } | ClientPool::Rotating { clients } => {
+                        clients
+                            .iter()
+                            .position(|candidate| std::ptr::eq(candidate, ptr))
+                            .unwrap()
+                    }
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            picks.len(),
+            1,
+            "same host should always reuse the same rotating client, got picks {picks:?}"
+        );
     }
 
     #[test]
@@ -922,6 +1210,14 @@ mod tests {
             "sub.example.com"
         );
         assert_eq!(extract_host("not-a-url"), "");
+    }
+
+    #[test]
+    fn test_extract_homepage_preserves_explicit_port() {
+        assert_eq!(
+            extract_homepage("http://example.com:8443/challenge"),
+            Some("http://example.com:8443/".to_string())
+        );
     }
 
     #[test]
