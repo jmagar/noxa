@@ -507,3 +507,266 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     // --- drain workers + log final metrics ---
     drain_and_report(worker_handles, pipeline, session_start).await
 }
+
+// ---------------------------------------------------------------------------
+// Tests: startup delta scan routing
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use tempfile::tempdir;
+    use tokio::sync::{Mutex, mpsc};
+    use tokio_util::sync::CancellationToken;
+
+    use crate::error::RagError;
+    use crate::store::{DynVectorStore, HashExistsResult, VectorStore};
+    use crate::types::{Point, SearchMetadataFilter, SearchResult};
+
+    use super::spawn_startup_scan;
+
+    // ── Mock VectorStore ──────────────────────────────────────────────────────
+
+    /// A mock VectorStore that returns a fixed `HashExistsResult` for URLs it
+    /// knows about (keyed by URL string) and `NotIndexed` for unknown URLs.
+    /// Counts the number of times `url_with_hash_exists_checked` is called.
+    struct MockStore {
+        results: HashMap<String, HashExistsResult>,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl MockStore {
+        fn new(results: HashMap<String, HashExistsResult>) -> Arc<Self> {
+            Arc::new(Self {
+                results,
+                call_count: Arc::new(AtomicUsize::new(0)),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl VectorStore for MockStore {
+        async fn upsert(&self, _points: Vec<Point>) -> Result<usize, RagError> {
+            unimplemented!("MockStore::upsert not needed for startup scan tests")
+        }
+
+        async fn delete_by_url(&self, _url: &str) -> Result<(), RagError> {
+            unimplemented!("MockStore::delete_by_url not needed for startup scan tests")
+        }
+
+        async fn delete_stale_by_url(
+            &self,
+            _url: &str,
+            _keep_ids: &[uuid::Uuid],
+        ) -> Result<(), RagError> {
+            unimplemented!("MockStore::delete_stale_by_url not needed for startup scan tests")
+        }
+
+        async fn search(
+            &self,
+            _vector: &[f32],
+            _limit: usize,
+            _filter: Option<&SearchMetadataFilter>,
+        ) -> Result<Vec<SearchResult>, RagError> {
+            unimplemented!("MockStore::search not needed for startup scan tests")
+        }
+
+        async fn collection_point_count(&self) -> Result<u64, RagError> {
+            unimplemented!("MockStore::collection_point_count not needed for startup scan tests")
+        }
+
+        async fn url_with_hash_exists_checked(&self, url: &str, _hash: &str) -> HashExistsResult {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            self.results
+                .get(url)
+                .cloned()
+                .unwrap_or(HashExistsResult::NotIndexed)
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    // ── Helper: compute file:// URL for a real file path ─────────────────────
+
+    fn file_url(path: &std::path::Path) -> String {
+        url::Url::from_file_path(path)
+            .expect("from_file_path")
+            .to_string()
+    }
+
+    // ── Helper: run startup scan and drain all queued jobs ────────────────────
+
+    async fn run_scan_and_collect(
+        store: DynVectorStore,
+        watch_dir: PathBuf,
+    ) -> HashSet<PathBuf> {
+        let shutdown = CancellationToken::new();
+        let (tx, mut rx) = mpsc::channel::<super::super::IndexJob>(256);
+
+        let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), watch_dir);
+
+        // Wait for the scan to finish before draining.
+        handle.await.expect("startup scan panicked");
+
+        // Drop our sender so the channel shows closed to any downstream reader.
+        drop(tx);
+
+        let mut queued = HashSet::new();
+        while let Ok(job) = rx.try_recv() {
+            queued.insert(job.path);
+        }
+        queued
+    }
+
+    // ── Test 1: NotIndexed URLs are queued ────────────────────────────────────
+
+    /// Files whose URL maps to `NotIndexed` must be pushed to the work queue.
+    #[tokio::test]
+    async fn startup_scan_queues_not_indexed_files() {
+        let dir = tempdir().expect("tempdir");
+
+        // Write a real .md file so startup_scan_key can read it.
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "# hello").expect("write file");
+        let url = file_url(&path);
+
+        let mut results = HashMap::new();
+        results.insert(url, HashExistsResult::NotIndexed);
+
+        let store = MockStore::new(results);
+        let call_count = Arc::clone(&store.call_count);
+        let dyn_store: DynVectorStore = store;
+
+        let queued = run_scan_and_collect(dyn_store, dir.path().to_path_buf()).await;
+
+        assert!(
+            queued.contains(&path),
+            "NotIndexed file should be queued for indexing"
+        );
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "url_with_hash_exists_checked should be called once per file"
+        );
+    }
+
+    // ── Test 2: Exists URLs are NOT queued ───────────────────────────────────
+
+    /// Files whose URL maps to `Exists` must be skipped — already up-to-date.
+    #[tokio::test]
+    async fn startup_scan_skips_already_indexed_files() {
+        let dir = tempdir().expect("tempdir");
+
+        let path = dir.path().join("indexed.md");
+        std::fs::write(&path, "# indexed content").expect("write file");
+        let url = file_url(&path);
+
+        let mut results = HashMap::new();
+        results.insert(url, HashExistsResult::Exists);
+
+        let store = MockStore::new(results);
+        let call_count = Arc::clone(&store.call_count);
+        let dyn_store: DynVectorStore = store;
+
+        let queued = run_scan_and_collect(dyn_store, dir.path().to_path_buf()).await;
+
+        assert!(
+            !queued.contains(&path),
+            "Exists file should NOT be queued"
+        );
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "url_with_hash_exists_checked should be called once"
+        );
+    }
+
+    // ── Test 3: BackendError URLs are NOT queued ─────────────────────────────
+
+    /// Files whose existence check returns `BackendError` must NOT be queued.
+    /// This is the key regression guard: a degraded Qdrant must not trigger a
+    /// full reindex storm.
+    #[tokio::test]
+    async fn startup_scan_does_not_requeue_on_backend_error() {
+        let dir = tempdir().expect("tempdir");
+
+        let path = dir.path().join("fragile.md");
+        std::fs::write(&path, "# content").expect("write file");
+        let url = file_url(&path);
+
+        let mut results = HashMap::new();
+        results.insert(url, HashExistsResult::BackendError("connection refused".to_string()));
+
+        let store = MockStore::new(results);
+        let call_count = Arc::clone(&store.call_count);
+        let dyn_store: DynVectorStore = store;
+
+        let queued = run_scan_and_collect(dyn_store, dir.path().to_path_buf()).await;
+
+        assert!(
+            !queued.contains(&path),
+            "BackendError file must NOT be queued — avoid reindex storm on degraded Qdrant"
+        );
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "url_with_hash_exists_checked should still be called (probe must happen)"
+        );
+    }
+
+    // ── Test 4: Mixed results across multiple files ───────────────────────────
+
+    /// When a scan contains a mix of Exists / NotIndexed / BackendError files,
+    /// only the NotIndexed ones are queued.
+    #[tokio::test]
+    async fn startup_scan_routes_mixed_results_correctly() {
+        let dir = tempdir().expect("tempdir");
+
+        let exists_path = dir.path().join("exists.md");
+        let not_indexed_path = dir.path().join("new.md");
+        let backend_error_path = dir.path().join("degraded.md");
+
+        for path in &[&exists_path, &not_indexed_path, &backend_error_path] {
+            std::fs::write(path, "# content").expect("write file");
+        }
+
+        let mut results = HashMap::new();
+        results.insert(file_url(&exists_path), HashExistsResult::Exists);
+        results.insert(file_url(&not_indexed_path), HashExistsResult::NotIndexed);
+        results.insert(
+            file_url(&backend_error_path),
+            HashExistsResult::BackendError("timeout".to_string()),
+        );
+
+        let store = MockStore::new(results);
+        let call_count = Arc::clone(&store.call_count);
+        let dyn_store: DynVectorStore = store;
+
+        let queued = run_scan_and_collect(dyn_store, dir.path().to_path_buf()).await;
+
+        assert!(
+            queued.contains(&not_indexed_path),
+            "NotIndexed file should be queued"
+        );
+        assert!(
+            !queued.contains(&exists_path),
+            "Exists file should NOT be queued"
+        );
+        assert!(
+            !queued.contains(&backend_error_path),
+            "BackendError file must NOT be queued"
+        );
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            3,
+            "should probe all 3 files regardless of result"
+        );
+    }
+}
