@@ -224,22 +224,23 @@ fn is_home_link(href: &str, base_url: Option<&Url>) -> bool {
             }
         }
         // Absolute URL with same host (e.g., "https://example.com")
-        if let Ok(parsed) = Url::parse(href) {
-            if parsed.host_str() == base.host_str() {
-                let path = parsed.path();
-                return path == "/" || path.is_empty();
-            }
+        if let Ok(parsed) = Url::parse(href)
+            && parsed.host_str() == base.host_str()
+        {
+            let path = parsed.path();
+            return path == "/" || path.is_empty();
         }
     }
     // Fallback: href looks like a root URL for any TLD, but only when there is
     // no base URL to resolve against.  If base_url is Some, the same-host check
     // above is authoritative; we must not accept an absolute URL from a
     // different host as a home link just because its path is "/".
-    if base_url.is_none() && (href.starts_with("http://") || href.starts_with("https://")) {
-        if let Ok(parsed) = Url::parse(href) {
-            let path = parsed.path();
-            return path == "/" || path.is_empty();
-        }
+    if base_url.is_none()
+        && (href.starts_with("http://") || href.starts_with("https://"))
+        && let Ok(parsed) = Url::parse(href)
+    {
+        let path = parsed.path();
+        return path == "/" || path.is_empty();
     }
     false
 }

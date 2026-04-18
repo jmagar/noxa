@@ -119,15 +119,15 @@ fn percent_decode(s: &str) -> String {
     let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
                 (bytes[i + 1] as char).to_digit(16),
                 (bytes[i + 2] as char).to_digit(16),
-            ) {
-                decoded.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
+            )
+        {
+            decoded.push((hi * 16 + lo) as u8);
+            i += 3;
+            continue;
         }
         decoded.push(bytes[i]);
         i += 1;

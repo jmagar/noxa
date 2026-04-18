@@ -79,7 +79,7 @@ pub fn extract_with_options(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        return extract_with_options_threaded(html, url, options);
+        extract_with_options_threaded(html, url, options)
     }
 }
 

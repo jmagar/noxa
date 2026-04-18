@@ -232,8 +232,7 @@ impl FetchClient {
                 crate::document::extract_document(&bytes, doc_type)
             })
             .await
-            .map_err(|e| FetchError::Build(format!("document spawn_blocking panic: {e}")))?
-            .map_err(|e| e)?;
+            .map_err(|e| FetchError::Build(format!("document spawn_blocking panic: {e}")))??;
             result.metadata.url = Some(final_url_clone);
             Ok(result)
         } else {

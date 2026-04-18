@@ -7,27 +7,32 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracing::info;
 
+use crate::error::NoxaMcpError;
+
 const API_BASE: &str = "https://api.noxa.io/v1";
 
 /// Lightweight client for the noxa cloud API.
 pub struct CloudClient {
     api_key: String,
+    api_base: String,
     http: reqwest::Client,
 }
 
 impl CloudClient {
-    /// Create a new cloud client from NOXA_API_KEY env var.
-    /// Returns None if the key is not set.
-    pub fn from_env() -> Option<Self> {
-        let key = std::env::var("NOXA_API_KEY").ok()?;
-        if key.is_empty() {
-            return None;
-        }
+    pub fn new(api_key: String) -> Result<Self, NoxaMcpError> {
+        Self::new_with_base(api_key, API_BASE.to_string())
+    }
+
+    pub(crate) fn new_with_base(api_key: String, api_base: String) -> Result<Self, NoxaMcpError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
-            .unwrap_or_default();
-        Some(Self { api_key: key, http })
+            .map_err(NoxaMcpError::CloudClientInit)?;
+        Ok(Self {
+            api_key,
+            api_base,
+            http,
+        })
     }
 
     /// Scrape a URL via the cloud API. Returns the response JSON.
@@ -38,7 +43,7 @@ impl CloudClient {
         include_selectors: &[String],
         exclude_selectors: &[String],
         only_main_content: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, NoxaMcpError> {
         let mut body = json!({
             "url": url,
             "formats": formats,
@@ -58,48 +63,54 @@ impl CloudClient {
     }
 
     /// Generic POST to the cloud API.
-    pub async fn post(&self, endpoint: &str, body: Value) -> Result<Value, String> {
+    pub async fn post(&self, endpoint: &str, body: Value) -> Result<Value, NoxaMcpError> {
         let resp = self
             .http
-            .post(format!("{API_BASE}/{endpoint}"))
+            .post(format!(
+                "{}/{endpoint}",
+                self.api_base.trim_end_matches('/')
+            ))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Cloud API request failed: {e}"))?;
+            .map_err(|e| NoxaMcpError::cloud(format!("request failed: {e}")))?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             let truncated = truncate_error(&text);
-            return Err(format!("Cloud API error {status}: {truncated}"));
+            return Err(NoxaMcpError::cloud(format!("error {status}: {truncated}")));
         }
 
         resp.json::<Value>()
             .await
-            .map_err(|e| format!("Cloud API response parse failed: {e}"))
+            .map_err(|e| NoxaMcpError::cloud(format!("response parse failed: {e}")))
     }
 
     /// Generic GET from the cloud API.
-    pub async fn get(&self, endpoint: &str) -> Result<Value, String> {
+    pub async fn get(&self, endpoint: &str) -> Result<Value, NoxaMcpError> {
         let resp = self
             .http
-            .get(format!("{API_BASE}/{endpoint}"))
+            .get(format!(
+                "{}/{endpoint}",
+                self.api_base.trim_end_matches('/')
+            ))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .map_err(|e| format!("Cloud API request failed: {e}"))?;
+            .map_err(|e| NoxaMcpError::cloud(format!("request failed: {e}")))?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             let truncated = truncate_error(&text);
-            return Err(format!("Cloud API error {status}: {truncated}"));
+            return Err(NoxaMcpError::cloud(format!("error {status}: {truncated}")));
         }
 
         resp.json::<Value>()
             .await
-            .map_err(|e| format!("Cloud API response parse failed: {e}"))
+            .map_err(|e| NoxaMcpError::cloud(format!("response parse failed: {e}")))
     }
 }
 
@@ -217,12 +228,12 @@ pub async fn smart_fetch(
     exclude_selectors: &[String],
     only_main_content: bool,
     formats: &[&str],
-) -> Result<SmartFetchResult, String> {
+) -> Result<SmartFetchResult, NoxaMcpError> {
     // Step 1: Try local fetch (with timeout to avoid hanging on slow servers)
     let fetch_result = tokio::time::timeout(Duration::from_secs(30), client.fetch(url))
         .await
-        .map_err(|_| format!("Fetch timed out after 30s for {url}"))?
-        .map_err(|e| format!("Fetch failed: {e}"))?;
+        .map_err(|_| NoxaMcpError::message(format!("Fetch timed out after 30s for {url}")))?
+        .map_err(NoxaMcpError::Fetch)?;
 
     // Step 2: Check for bot protection
     if is_bot_protected(&fetch_result.html, &fetch_result.headers) {
@@ -238,7 +249,6 @@ pub async fn smart_fetch(
         .await;
     }
 
-    // Step 3: Extract locally
     let options = noxa_core::ExtractionOptions {
         include_selectors: include_selectors.to_vec(),
         exclude_selectors: exclude_selectors.to_vec(),
@@ -246,9 +256,18 @@ pub async fn smart_fetch(
         include_raw_html: false,
     };
 
+    if is_binary_document(&fetch_result.headers, &fetch_result.url) {
+        let extraction = client
+            .fetch_and_extract_with_options(url, &options)
+            .await
+            .map_err(NoxaMcpError::Fetch)?;
+        return Ok(SmartFetchResult::Local(Box::new(extraction)));
+    }
+
+    // Step 3: Extract locally for heuristic inspection.
     let extraction =
         noxa_core::extract_with_options(&fetch_result.html, Some(&fetch_result.url), &options)
-            .map_err(|e| format!("Extraction failed: {e}"))?;
+            .map_err(NoxaMcpError::Extract)?;
 
     // Step 4: Check for JS-rendered pages (low content from large HTML)
     if needs_js_rendering(extraction.metadata.word_count, &fetch_result.html) {
@@ -269,6 +288,11 @@ pub async fn smart_fetch(
         .await;
     }
 
+    let extraction = client
+        .fetch_and_extract_with_options(url, &options)
+        .await
+        .map_err(NoxaMcpError::Fetch)?;
+
     Ok(SmartFetchResult::Local(Box::new(extraction)))
 }
 
@@ -279,7 +303,7 @@ async fn cloud_fallback(
     exclude_selectors: &[String],
     only_main_content: bool,
     formats: &[&str],
-) -> Result<SmartFetchResult, String> {
+) -> Result<SmartFetchResult, NoxaMcpError> {
     match cloud {
         Some(c) => {
             let resp = c
@@ -294,9 +318,105 @@ async fn cloud_fallback(
             info!(url, "cloud API fallback successful");
             Ok(SmartFetchResult::Cloud(resp))
         }
-        None => Err(format!(
+        None => Err(NoxaMcpError::cloud(format!(
             "Bot protection detected on {url}. Set NOXA_API_KEY for automatic cloud bypass. \
              Get a key at https://noxa.io"
-        )),
+        ))),
+    }
+}
+
+fn is_binary_document(headers: &noxa_fetch::HeaderMap, url: &str) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .eq_ignore_ascii_case("application/pdf")
+        })
+        .unwrap_or(false)
+        || noxa_fetch::document::is_document_content_type(headers, url).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::test_support::{TestHttpServer, TestResponse};
+
+    #[tokio::test]
+    async fn smart_fetch_persists_local_extraction() {
+        let server = TestHttpServer::spawn(|request| match request.path.as_str() {
+            "/page" => {
+                TestResponse::html("<html><body><main>Hello persistence</main></body></html>")
+            }
+            _ => TestResponse::text(404, "missing", "text/plain"),
+        })
+        .await;
+        let url = server.url("/page");
+        let dir = tempdir().unwrap();
+        let store = noxa_store::FilesystemContentStore::new(dir.path());
+        let client = noxa_fetch::FetchClient::new(noxa_fetch::FetchConfig {
+            store: Some(store.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let result = smart_fetch(&client, None, &url, &[], &[], false, &["markdown"])
+            .await
+            .unwrap();
+
+        match result {
+            SmartFetchResult::Local(extraction) => {
+                assert!(extraction.content.markdown.contains("Hello persistence"));
+            }
+            SmartFetchResult::Cloud(_) => panic!("expected local extraction"),
+        }
+
+        let stored = store.read(&url).await.unwrap().unwrap();
+        assert!(stored.content.markdown.contains("Hello persistence"));
+    }
+
+    #[tokio::test]
+    async fn smart_fetch_returns_cloud_error_for_bot_pages_without_cloud() {
+        let server = TestHttpServer::spawn(|request| match request.path.as_str() {
+            "/challenge" => TestResponse::html(
+                "<html><body><div id=\"cf-spinner\"></div><title>Just a moment</title></body></html>",
+            ),
+            _ => TestResponse::text(404, "missing", "text/plain"),
+        })
+        .await;
+        let client = noxa_fetch::FetchClient::new(Default::default()).unwrap();
+        let err = match smart_fetch(
+            &client,
+            None,
+            &server.url("/challenge"),
+            &[],
+            &[],
+            false,
+            &["markdown"],
+        )
+        .await
+        {
+            Ok(_) => panic!("expected cloud fallback error"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(err.contains("NOXA_API_KEY"));
+    }
+
+    #[test]
+    fn needs_js_rendering_detects_large_spa_shell() {
+        let html = format!(
+            "<html><body><div id=\"__next\"></div><script>{}</script></body></html>",
+            "x".repeat(60_000)
+        );
+
+        assert!(needs_js_rendering(10, &html));
+        assert!(!needs_js_rendering(1200, &html));
     }
 }

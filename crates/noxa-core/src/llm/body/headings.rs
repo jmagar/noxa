@@ -241,10 +241,10 @@ pub(crate) fn strip_trailing_empty_headings(input: &str) -> String {
                         .captures(next)
                         .map(|c| c.get(1).unwrap().as_str().len())
                 };
-                if let Some(nl) = next_level {
-                    if nl <= level {
-                        remove[i] = true;
-                    }
+                if let Some(nl) = next_level
+                    && nl <= level
+                {
+                    remove[i] = true;
                 }
             }
         }
