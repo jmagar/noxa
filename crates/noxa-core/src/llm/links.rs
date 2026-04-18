@@ -5,36 +5,111 @@ use std::collections::HashSet;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-// ---------------------------------------------------------------------------
-// Link extraction
-// ---------------------------------------------------------------------------
-
-/// Matches `[text](url)`. Images are already stripped, so no `!` prefix concern.
-static LINK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
-
 /// Extract all links from markdown, replacing inline `[text](url)` with just `text`.
 /// Returns the cleaned text and a deduplicated list of (label, href) pairs.
 pub(crate) fn extract_and_strip_links(input: &str) -> (String, Vec<(String, String)>) {
+    let mut text = String::with_capacity(input.len());
     let mut links: Vec<(String, String)> = Vec::new();
     let mut seen_hrefs: HashSet<String> = HashSet::new();
+    let mut cursor = 0;
 
-    let replaced = LINK_RE.replace_all(input, |caps: &regex::Captures| {
-        let text = caps.get(1).map_or("", |m| m.as_str()).trim().to_string();
-        let href = caps.get(2).map_or("", |m| m.as_str()).trim().to_string();
+    while cursor < input.len() {
+        let Some(offset) = input[cursor..].find('[') else {
+            text.push_str(&input[cursor..]);
+            break;
+        };
 
+        let start = cursor + offset;
+        text.push_str(&input[cursor..start]);
+
+        let Some((consumed, label, href)) = parse_markdown_link(&input[start..]) else {
+            text.push('[');
+            cursor = start + '['.len_utf8();
+            continue;
+        };
+
+        let label = label.trim().to_string();
+        let href = strip_angle_brackets(href.trim()).to_string();
         let skip = href.starts_with('#')
             || href.starts_with("javascript:")
             || href.is_empty()
-            || is_noise_link(&text, &href);
+            || is_noise_link(&label, &href);
 
-        if !skip && !text.is_empty() && seen_hrefs.insert(href.clone()) {
-            links.push((text.clone(), href));
+        if !skip && !label.is_empty() && seen_hrefs.insert(href.clone()) {
+            links.push((label.clone(), href));
         }
 
-        text
-    });
+        text.push_str(&label);
+        cursor = start + consumed;
+    }
 
-    (replaced.into_owned(), links)
+    (text, links)
+}
+
+fn parse_markdown_link(input: &str) -> Option<(usize, String, String)> {
+    if !input.starts_with('[') {
+        return None;
+    }
+
+    let label_end = find_matching_delimiter(input, 0, '[', ']')?;
+    let after_label = label_end + ']'.len_utf8();
+    if input[after_label..].chars().next()? != '(' {
+        return None;
+    }
+
+    let href_end = find_matching_delimiter(input, after_label, '(', ')')?;
+    let href_start = after_label + '('.len_utf8();
+
+    Some((
+        href_end + ')'.len_utf8(),
+        input[1..label_end].to_string(),
+        input[href_start..href_end].to_string(),
+    ))
+}
+
+fn find_matching_delimiter(
+    input: &str,
+    open_idx: usize,
+    open_char: char,
+    close_char: char,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut escaped = false;
+
+    for (offset, ch) in input[open_idx..].char_indices() {
+        let index = open_idx + offset;
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if ch == open_char {
+            depth += 1;
+            continue;
+        }
+
+        if ch == close_char {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+
+    None
+}
+
+fn strip_angle_brackets(input: &str) -> &str {
+    input
+        .strip_prefix('<')
+        .and_then(|text| text.strip_suffix('>'))
+        .unwrap_or(input)
 }
 
 /// Links that are noise for LLM consumption: internal actions, timestamps,
@@ -180,5 +255,17 @@ mod tests {
         assert!(is_noise_link("5 minutes ago", "https://example.com"));
         assert!(is_noise_link("user", "https://hn.com/user?id=foo"));
         assert!(!is_noise_link("Rust docs", "https://rust-lang.org"));
+    }
+
+    #[test]
+    fn extracts_links_with_balanced_parentheses_in_url() {
+        let input = "See [RFC](https://example.com/spec_(draft)) for details.";
+
+        let (text, links) = extract_and_strip_links(input);
+
+        assert_eq!(text, "See RFC for details.");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].0, "RFC");
+        assert_eq!(links[0].1, "https://example.com/spec_(draft)");
     }
 }
