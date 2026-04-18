@@ -627,6 +627,164 @@ async fn search_logs_and_counts_malformed_payload_without_dropping_valid_results
     );
 }
 
+/// When a search hit has an empty payload object `{}`, it should be excluded
+/// (missing required `text` and `url`) and counted in decode_errors.
+#[tokio::test]
+async fn search_counts_empty_payload_object_as_decode_error() {
+    let (base_url, _requests, handle) = spawn_test_server(|_request| {
+        serde_json::json!({
+            "result": [
+                {
+                    "id": "cccccccc-0000-0000-0000-000000000001",
+                    "score": 0.88,
+                    "payload": {
+                        "text": "good chunk",
+                        "url": "https://example.com/good",
+                        "chunk_index": 0,
+                        "token_estimate": 50
+                    }
+                },
+                {
+                    // Empty payload object — missing required `text` and `url`.
+                    "id": "cccccccc-0000-0000-0000-000000000002",
+                    "score": 0.55,
+                    "payload": {}
+                }
+            ]
+        })
+        .to_string()
+    })
+    .await;
+
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
+
+    let results = store
+        .search(&[0.5, 0.5], 5, None)
+        .await
+        .expect("search should succeed despite empty payload");
+
+    handle.abort();
+
+    assert_eq!(results.len(), 1, "expected exactly 1 valid result");
+    assert_eq!(results[0].text, "good chunk");
+
+    let errors = store.decode_errors.load(Ordering::Relaxed);
+    assert_eq!(
+        errors, 1,
+        "expected decode_errors counter to be 1 after one empty payload"
+    );
+}
+
+/// When a search hit has a null value for a required field (`text`), it should
+/// be excluded and counted in decode_errors.
+#[tokio::test]
+async fn search_counts_null_required_field_as_decode_error() {
+    let (base_url, _requests, handle) = spawn_test_server(|_request| {
+        serde_json::json!({
+            "result": [
+                {
+                    "id": "dddddddd-0000-0000-0000-000000000001",
+                    "score": 0.92,
+                    "payload": {
+                        "text": "good chunk",
+                        "url": "https://example.com/good",
+                        "chunk_index": 0,
+                        "token_estimate": 30
+                    }
+                },
+                {
+                    // `text` is null — required field, must not be None.
+                    "id": "dddddddd-0000-0000-0000-000000000002",
+                    "score": 0.65,
+                    "payload": {
+                        "text": null,
+                        "url": "https://example.com/bad",
+                        "chunk_index": 1,
+                        "token_estimate": 20
+                    }
+                }
+            ]
+        })
+        .to_string()
+    })
+    .await;
+
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
+
+    let results = store
+        .search(&[0.5, 0.5], 5, None)
+        .await
+        .expect("search should succeed despite null required field");
+
+    handle.abort();
+
+    assert_eq!(results.len(), 1, "expected exactly 1 valid result");
+    assert_eq!(results[0].text, "good chunk");
+
+    let errors = store.decode_errors.load(Ordering::Relaxed);
+    assert_eq!(
+        errors, 1,
+        "expected decode_errors counter to be 1 after one null required field"
+    );
+}
+
+/// When a search hit has a wrong type for a field that has no `#[serde(default)]`
+/// override (e.g. `chunk_index` as a string instead of usize), serde should
+/// reject the payload and it should be counted in decode_errors.
+#[tokio::test]
+async fn search_counts_wrong_field_type_as_decode_error() {
+    let (base_url, _requests, handle) = spawn_test_server(|_request| {
+        serde_json::json!({
+            "result": [
+                {
+                    "id": "eeeeeeee-0000-0000-0000-000000000001",
+                    "score": 0.87,
+                    "payload": {
+                        "text": "good chunk",
+                        "url": "https://example.com/good",
+                        "chunk_index": 0,
+                        "token_estimate": 40
+                    }
+                },
+                {
+                    // `chunk_index` is a string — should be usize.
+                    "id": "eeeeeeee-0000-0000-0000-000000000002",
+                    "score": 0.71,
+                    "payload": {
+                        "text": "bad chunk",
+                        "url": "https://example.com/bad",
+                        "chunk_index": "not-a-number",
+                        "token_estimate": 15
+                    }
+                }
+            ]
+        })
+        .to_string()
+    })
+    .await;
+
+    let store = QdrantStore::new(&base_url, "noxa-test".to_string(), None, uuid::Uuid::nil())
+        .expect("store");
+
+    let results = store
+        .search(&[0.5, 0.5], 5, None)
+        .await
+        .expect("search should succeed despite wrong field type");
+
+    handle.abort();
+
+    assert_eq!(results.len(), 1, "expected exactly 1 valid result");
+    assert_eq!(results[0].text, "good chunk");
+
+    let errors = store.decode_errors.load(Ordering::Relaxed);
+    assert_eq!(
+        errors, 1,
+        "expected decode_errors counter to be 1 after one wrong-type field"
+    );
+}
+
 /// When a search hit has no payload at all (None), it should be excluded from
 /// results and counted in decode_errors — not silently vanish.
 #[tokio::test]
