@@ -5,16 +5,31 @@
 /// JSON data island approach (`data_island.rs`) only handles `<script type="application/json">`.
 /// This module executes inline `<script>` tags in a sandboxed QuickJS runtime
 /// to capture those JS-assigned data blobs.
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
+
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rquickjs::{Context, Runtime};
+use rquickjs::{Context, Ctx, Runtime};
 use scraper::{Html, Selector};
 use tracing::debug;
+
+use crate::ExtractError;
 
 static SCRIPT_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("script").unwrap());
 static HTML_TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").unwrap());
 
+const JS_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const JS_STACK_LIMIT_BYTES: usize = 1024 * 1024;
+const JS_EXECUTION_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// A blob of data extracted from JS execution.
+#[derive(Debug)]
 pub struct JsDataBlob {
     pub name: String,
     pub data: String,
@@ -22,7 +37,7 @@ pub struct JsDataBlob {
 }
 
 /// Execute inline `<script>` tags in a QuickJS sandbox and extract `window.__*` data.
-pub fn extract_js_data(html: &str) -> Vec<JsDataBlob> {
+pub fn extract_js_data(html: &str) -> Result<Vec<JsDataBlob>, ExtractError> {
     let doc = Html::parse_document(html);
 
     let scripts: Vec<String> = doc
@@ -43,14 +58,29 @@ pub fn extract_js_data(html: &str) -> Vec<JsDataBlob> {
         .collect();
 
     if scripts.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let rt = Runtime::new().expect("QuickJS runtime creation failed");
-    rt.set_memory_limit(64 * 1024 * 1024); // 64 MB
-    rt.set_max_stack_size(1024 * 1024); // 1 MB
+    let rt = Runtime::new().map_err(|err| ExtractError::JavaScriptRuntimeInit {
+        reason: err.to_string(),
+    })?;
+    rt.set_memory_limit(JS_MEMORY_LIMIT_BYTES);
+    rt.set_max_stack_size(JS_STACK_LIMIT_BYTES);
 
-    let ctx = Context::full(&rt).expect("QuickJS context creation failed");
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+    let interrupted = Arc::clone(&timed_out);
+    rt.set_interrupt_handler(Some(Box::new(move || {
+        let should_interrupt = started.elapsed() >= JS_EXECUTION_TIMEOUT;
+        if should_interrupt {
+            interrupted.store(true, Ordering::Relaxed);
+        }
+        should_interrupt
+    })));
+
+    let ctx = Context::full(&rt).map_err(|err| ExtractError::JavaScriptRuntimeInit {
+        reason: err.to_string(),
+    })?;
 
     ctx.with(|ctx| {
         // Set up minimal browser stubs so scripts don't crash on missing globals.
@@ -110,11 +140,16 @@ pub fn extract_js_data(html: &str) -> Vec<JsDataBlob> {
             globalThis.Promise = Promise;
             self.__next_f = self.__next_f || [];
         "#;
-        let _ = ctx.eval::<(), _>(setup);
+        ctx.eval::<(), _>(setup)
+            .map_err(|err| ExtractError::JavaScriptRuntimeFailure {
+                stage: "setup",
+                reason: err.to_string(),
+            })?;
 
-        // Execute each inline script, silently ignoring errors
+        // Execute each inline script, ignoring ordinary page exceptions while
+        // surfacing runtime setup/timeout failures explicitly.
         for script in &scripts {
-            let _ = ctx.eval::<(), _>(script.as_str());
+            run_script(&ctx, script, &timed_out)?;
         }
 
         // Scan window.__* properties for data blobs
@@ -152,13 +187,21 @@ pub fn extract_js_data(html: &str) -> Vec<JsDataBlob> {
             })()
         "#;
 
-        let Ok(raw): Result<String, _> = ctx.eval(scan) else {
-            return Vec::new();
-        };
+        let raw: String =
+            ctx.eval(scan)
+                .map_err(|err| ExtractError::JavaScriptRuntimeFailure {
+                    stage: "scan",
+                    reason: err.to_string(),
+                })?;
+        drain_pending_jobs(&ctx, &timed_out)?;
 
-        let Ok(entries) = serde_json::from_str::<Vec<RawBlob>>(&raw) else {
-            return Vec::new();
-        };
+        let entries =
+            serde_json::from_str::<Vec<RawBlob>>(&raw).map_err(|err| {
+                ExtractError::JavaScriptRuntimeFailure {
+                    stage: "scan",
+                    reason: err.to_string(),
+                }
+            })?;
 
         let blobs: Vec<JsDataBlob> = entries
             .into_iter()
@@ -181,8 +224,44 @@ pub fn extract_js_data(html: &str) -> Vec<JsDataBlob> {
             );
         }
 
-        blobs
+        Ok(blobs)
     })
+}
+
+fn run_script(ctx: &Ctx<'_>, script: &str, timed_out: &AtomicBool) -> Result<(), ExtractError> {
+    timed_out.store(false, Ordering::Relaxed);
+
+    match ctx.clone().eval::<(), _>(script) {
+        Ok(()) => drain_pending_jobs(ctx, timed_out),
+        Err(err) => {
+            if timed_out.swap(false, Ordering::Relaxed) {
+                return Err(timeout_error());
+            }
+
+            debug!(error = %err, "ignoring inline script error during JS extraction");
+            Ok(())
+        }
+    }
+}
+
+fn drain_pending_jobs(ctx: &Ctx<'_>, timed_out: &AtomicBool) -> Result<(), ExtractError> {
+    while ctx.execute_pending_job() {
+        if timed_out.swap(false, Ordering::Relaxed) {
+            return Err(timeout_error());
+        }
+    }
+
+    if timed_out.swap(false, Ordering::Relaxed) {
+        return Err(timeout_error());
+    }
+
+    Ok(())
+}
+
+fn timeout_error() -> ExtractError {
+    ExtractError::JavaScriptTimeout {
+        timeout_ms: u64::try_from(JS_EXECUTION_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+    }
 }
 
 /// Intermediate deserialization target for the scan script output.
@@ -479,7 +558,7 @@ mod tests {
         </script>
         </body></html>"#;
 
-        let blobs = extract_js_data(html);
+        let blobs = extract_js_data(html).unwrap();
         assert!(!blobs.is_empty(), "should extract at least one blob");
         assert!(
             blobs.iter().any(|b| b.name == "__preloadedData"),
@@ -501,7 +580,7 @@ mod tests {
         <script>window.__testData = {"content": "This is a test sentence that is long enough to be extracted from the page and it needs over one hundred characters of JSON to pass the threshold."};</script>
         </body></html>"#;
 
-        let blobs = extract_js_data(html);
+        let blobs = extract_js_data(html).unwrap();
         assert_eq!(
             blobs.len(),
             1,
@@ -512,7 +591,7 @@ mod tests {
 
     #[test]
     fn empty_html_returns_no_blobs() {
-        let blobs = extract_js_data("<html><body></body></html>");
+        let blobs = extract_js_data("<html><body></body></html>").unwrap();
         assert!(blobs.is_empty());
     }
 
@@ -587,10 +666,20 @@ mod tests {
         <script>window.__survived = {"message": "This script ran after the errors and the data should still be found in the extracted blobs because it exceeds the minimum threshold."};</script>
         </body></html>"#;
 
-        let blobs = extract_js_data(html);
+        let blobs = extract_js_data(html).unwrap();
         assert!(
             blobs.iter().any(|b| b.name == "__survived"),
             "should extract data from scripts that succeed after failures"
         );
+    }
+
+    #[test]
+    fn hostile_script_times_out() {
+        let html = r#"<html><body>
+        <script>while (true) {}</script>
+        </body></html>"#;
+
+        let err = extract_js_data(html).unwrap_err();
+        assert!(matches!(err, ExtractError::JavaScriptTimeout { .. }));
     }
 }

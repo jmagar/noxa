@@ -12,4 +12,25 @@ pub enum ExtractError {
 
     #[error("no content found")]
     NoContent,
+
+    #[error("failed to spawn extraction worker: {reason}")]
+    WorkerSpawn { reason: String },
+
+    #[error("extraction worker timed out after {timeout_ms}ms")]
+    WorkerTimeout { timeout_ms: u64 },
+
+    #[error("extraction worker panicked: {message}")]
+    WorkerPanic { message: String },
+
+    #[error("failed to initialize JavaScript runtime: {reason}")]
+    JavaScriptRuntimeInit { reason: String },
+
+    #[error("JavaScript runtime failed during {stage}: {reason}")]
+    JavaScriptRuntimeFailure {
+        stage: &'static str,
+        reason: String,
+    },
+
+    #[error("JavaScript execution timed out after {timeout_ms}ms")]
+    JavaScriptTimeout { timeout_ms: u64 },
 }

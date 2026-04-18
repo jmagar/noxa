@@ -1,10 +1,19 @@
+#[cfg(all(feature = "quickjs", target_arch = "wasm32"))]
+compile_error!(
+    "The optional `quickjs` feature is not supported on wasm32 targets. Use the default DOM-only build for WASM portability."
+);
+
 pub mod brand;
 pub(crate) mod data_island;
 /// noxa-core: Pure HTML content extraction engine for LLMs.
 ///
 /// Takes raw HTML + optional URL, returns structured content
 /// (metadata, markdown, plain text, links, images, code blocks).
-/// Zero network dependencies — WASM-compatible by design.
+/// The default build is DOM-only and avoids runtime JavaScript execution.
+/// On native targets, `extract_with_options` uses a larger-stack worker thread
+/// to tolerate deeply nested HTML; wasm32 builds run the same extraction path
+/// inline. The optional `quickjs` feature executes inline scripts, increases
+/// attack surface, and is intended only for trusted/native opt-in callers.
 pub mod diff;
 pub mod domain;
 pub mod error;
@@ -32,6 +41,14 @@ pub use types::{
 use scraper::Html;
 use url::Url;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::{any::Any, sync::mpsc, time::Duration};
+
+#[cfg(not(target_arch = "wasm32"))]
+const EXTRACTION_STACK_SIZE: usize = 8 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
+const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Extract structured content from raw HTML.
 ///
 /// `html` — raw HTML string to parse
@@ -46,28 +63,82 @@ pub fn extract(html: &str, url: Option<&str>) -> Result<ExtractionResult, Extrac
 /// `url`     — optional source URL, used for resolving relative links and domain detection
 /// `options` — controls include/exclude selectors, main content mode, and raw HTML output
 ///
-/// Spawns extraction on a thread with an 8 MB stack to handle deeply nested
-/// HTML (e.g., Express.co.uk live blogs) without overflowing the default 1-2 MB
-/// main-thread stack on Windows.
+/// Native targets spawn extraction on a worker thread with an 8 MB stack to
+/// handle deeply nested HTML (e.g., Express.co.uk live blogs) without
+/// overflowing smaller default stacks. wasm32 targets run the extraction
+/// inline because threads are not part of the portable baseline there.
 pub fn extract_with_options(
     html: &str,
     url: Option<&str>,
     options: &ExtractionOptions,
 ) -> Result<ExtractionResult, ExtractError> {
-    // The default main-thread stack on Windows is 1 MB, which can overflow
-    // on deeply nested pages.  Spawn a worker thread with 8 MB to be safe.
-    const STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+    #[cfg(target_arch = "wasm32")]
+    {
+        return extract_with_options_inner(html, url, options);
+    }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return extract_with_options_threaded(html, url, options);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn extract_with_options_threaded(
+    html: &str,
+    url: Option<&str>,
+    options: &ExtractionOptions,
+) -> Result<ExtractionResult, ExtractError> {
     let html = html.to_string();
     let url = url.map(|u| u.to_string());
     let options = options.clone();
+    let (tx, rx) = mpsc::sync_channel(1);
 
-    std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(move || extract_with_options_inner(&html, url.as_deref(), &options))
-        .map_err(|_| ExtractError::NoContent)?
-        .join()
-        .unwrap_or(Err(ExtractError::NoContent))
+    let handle = std::thread::Builder::new()
+        .stack_size(EXTRACTION_STACK_SIZE)
+        .spawn(move || {
+            let result = extract_with_options_inner(&html, url.as_deref(), &options);
+            let _ = tx.send(result);
+        })
+        .map_err(|err| ExtractError::WorkerSpawn {
+            reason: err.to_string(),
+        })?;
+
+    match rx.recv_timeout(EXTRACTION_TIMEOUT) {
+        Ok(result) => {
+            handle.join().map_err(|panic| ExtractError::WorkerPanic {
+                message: panic_payload_message(panic),
+            })?;
+            result
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(ExtractError::WorkerTimeout {
+            timeout_ms: duration_to_millis(EXTRACTION_TIMEOUT),
+        }),
+        Err(mpsc::RecvTimeoutError::Disconnected) => match handle.join() {
+            Ok(()) => Err(ExtractError::WorkerPanic {
+                message: "worker exited before sending a result".to_string(),
+            }),
+            Err(panic) => Err(ExtractError::WorkerPanic {
+                message: panic_payload_message(panic),
+            }),
+        },
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn panic_payload_message(payload: Box<dyn Any + Send + 'static>) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn duration_to_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn extract_with_options_inner(
@@ -189,7 +260,7 @@ fn extract_with_options_inner(
     // static JSON data island extraction above with runtime-evaluated data.
     #[cfg(feature = "quickjs")]
     {
-        let blobs = js_eval::extract_js_data(html);
+        let blobs = js_eval::extract_js_data(html)?;
         if !blobs.is_empty() {
             let js_text = js_eval::extract_readable_text(&blobs);
             if !js_text.is_empty() {
@@ -220,6 +291,8 @@ fn extract_with_options_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "quickjs")]
+    use std::time::{Duration, Instant};
 
     #[test]
     fn full_extraction_pipeline() {
@@ -343,6 +416,27 @@ mod tests {
 
         // Should still extract something via normal pipeline
         assert!(result.content.markdown.contains("Some YouTube Page"));
+    }
+
+    #[cfg(feature = "quickjs")]
+    #[test]
+    fn hostile_inline_js_returns_structured_timeout_error() {
+        let html = r#"<html><body>
+            <article><h1>Page</h1><p>Visible content</p></article>
+            <script>while (true) {}</script>
+        </body></html>"#;
+
+        let start = Instant::now();
+        let result = extract(html, Some("https://example.com"));
+
+        assert!(matches!(
+            result,
+            Err(ExtractError::JavaScriptTimeout { .. })
+        ));
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "hostile JS should time out promptly"
+        );
     }
 
     // --- ExtractionOptions tests ---
