@@ -16,12 +16,14 @@ pub(crate) async fn run_refresh(
 
     let store_root = content_store_root(resolved.output_dir.as_deref());
     let store = FilesystemContentStore::new(&store_root);
-    let urls = store
+    let domain_result = store
         .list_domain_urls(domain)
         .await
         .map_err(|e| format!("failed to enumerate domain URLs: {e}"))?;
+    let urls = domain_result.urls;
+    let skipped_sidecars = domain_result.skipped;
 
-    if urls.is_empty() {
+    if urls.is_empty() && skipped_sidecars == 0 {
         eprintln!("{dim}no cached docs found for{reset} {bold}{domain}{reset}");
         eprintln!("{dim}run:{reset} {cyan}noxa --list {domain}{reset}");
         return Ok(());
@@ -88,6 +90,13 @@ pub(crate) async fn run_refresh(
             format!("{dim}0 failed{reset}")
         }
     );
+
+    if skipped_sidecars > 0 {
+        eprintln!(
+            "  {yellow}warning{reset}  {skipped_sidecars} sidecar{} skipped due to parse errors",
+            if skipped_sidecars == 1 { "" } else { "s were" }
+        );
+    }
 
     if failed > 0 {
         Err(format!("{failed} refreshes failed"))

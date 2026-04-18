@@ -36,6 +36,16 @@ pub struct DomainEntry {
     pub doc_count: usize,
 }
 
+/// Result returned by [`FilesystemContentStore::list_domain_urls`].
+#[derive(Debug, Clone)]
+pub struct DomainUrlsResult {
+    /// All URLs successfully parsed from sidecars under the domain directory.
+    pub urls: Vec<String>,
+    /// Number of `.json` sidecar files that were present but could not be parsed
+    /// (corrupt, truncated, or unrecognised format).
+    pub skipped: usize,
+}
+
 // ── FilesystemContentStore impl ──────────────────────────────────────────────
 
 impl FilesystemContentStore {
@@ -136,22 +146,28 @@ impl FilesystemContentStore {
     /// This replaces the CLI-level `collect_refresh_urls` function with an
     /// implementation that lives inside the storage boundary, applies the same
     /// symlink-escape check, and uses typed sidecar parsing.
-    pub async fn list_domain_urls(&self, domain: &str) -> Result<Vec<String>, StoreError> {
+    ///
+    /// Returns a [`DomainUrlsResult`] that includes both the parsed URLs and a
+    /// count of sidecars that were skipped due to parse or I/O errors, so
+    /// callers can surface those skips to users instead of silently ignoring
+    /// them.
+    pub async fn list_domain_urls(&self, domain: &str) -> Result<DomainUrlsResult, StoreError> {
         let dir = match self.domain_dir(domain) {
             Some(d) => d,
-            None => return Ok(Vec::new()),
+            None => return Ok(DomainUrlsResult { urls: Vec::new(), skipped: 0 }),
         };
 
         if !dir.exists() {
-            return Ok(Vec::new());
+            return Ok(DomainUrlsResult { urls: Vec::new(), skipped: 0 });
         }
 
         let canonical_root = self.get_canonical_root()?;
         let mut urls: Vec<String> = Vec::new();
-        collect_urls_async(&dir, &canonical_root, &mut urls).await;
+        let mut skipped: usize = 0;
+        collect_urls_async(&dir, &canonical_root, &mut urls, &mut skipped).await;
         urls.sort();
         urls.dedup();
-        Ok(urls)
+        Ok(DomainUrlsResult { urls, skipped })
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -237,7 +253,13 @@ async fn collect_docs_async(
 /// Recursively collect URLs from `.json` sidecars under `dir`.
 ///
 /// Symlinks that would escape `canonical_root` are silently skipped.
-async fn collect_urls_async(dir: &Path, canonical_root: &Path, out: &mut Vec<String>) {
+/// Sidecars that exist but cannot be parsed increment `skipped`.
+async fn collect_urls_async(
+    dir: &Path,
+    canonical_root: &Path,
+    out: &mut Vec<String>,
+    skipped: &mut usize,
+) {
     // Safety: reject traversal escaping the canonical root.
     match tokio::fs::canonicalize(dir).await {
         Ok(canonical_dir) if canonical_dir.starts_with(canonical_root) => {}
@@ -266,7 +288,7 @@ async fn collect_urls_async(dir: &Path, canonical_root: &Path, out: &mut Vec<Str
         }
 
         if ft.is_dir() {
-            Box::pin(collect_urls_async(&path, canonical_root, out)).await;
+            Box::pin(collect_urls_async(&path, canonical_root, out, skipped)).await;
             continue;
         }
 
@@ -276,7 +298,10 @@ async fn collect_urls_async(dir: &Path, canonical_root: &Path, out: &mut Vec<Str
 
         match parse_url_from_sidecar_file(&path).await {
             Some(url) => out.push(url),
-            None => {}
+            None => {
+                // The file exists but could not be parsed — count as a corrupt sidecar.
+                *skipped += 1;
+            }
         }
     }
 }

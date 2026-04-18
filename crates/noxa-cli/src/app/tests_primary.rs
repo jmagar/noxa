@@ -249,11 +249,12 @@ mod tests {
             .await
             .unwrap();
 
-        let urls = store
+        let result = store
             .list_domain_urls("docs.rust-lang.org")
             .await
             .unwrap();
-        assert_eq!(urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
+        assert_eq!(result.urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
+        assert_eq!(result.skipped, 0);
     }
 
     #[cfg(unix)]
@@ -290,11 +291,11 @@ mod tests {
 
         symlink(&outside_dir, domain_dir.join("escape")).unwrap();
 
-        let urls = store
+        let result = store
             .list_domain_urls("docs.rust-lang.org")
             .await
             .unwrap();
-        assert_eq!(urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
+        assert_eq!(result.urls, vec!["https://docs.rust-lang.org/book/".to_string()]);
     }
 
     #[test]

@@ -8,7 +8,7 @@ mod migrate;
 mod permissions;
 mod write;
 
-pub use enumerate::{DomainEntry, StoredDoc};
+pub use enumerate::{DomainEntry, DomainUrlsResult, StoredDoc};
 use migrate::parse_sidecar_or_migrate;
 
 use std::path::{Component, PathBuf};

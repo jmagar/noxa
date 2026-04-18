@@ -11,7 +11,7 @@ pub mod paths;
 pub mod types;
 pub mod url_validation;
 
-pub use content_store::{ChangelogEntry, DomainEntry, FilesystemContentStore, Sidecar, StoredDoc};
+pub use content_store::{ChangelogEntry, DomainEntry, DomainUrlsResult, FilesystemContentStore, Sidecar, StoredDoc};
 pub use operations_log::FilesystemOperationsLog;
 pub use paths::{content_store_root, domain_from_url, try_url_to_store_path, url_to_store_path};
 pub use types::{Op, OperationEntry, StoreError, StoreResult};

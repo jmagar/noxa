@@ -259,6 +259,60 @@ async fn test_max_content_bytes_guard_skips_oversized() {
 }
 
 #[tokio::test]
+async fn test_sidecar_bloat_triggers_guard_despite_small_markdown() {
+    // The old heuristic only checked markdown.len() + plain_text.len() and ignored
+    // sidecar growth from metadata cardinality. This test verifies that a document
+    // with small markdown but bulky metadata (many technologies, long description,
+    // lots of links, changelog history) is correctly rejected once the serialized
+    // sidecar + markdown exceeds max_content_bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = FilesystemContentStore::new(dir.path());
+
+    // First: set a large enough cap that the first write succeeds.
+    store.max_content_bytes = Some(64 * 1024); // 64 KiB
+
+    // Build an extraction with small markdown but very bulky metadata.
+    let small_markdown = "# Small\n\nTiny content.";
+    let mut extraction = make_extraction(small_markdown);
+    // Stuff the metadata with many technologies to inflate the sidecar JSON.
+    extraction.metadata.technologies = (0..500)
+        .map(|i| format!("technology-framework-{i:04}"))
+        .collect();
+    extraction.metadata.description =
+        Some("x".repeat(10_000)); // 10 KB description
+
+    // Populate links to further inflate the sidecar's current.content.links array.
+    extraction.content.links = (0..200)
+        .map(|i| noxa_core::Link {
+            href: format!("https://example.com/link-{i:04}/very/long/path/segment"),
+            text: format!("Link text for item number {i} with extra padding"),
+        })
+        .collect();
+
+    let result = store
+        .write("https://example.com/bloat", &extraction)
+        .await
+        .unwrap();
+    // First write: sidecar is small enough, should succeed.
+    assert!(result.is_new, "first write should succeed under 64 KiB cap");
+
+    // Now tighten the cap to something that the markdown alone would pass but
+    // the full sidecar (which holds the ExtractionResult with all those fields)
+    // would exceed. The serialized sidecar is well above 2 KB given the above.
+    store.max_content_bytes = Some(512); // 512 bytes
+
+    let result2 = store
+        .write("https://example.com/bloat", &extraction)
+        .await
+        .unwrap();
+    // Guard must fire: markdown is ~22 bytes but sidecar JSON is many KB.
+    assert!(
+        !result2.is_new && !result2.changed,
+        "oversized sidecar should be rejected even when markdown alone is small"
+    );
+}
+
+#[tokio::test]
 async fn test_sidecar_first_write_has_one_changelog_entry() {
     let dir = tempfile::tempdir().unwrap();
     let store = FilesystemContentStore::new(dir.path());
@@ -651,12 +705,13 @@ async fn test_list_domain_urls_scoped_to_domain() {
         .await
         .unwrap();
 
-    let urls = store
+    let result = store
         .list_domain_urls("docs.example.com")
         .await
         .unwrap();
-    assert_eq!(urls.len(), 1);
-    assert_eq!(urls[0], "https://docs.example.com/book");
+    assert_eq!(result.urls.len(), 1);
+    assert_eq!(result.urls[0], "https://docs.example.com/book");
+    assert_eq!(result.skipped, 0);
 }
 
 #[cfg(unix)]
@@ -700,7 +755,32 @@ async fn test_list_domain_urls_skips_symlink_escapes() {
     let domain_dir = store_root.join("example_com");
     symlink(&outside_dir, domain_dir.join("escape")).unwrap();
 
-    let urls = store.list_domain_urls("example.com").await.unwrap();
+    let result = store.list_domain_urls("example.com").await.unwrap();
     // Only the legit URL should appear; the symlink escape should be skipped
-    assert_eq!(urls, vec!["https://example.com/legit".to_string()]);
+    assert_eq!(result.urls, vec!["https://example.com/legit".to_string()]);
+}
+
+#[tokio::test]
+async fn test_list_domain_urls_counts_corrupt_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+
+    // Write one valid entry so there is at least one parseable sidecar.
+    store
+        .write(
+            "https://example.com/good",
+            &make_extraction_with_url("good", "https://example.com/good", "Good"),
+        )
+        .await
+        .unwrap();
+
+    // Plant a corrupt JSON sidecar directly in the domain directory.
+    let domain_dir = dir.path().join("example_com");
+    tokio::fs::write(domain_dir.join("corrupt.json"), b"this is not json at all")
+        .await
+        .unwrap();
+
+    let result = store.list_domain_urls("example.com").await.unwrap();
+    assert_eq!(result.urls, vec!["https://example.com/good".to_string()]);
+    assert_eq!(result.skipped, 1, "corrupt sidecar should be counted as skipped");
 }
