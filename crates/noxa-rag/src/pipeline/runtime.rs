@@ -53,6 +53,7 @@ fn spawn_workers(
         let config = pipeline.config.clone();
         let url_locks = pipeline.url_locks.clone();
         let counters = pipeline.counters.clone();
+        let failed_jobs_log_lock = pipeline.failed_jobs_log_lock.clone();
         let watch_root = watch_root.clone();
 
         let handle = tokio::spawn(async move {
@@ -74,6 +75,8 @@ fn spawn_workers(
                                 &config,
                                 &url_locks,
                                 watch_root.as_ref(),
+                                &counters,
+                                &failed_jobs_log_lock,
                             )
                             .await
                             {
@@ -355,8 +358,9 @@ fn spawn_heartbeat(
                 _ = interval.tick() => {
                     let uptime_m = session_start.elapsed().as_secs() / 60;
                     tracing::info!(
-                        indexed = counters.files_indexed.load(std::sync::atomic::Ordering::Relaxed),
-                        failed  = counters.files_failed.load(std::sync::atomic::Ordering::Relaxed),
+                        indexed       = counters.files_indexed.load(std::sync::atomic::Ordering::Relaxed),
+                        failed        = counters.files_failed.load(std::sync::atomic::Ordering::Relaxed),
+                        parse_failures = counters.parse_failures.load(std::sync::atomic::Ordering::Relaxed),
                         uptime_m,
                         "pipeline alive"
                     );
@@ -399,6 +403,10 @@ async fn drain_and_report(
         .counters
         .files_failed
         .load(std::sync::atomic::Ordering::Relaxed);
+    let parse_failures = pipeline
+        .counters
+        .parse_failures
+        .load(std::sync::atomic::Ordering::Relaxed);
     let chunks = pipeline
         .counters
         .total_chunks
@@ -416,6 +424,7 @@ async fn drain_and_report(
     tracing::info!(
         indexed,
         failed,
+        parse_failures,
         chunks,
         avg_embed_ms,
         avg_upsert_ms,

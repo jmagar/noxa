@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
 use tokenizers::Tokenizer;
@@ -14,7 +15,10 @@ use crate::types::Point;
 
 use super::parse;
 use super::scan;
-use super::{IndexJob, JobStats};
+use super::{IndexJob, JobStats, SessionCounters};
+
+/// Maximum size of the failed-jobs log before it is rotated (10 MiB).
+const FAILED_JOBS_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 fn is_private_ip(host: &str) -> bool {
     if let Ok(addr) = host.parse::<IpAddr>() {
@@ -92,15 +96,60 @@ pub(crate) fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     Ok(())
 }
 
-async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, config: &RagConfig) {
+/// Append one NDJSON failure entry to the failed-jobs log.
+///
+/// Performs size-based rotation under `log_lock`: if the log exceeds
+/// `FAILED_JOBS_LOG_MAX_BYTES`, the existing file is renamed to `<path>.1`
+/// (overwriting any prior `.1` backup) and a fresh log is started.
+///
+/// The entire check-rotate-append sequence is serialised by `log_lock` so
+/// concurrent workers cannot race on the rename.
+async fn append_failed_job(
+    path: &Path,
+    error: &impl std::fmt::Display,
+    config: &RagConfig,
+    counters: &Arc<SessionCounters>,
+    log_lock: &Arc<tokio::sync::Mutex<()>>,
+) {
+    // Increment the parse-failure counter regardless of whether a log path is
+    // configured — this ensures the heartbeat metric is always accurate.
+    counters.parse_failures.fetch_add(1, Ordering::Relaxed);
+
     let Some(ref log_path) = config.pipeline.failed_jobs_log else {
         return;
     };
+
     let entry = serde_json::json!({
         "path": path.to_string_lossy(),
         "error": error.to_string(),
         "ts": chrono::Utc::now().to_rfc3339(),
     });
+    let line = format!("{entry}\n");
+
+    // Serialise the check-rotate-append sequence across concurrent workers.
+    let _guard = log_lock.lock().await;
+
+    // Rotate if the log has grown past the cap.
+    if let Ok(meta) = tokio::fs::metadata(log_path).await {
+        if meta.len() >= FAILED_JOBS_LOG_MAX_BYTES {
+            let mut rotated = log_path.as_os_str().to_owned();
+            rotated.push(".1");
+            if let Err(e) = tokio::fs::rename(log_path, &rotated).await {
+                tracing::warn!(
+                    log = %log_path.display(),
+                    error = %e,
+                    "failed to rotate failed-jobs log; continuing with existing file"
+                );
+            } else {
+                tracing::info!(
+                    log = %log_path.display(),
+                    max_bytes = FAILED_JOBS_LOG_MAX_BYTES,
+                    "rotated failed-jobs log"
+                );
+            }
+        }
+    }
+
     if let Ok(mut file) = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -108,7 +157,7 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, config: 
         .await
     {
         use tokio::io::AsyncWriteExt;
-        let _ = file.write_all(format!("{}\n", entry).as_bytes()).await;
+        let _ = file.write_all(line.as_bytes()).await;
     }
 }
 
@@ -120,6 +169,8 @@ pub(crate) async fn process_job(
     config: &RagConfig,
     url_locks: &Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     watch_root: &Path,
+    counters: &Arc<SessionCounters>,
+    failed_jobs_log_lock: &Arc<tokio::sync::Mutex<()>>,
 ) -> Result<JobStats, RagError> {
     let job_start = std::time::Instant::now();
 
@@ -163,7 +214,7 @@ pub(crate) async fn process_job(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(path = ?job.path, error = %e, "parse failed, skipping");
-            append_failed_job(&job.path, &e, config).await;
+            append_failed_job(&job.path, &e, config, counters, failed_jobs_log_lock).await;
             return Ok(JobStats {
                 chunks: 0,
                 embed_ms: 0,
