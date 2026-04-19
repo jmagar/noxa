@@ -280,6 +280,26 @@ async fn spawn_status_server(status: u16, body: &'static str) -> String {
 }
 
 #[tokio::test]
+async fn fetch_rejects_retryable_status_after_exhaustion() {
+    // fetch() had a latent bug: on the last retry attempt with a retryable
+    // status (429/5xx), it returned Ok(FetchResult{status:429}) because the
+    // condition `attempt < delays.len()-1` was false and the result fell
+    // through to `return Ok`. Fixed by removing that guard so the `continue`
+    // on the last iteration exits the loop and Err(last_err) is returned.
+    let url = spawn_status_server(429, "# 429 Too Many Requests\n\nnginx").await;
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+    let result = client.fetch(&url).await;
+    assert!(
+        result.is_err(),
+        "fetch must return Err for 429 after retry exhaustion, got Ok"
+    );
+    assert!(
+        matches!(result.unwrap_err(), FetchError::HttpStatus(429)),
+        "expected HttpStatus(429)"
+    );
+}
+
+#[tokio::test]
 async fn fetch_and_extract_rejects_non_2xx_status() {
     let url = spawn_status_server(429, "# 429 Too Many Requests\n\nnginx").await;
     let client = FetchClient::new(FetchConfig::default()).unwrap();

@@ -44,7 +44,7 @@ impl FetchClient {
 
             match self.fetch_once(url).await {
                 Ok(result) => {
-                    if is_retryable_status(result.status) && attempt < delays.len() - 1 {
+                    if is_retryable_status(result.status) {
                         warn!(
                             url,
                             status = result.status,
