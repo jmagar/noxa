@@ -200,7 +200,7 @@ impl FetchClient {
         let status = response.status();
         let final_url = response.url().to_string();
 
-        if !(200u16..300).contains(&status) {
+        if !response.is_success() {
             return Err(FetchError::HttpStatus(status));
         }
 
