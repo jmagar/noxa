@@ -60,7 +60,10 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref query) = cli.retrieve {
-        run_retrieve(query, content_store_root(resolved.output_dir.as_deref())).await;
+        if let Err(e) = run_retrieve(query, content_store_root(resolved.output_dir.as_deref())).await {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
         return;
     }
 
@@ -123,12 +126,18 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref filter) = cli.list {
-        run_list(filter, content_store_root(resolved.output_dir.as_deref())).await;
+        if let Err(e) = run_list(filter, content_store_root(resolved.output_dir.as_deref())).await {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
         return;
     }
 
     if let Some(ref pattern) = cli.grep {
-        run_grep(pattern, content_store_root(resolved.output_dir.as_deref())).await;
+        if let Err(e) = run_grep(pattern, content_store_root(resolved.output_dir.as_deref())).await {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
         return;
     }
 

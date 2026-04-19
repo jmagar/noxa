@@ -1,11 +1,21 @@
 use super::*;
 
-pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
+const MAX_URL_DISPLAY: usize = 80;
+
+fn truncate_url(url: &str) -> String {
+    if url.len() <= MAX_URL_DISPLAY {
+        return url.to_string();
+    }
+    let truncated: String = url.chars().take(MAX_URL_DISPLAY - 3).collect();
+    format!("{truncated}...")
+}
+
+pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) -> Result<(), String> {
     if !store_root.exists() {
         eprintln!(
             "{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}"
         );
-        return;
+        return Ok(());
     }
 
     let store = FilesystemContentStore::new(&store_root);
@@ -14,15 +24,12 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
         // Top-level: list all domain directories with doc counts.
         let domains = match store.list_domains().await {
             Ok(domains) => domains,
-            Err(e) => {
-                eprintln!("error listing stored docs: {e}");
-                return;
-            }
+            Err(e) => return Err(format!("error listing stored docs: {e}")),
         };
 
         if domains.is_empty() {
             eprintln!("{dim}no docs stored yet{reset}");
-            return;
+            return Ok(());
         }
 
         let total: usize = domains.iter().map(|d| d.doc_count).sum();
@@ -36,18 +43,19 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
         let domain = filter.strip_prefix("www.").unwrap_or(filter);
         let docs = match store.list_docs(domain).await {
             Ok(docs) => docs,
-            Err(e) => {
-                eprintln!("error listing docs for {filter}: {e}");
-                return;
-            }
+            Err(e) => return Err(format!("error listing docs for {filter}: {e}")),
         };
 
         if docs.is_empty() {
             eprintln!("{dim}no docs found for{reset} {bold}{filter}{reset}");
-            return;
+            return Ok(());
         }
 
-        let url_width = docs.iter().map(|d| d.url.len()).max().unwrap_or(0);
+        let url_width = docs
+            .iter()
+            .map(|d| d.url.len().min(MAX_URL_DISPLAY))
+            .max()
+            .unwrap_or(0);
 
         eprintln!(
             "\n{bold}{cyan}{filter}{reset}  {dim}({} docs){reset}\n",
@@ -58,22 +66,27 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) {
                 .md_path
                 .strip_prefix(&store_root)
                 .unwrap_or(&doc.md_path);
+            let display_url = truncate_url(&doc.url);
             eprintln!(
                 "  {blue}{:<url_width$}{reset}  {dim}{}{reset}",
-                doc.url,
+                display_url,
                 rel.display()
             );
         }
         eprintln!();
     }
+    Ok(())
 }
 
-pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
+pub(crate) async fn run_grep(
+    pattern: &str,
+    store_root: std::path::PathBuf,
+) -> Result<(), String> {
     if !store_root.exists() {
         eprintln!(
             "{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}"
         );
-        return;
+        return Ok(());
     }
 
     eprintln!(
@@ -101,35 +114,54 @@ pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // rg not installed — fall back using the store enumeration API
+            // rg not installed — fall back using the store enumeration API with regex
             eprintln!("{dim}rg not found, using built-in search{reset}\n");
-            let pattern_lower = pattern.to_lowercase();
-            let mut matched_files = 0usize;
-            let mut matched_lines = 0usize;
+
+            // Match rg smart-case: case-insensitive unless pattern has uppercase.
+            let pat = if pattern.chars().any(|c| c.is_uppercase()) {
+                pattern.to_string()
+            } else {
+                format!("(?i){pattern}")
+            };
+            let re = match regex::Regex::new(&pat) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("invalid pattern: {e}")),
+            };
 
             let store = FilesystemContentStore::new(&store_root);
             let docs = match store.list_all_docs().await {
                 Ok(docs) => docs,
-                Err(e) => {
-                    eprintln!("error enumerating docs: {e}");
-                    return;
-                }
+                Err(e) => return Err(format!("error enumerating docs: {e}")),
             };
 
+            // Read all files concurrently then process results in path order.
+            let mut set = tokio::task::JoinSet::new();
             for doc in &docs {
-                let Ok(content) = tokio::fs::read_to_string(&doc.md_path).await else {
-                    continue;
-                };
+                let md_path = doc.md_path.clone();
+                let url = doc.url.clone();
+                set.spawn(async move {
+                    let content = tokio::fs::read_to_string(&md_path).await;
+                    (url, md_path, content)
+                });
+            }
+            let mut read_results: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+            while let Some(res) = set.join_next().await {
+                if let Ok((url, md_path, Ok(content))) = res {
+                    read_results.push((url, md_path, content));
+                }
+            }
+            read_results.sort_by(|a, b| a.1.cmp(&b.1));
+
+            let mut matched_files = 0usize;
+            let mut matched_lines = 0usize;
+            for (_url, md_path, content) in &read_results {
                 let hits: Vec<(usize, &str)> = content
                     .lines()
                     .enumerate()
-                    .filter(|(_, line)| line.to_lowercase().contains(&pattern_lower))
+                    .filter(|(_, line)| re.is_match(line))
                     .collect();
                 if !hits.is_empty() {
-                    let rel = doc
-                        .md_path
-                        .strip_prefix(&store_root)
-                        .unwrap_or(&doc.md_path);
+                    let rel = md_path.strip_prefix(&store_root).unwrap_or(md_path);
                     eprintln!("{pink}{}{reset}", rel.display());
                     for (lineno, line) in &hits {
                         let trimmed = line.trim();
@@ -152,19 +184,23 @@ pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) {
         }
         Err(e) => eprintln!("error running rg: {e}"),
     }
+    Ok(())
 }
 
-fn truncate_display(line: &str, max_chars: usize) -> &str {
-    let mut end = line.len();
+fn truncate_display(line: &str, max_chars: usize) -> String {
+    let mut end = None;
     let mut seen = 0usize;
     for (idx, _) in line.char_indices() {
         if seen == max_chars {
-            end = idx;
+            end = Some(idx);
             break;
         }
         seen += 1;
     }
-    if seen < max_chars { line } else { &line[..end] }
+    match end {
+        Some(idx) => format!("{}...", &line[..idx]),
+        None => line.to_string(),
+    }
 }
 
 pub(crate) async fn run_search(

@@ -20,13 +20,11 @@ pub(crate) fn classify_query(query: &str) -> (bool, String) {
                 .ok()
                 .and_then(|u| u.host_str().map(|h| h.to_string()))
                 .map(|host| {
-                    let parts: Vec<&str> = host.split('.').collect();
-                    parts.len() >= 2
-                        && parts
-                            .last()
-                            .map(|tld| {
-                                tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
-                            })
+                    host.contains('.')
+                        && host
+                            .split('.')
+                            .next_back()
+                            .map(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()))
                             .unwrap_or(false)
                 })
                 .unwrap_or(false)
@@ -47,48 +45,82 @@ pub(crate) fn is_exact_url_match(doc: &noxa_store::StoredDoc, query: &str) -> bo
     doc.url == normalised || doc.url == query
 }
 
-/// Score a single document against `terms` (lower-cased query words).
+/// Split text into lowercase word tokens on any non-alphanumeric character.
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect()
+}
+
+const STOP_WORDS: &[&str] = &[
+    "the", "a", "an", "of", "in", "and", "or", "for", "to", "with", "is", "at", "by", "from",
+];
+
+fn filter_stop_words(terms: Vec<String>) -> Vec<String> {
+    terms.into_iter().filter(|t| !STOP_WORDS.contains(&t.as_str())).collect()
+}
+
+/// Score a single document against `terms` (lower-cased query tokens).
 ///
-/// Score = number of terms that appear in the lower-cased URL **or** title.
+/// Score = number of terms that match a word token in the URL path or title.
+/// Word-boundary matching prevents "rust" from scoring "trust" or "rusted".
 /// Documents that match zero terms score 0.
 pub(crate) fn score_doc(doc: &noxa_store::StoredDoc, terms: &[String]) -> usize {
-    let url_lower = doc.url.to_lowercase();
-    let title_lower = doc.title.as_deref().unwrap_or("").to_lowercase();
+    let url_tokens = tokenize(&doc.url);
+    let title_tokens = tokenize(doc.title.as_deref().unwrap_or(""));
     terms
         .iter()
-        .filter(|t| url_lower.contains(t.as_str()) || title_lower.contains(t.as_str()))
+        .filter(|t| url_tokens.contains(t) || title_tokens.contains(t))
         .count()
+}
+
+/// Return the top-`n` scoring documents for `query`, sorted by score desc then
+/// shorter URL first on ties.  Stop words are stripped from the query before
+/// scoring.  Returns an empty Vec when no documents score above zero.
+pub(crate) fn top_scored<'a>(
+    docs: &'a [noxa_store::StoredDoc],
+    query: &str,
+    n: usize,
+) -> Vec<(usize, &'a noxa_store::StoredDoc)> {
+    let raw: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+    let terms = filter_stop_words(raw);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, &noxa_store::StoredDoc)> = docs
+        .iter()
+        .filter_map(|doc| {
+            let s = score_doc(doc, &terms);
+            if s > 0 { Some((s, doc)) } else { None }
+        })
+        .collect();
+    scored.sort_by(|(sa, da), (sb, db)| sb.cmp(sa).then(da.url.len().cmp(&db.url.len())));
+    scored.truncate(n);
+    scored
 }
 
 /// Select the best-matching document for a fuzzy `query`.
 ///
 /// Returns `None` when no document scores above zero.
-///
-/// Tie-breaking: higher score wins; on score tie, shorter URL wins (favours
-/// more specific / canonical pages over noisy deep links).
 pub(crate) fn select_best<'a>(
     docs: &'a [noxa_store::StoredDoc],
     query: &str,
 ) -> Option<&'a noxa_store::StoredDoc> {
-    let terms: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
-
-    docs.iter()
-        .filter_map(|doc| {
-            let s = score_doc(doc, &terms);
-            if s > 0 { Some((s, doc)) } else { None }
-        })
-        .max_by(|(sa, da), (sb, db)| sa.cmp(sb).then(db.url.len().cmp(&da.url.len())))
-        .map(|(_, doc)| doc)
+    top_scored(docs, query, 1).into_iter().next().map(|(_, doc)| doc)
 }
 
 // ── CLI entry-point ───────────────────────────────────────────────────────────
 
-pub(crate) async fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
+pub(crate) async fn run_retrieve(
+    query: &str,
+    store_root: std::path::PathBuf,
+) -> Result<(), String> {
     if !store_root.exists() {
         eprintln!(
             "{dim}no local docs — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --crawl <url>{reset}"
         );
-        return;
+        return Ok(());
     }
 
     // Exact URL lookup — fast FS probe; no need to iterate list_all_docs.
@@ -104,54 +136,33 @@ pub(crate) async fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
                 Ok(content) => {
                     eprintln!("{dim}retrieved{reset} {pink}{}{reset}\n", md_path.display());
                     print!("{content}");
-                    return;
+                    return Ok(());
                 }
-                Err(e) => {
-                    eprintln!("error reading {}: {e}", md_path.display());
-                    return;
-                }
+                Err(e) => return Err(format!("error reading {}: {e}", md_path.display())),
             }
         }
         eprintln!("{yellow}not cached:{reset} {bold}{url}{reset}");
         eprintln!("{dim}run:{reset} {cyan}noxa {url}{reset} {dim}to fetch and store it{reset}");
-        return;
+        return Ok(());
     }
 
-    // Fuzzy query — score docs by how many query words appear in URL + title.
-    let terms: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
-
+    // Fuzzy query — score docs by word-token matches in URL and title.
     let store = FilesystemContentStore::new(&store_root);
     let all_docs = match store.list_all_docs().await {
         Ok(docs) => docs,
-        Err(e) => {
-            eprintln!("error enumerating docs: {e}");
-            return;
-        }
+        Err(e) => return Err(format!("error enumerating docs: {e}")),
     };
     let total_docs = all_docs.len();
 
-    let mut scored: Vec<(usize, String, std::path::PathBuf)> = all_docs
-        .iter()
-        .filter_map(|doc| {
-            let s = score_doc(doc, &terms);
-            if s > 0 {
-                Some((s, doc.url.clone(), doc.md_path.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let scored = top_scored(&all_docs, query, total_docs);
 
     if scored.is_empty() {
         eprintln!("{yellow}no cached docs match:{reset} {bold}\"{query}\"{reset}");
         eprintln!(
             "{dim}try:{reset} {cyan}noxa --search \"{query}\"{reset} {dim}to find and cache them{reset}"
         );
-        return;
+        return Ok(());
     }
-
-    // Sort by score desc; on tie prefer shorter URL (more specific)
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
 
     if scored.len() > 1 {
         eprintln!(
@@ -159,19 +170,20 @@ pub(crate) async fn run_retrieve(query: &str, store_root: std::path::PathBuf) {
             scored.len(),
             total_docs
         );
-        for (score, url, _) in scored.iter().take(5) {
-            eprintln!("  {dim}{score} match(es){reset}  {cyan}{url}{reset}");
+        for (score, doc) in scored.iter().take(5) {
+            eprintln!("  {dim}{score} match(es){reset}  {cyan}{}{reset}", doc.url);
         }
         eprintln!();
     }
 
-    let (_, best_url, best_path) = &scored[0];
-    match std::fs::read_to_string(best_path) {
+    let (_, best) = &scored[0];
+    match std::fs::read_to_string(&best.md_path) {
         Ok(content) => {
-            eprintln!("{dim}retrieved{reset} {pink}{best_url}{reset}\n");
+            eprintln!("{dim}retrieved{reset} {pink}{}{reset}\n", best.url);
             print!("{content}");
+            Ok(())
         }
-        Err(e) => eprintln!("error reading {}: {e}", best_path.display()),
+        Err(e) => Err(format!("error reading {}: {e}", best.md_path.display())),
     }
 }
 
@@ -340,6 +352,41 @@ mod tests {
         assert!(score_a > score_b, "higher title coverage should win");
     }
 
+    #[test]
+    fn score_no_substring_false_positive() {
+        // "rust" must NOT score a URL containing "trust" or "rusty".
+        let doc_trust = make_doc("https://example.com/trust-issues", None);
+        let doc_rusty = make_doc("https://example.com/rusty-tools", None);
+        let terms = vec!["rust".to_string()];
+        assert_eq!(score_doc(&doc_trust, &terms), 0, "'rust' should not match 'trust'");
+        assert_eq!(score_doc(&doc_rusty, &terms), 0, "'rust' should not match 'rusty'");
+    }
+
+    #[test]
+    fn score_exact_token_match() {
+        // "rust" SHOULD score a URL with a "rust" path segment.
+        let doc = make_doc("https://example.com/rust-book", None);
+        let terms = vec!["rust".to_string()];
+        assert_eq!(score_doc(&doc, &terms), 1);
+    }
+
+    // ── filter_stop_words ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stop_words_filtered_from_query() {
+        let input = vec!["the".to_string(), "rust".to_string(), "book".to_string()];
+        let filtered = filter_stop_words(input);
+        assert!(!filtered.contains(&"the".to_string()), "'the' should be filtered");
+        assert!(filtered.contains(&"rust".to_string()));
+        assert!(filtered.contains(&"book".to_string()));
+    }
+
+    #[test]
+    fn all_stop_words_returns_empty() {
+        let input = vec!["the".to_string(), "a".to_string(), "of".to_string()];
+        assert!(filter_stop_words(input).is_empty());
+    }
+
     // ── select_best ───────────────────────────────────────────────────────────
 
     #[test]
@@ -439,7 +486,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("does_not_exist");
         // Must not panic or hang.
-        run_retrieve("rust async runtime", store_root).await;
+        run_retrieve("rust async runtime", store_root).await.unwrap();
     }
 
     /// Fuzzy query against an empty (but existing) store — hits the
@@ -450,7 +497,7 @@ mod tests {
         let store_root = dir.path().join("content");
         tokio::fs::create_dir_all(&store_root).await.unwrap();
         // No docs written — store is empty.
-        run_retrieve("authentication oauth guide", store_root).await;
+        run_retrieve("authentication oauth guide", store_root).await.unwrap();
     }
 
     /// Exact URL query for a URL that is NOT cached — hits the "not cached"
@@ -460,7 +507,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("content");
         tokio::fs::create_dir_all(&store_root).await.unwrap();
-        run_retrieve("https://docs.example.com/api", store_root).await;
+        run_retrieve("https://docs.example.com/api", store_root).await.unwrap();
     }
 
     /// Exact URL query for a URL that IS cached — hits the happy-path FS probe
@@ -476,7 +523,7 @@ mod tests {
             .write(url, &make_sample_extraction(url, "API reference docs"))
             .await
             .unwrap();
-        run_retrieve(url, store_root).await;
+        run_retrieve(url, store_root).await.unwrap();
     }
 
     /// Fuzzy multi-word query against a populated store — exercises the full
@@ -511,7 +558,7 @@ mod tests {
         // Multi-word query — "oauth authentication" should score highest on the
         // first doc (matches both terms) while still exercising the multi-doc
         // display path.
-        run_retrieve("oauth authentication", store_root).await;
+        run_retrieve("oauth authentication", store_root).await.unwrap();
     }
 
     /// Single-doc store with a fuzzy query — exercises the path where
@@ -530,6 +577,6 @@ mod tests {
             )
             .await
             .unwrap();
-        run_retrieve("rust async", store_root).await;
+        run_retrieve("rust async", store_root).await.unwrap();
     }
 }
