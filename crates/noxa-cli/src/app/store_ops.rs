@@ -35,12 +35,7 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) -> Re
         let total: usize = domains.iter().map(|d| d.doc_count).sum();
         eprintln!("\n{bold}{cyan}stored docs{reset}  {dim}{total} total{reset}\n");
         for d in &domains {
-            // Reconstruct a human-readable domain from the sanitized dir name
-            // e.g. "docs_rs" → "docs.rs", "rust-lang_org" → "rust-lang.org"
-            let display_name = d.name.rsplit_once('_').map_or_else(
-                || d.name.clone(),
-                |(prefix, tld)| format!("{prefix}.{tld}"),
-            );
+            let display_name = d.original_domain.as_deref().unwrap_or(&d.name);
             eprintln!(
                 "  {bold}{display_name}{reset}  {dim}({}) {cyan}{}{reset}",
                 d.doc_count, d.name

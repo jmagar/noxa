@@ -37,6 +37,9 @@ pub struct DomainEntry {
     pub name: String,
     /// Number of `.md` files under this domain directory.
     pub doc_count: usize,
+    /// Original host extracted from the first sidecar (e.g. `"code.claude.com"`).
+    /// `None` when no sidecars exist yet or they are all unreadable.
+    pub original_domain: Option<String>,
 }
 
 /// Result returned by [`FilesystemContentStore::list_domain_urls`].
@@ -79,9 +82,10 @@ impl FilesystemContentStore {
             }
             let name = entry.file_name().to_string_lossy().to_string();
             let count_path = path.clone();
-            let doc_count =
-                tokio::task::spawn_blocking(move || count_md_files_sync(&count_path)).await?;
-            entries.push(DomainEntry { name, doc_count });
+            let (doc_count, original_domain) =
+                tokio::task::spawn_blocking(move || count_md_and_peek_domain_sync(&count_path))
+                    .await?;
+            entries.push(DomainEntry { name, doc_count, original_domain });
         }
 
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -419,6 +423,41 @@ fn count_md_files_sync(dir: &Path) -> usize {
             }
         })
         .sum()
+}
+
+/// Find the first `.json` sidecar under `dir`, recursively (synchronous).
+fn find_first_json_sync(dir: &Path) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        } else if ft.is_dir() {
+            if let Some(p) = find_first_json_sync(&path) {
+                return Some(p);
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Count `.md` files and extract the original host from the first sidecar found.
+fn count_md_and_peek_domain_sync(dir: &Path) -> (usize, Option<String>) {
+    let count = count_md_files_sync(dir);
+    let original_domain = find_first_json_sync(dir)
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|val| {
+            val.get("url")
+                .and_then(|u| u.as_str())
+                .map(str::to_string)
+        })
+        .and_then(|url| url::Url::parse(&url).ok())
+        .and_then(|u| u.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h).to_string()));
+    (count, original_domain)
 }
 
 /// Reconstruct a URL from its store path when the sidecar is missing or corrupt.
