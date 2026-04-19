@@ -35,7 +35,16 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) -> Re
         let total: usize = domains.iter().map(|d| d.doc_count).sum();
         eprintln!("\n{bold}{cyan}stored docs{reset}  {dim}{total} total{reset}\n");
         for d in &domains {
-            eprintln!("  {bold}{}{reset}  {dim}({}){reset}", d.name, d.doc_count);
+            // Reconstruct a human-readable domain from the sanitized dir name
+            // e.g. "docs_rs" → "docs.rs", "rust-lang_org" → "rust-lang.org"
+            let display_name = d.name.rsplit_once('_').map_or_else(
+                || d.name.clone(),
+                |(prefix, tld)| format!("{prefix}.{tld}"),
+            );
+            eprintln!(
+                "  {bold}{display_name}{reset}  {dim}({}) {cyan}{}{reset}",
+                d.doc_count, d.name
+            );
         }
         eprintln!("\n{dim}noxa --list <domain>{reset}  {dim}to see individual docs{reset}\n");
     } else {
@@ -51,17 +60,22 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) -> Re
             return Ok(());
         }
 
+        const LIST_PAGE: usize = 50;
+        let total = docs.len();
+        let visible = docs.iter().take(LIST_PAGE);
+
         let url_width = docs
             .iter()
+            .take(LIST_PAGE)
             .map(|d| d.url.len().min(MAX_URL_DISPLAY))
             .max()
             .unwrap_or(0);
 
         eprintln!(
             "\n{bold}{cyan}{filter}{reset}  {dim}({} docs){reset}\n",
-            docs.len()
+            total
         );
-        for doc in &docs {
+        for doc in visible {
             let rel = doc
                 .md_path
                 .strip_prefix(&store_root)
@@ -71,6 +85,11 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) -> Re
                 "  {blue}{:<url_width$}{reset}  {dim}{}{reset}",
                 display_url,
                 rel.display()
+            );
+        }
+        if total > LIST_PAGE {
+            eprintln!(
+                "\n{dim}showing {LIST_PAGE} of {total} — use{reset} {cyan}noxa --grep \"term\"{reset} {dim}to search{reset}"
             );
         }
         eprintln!();
@@ -94,13 +113,16 @@ pub(crate) async fn run_grep(
         store_root.display()
     );
 
-    // Try rg first — it's fast and produces great output natively
+    // Try rg first — it's fast and produces great output natively.
+    // --glob '*.md' restricts to markdown files; without it rg also matches .json sidecars.
     let rg_status = std::process::Command::new("rg")
         .args([
             "--color=always",
             "--heading",
             "--line-number",
             "--smart-case",
+            "--glob",
+            "*.md",
             pattern,
         ])
         .arg(&store_root)

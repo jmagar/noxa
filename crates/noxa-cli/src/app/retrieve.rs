@@ -75,9 +75,32 @@ pub(crate) fn score_doc(doc: &noxa_store::StoredDoc, terms: &[String]) -> usize 
         .count()
 }
 
-/// Return the top-`n` scoring documents for `query`, sorted by score desc then
-/// shorter URL first on ties.  Stop words are stripped from the query before
-/// scoring.  Returns an empty Vec when no documents score above zero.
+/// Penalise non-content URLs so they sort after real documentation on score ties.
+///
+/// Returns 0 (no penalty) for normal doc URLs, higher values for metadata files.
+fn url_quality_penalty(url: &str) -> u8 {
+    // Strip query string for suffix matching.
+    let path = url.split('?').next().unwrap_or(url);
+    if path.ends_with("/LICENSE")
+        || path.ends_with("/README.md")
+        || path.ends_with("/CHANGELOG.md")
+        || path.ends_with("/CHANGELOG")
+    {
+        return 2;
+    }
+    if path.ends_with("/all.html") || path.ends_with("all.html") {
+        return 1;
+    }
+    0
+}
+
+/// Return the top-`n` scoring documents for `query`, sorted by:
+///   1. Score descending
+///   2. URL quality penalty ascending (penalise LICENSE, README, all.html)
+///   3. URL length ascending (shorter = more canonical)
+///
+/// Stop words are stripped from the query before scoring.
+/// Returns an empty Vec when no documents score above zero.
 pub(crate) fn top_scored<'a>(
     docs: &'a [noxa_store::StoredDoc],
     query: &str,
@@ -95,7 +118,11 @@ pub(crate) fn top_scored<'a>(
             if s > 0 { Some((s, doc)) } else { None }
         })
         .collect();
-    scored.sort_by(|(sa, da), (sb, db)| sb.cmp(sa).then(da.url.len().cmp(&db.url.len())));
+    scored.sort_by(|(sa, da), (sb, db)| {
+        sb.cmp(sa)
+            .then(url_quality_penalty(&da.url).cmp(&url_quality_penalty(&db.url)))
+            .then(da.url.len().cmp(&db.url.len()))
+    });
     scored.truncate(n);
     scored
 }
@@ -179,7 +206,31 @@ pub(crate) async fn run_retrieve(
     let (_, best) = &scored[0];
     match std::fs::read_to_string(&best.md_path) {
         Ok(content) => {
-            eprintln!("{dim}retrieved{reset} {pink}{}{reset}\n", best.url);
+            eprintln!("{dim}retrieved{reset} {pink}{}{reset}", best.url);
+            // Show up to 3 lines around the first match so the user can see why this doc was selected.
+            let raw: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+            let terms = filter_stop_words(raw);
+            if !terms.is_empty() {
+                let excerpt = content
+                    .lines()
+                    .enumerate()
+                    .find(|(_, line)| {
+                        let lower = line.to_lowercase();
+                        terms.iter().any(|t| lower.contains(t.as_str()))
+                    });
+                if let Some((lineno, line)) = excerpt {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        let display = if trimmed.len() > 100 {
+                            format!("{}...", &trimmed[..97])
+                        } else {
+                            trimmed.to_string()
+                        };
+                        eprintln!("{dim}  line {:<4}{reset} {display}", lineno + 1);
+                    }
+                }
+            }
+            eprintln!();
             print!("{content}");
             Ok(())
         }
@@ -385,6 +436,31 @@ mod tests {
     fn all_stop_words_returns_empty() {
         let input = vec!["the".to_string(), "a".to_string(), "of".to_string()];
         assert!(filter_stop_words(input).is_empty());
+    }
+
+    // ── url_quality_penalty / top_scored ranking ──────────────────────────────
+
+    #[test]
+    fn license_url_ranks_below_crate_root_on_tie() {
+        let docs = vec![
+            make_doc("https://docs.rs/rmcp/LICENSE", None),
+            make_doc("https://docs.rs/rmcp/latest/rmcp/", None),
+        ];
+        let best = select_best(&docs, "rmcp").unwrap();
+        assert_eq!(
+            best.url, "https://docs.rs/rmcp/latest/rmcp/",
+            "crate root should beat LICENSE on tie"
+        );
+    }
+
+    #[test]
+    fn readme_url_ranks_below_normal_doc_on_tie() {
+        let docs = vec![
+            make_doc("https://docs.rs/foo/README.md", None),
+            make_doc("https://docs.rs/foo/latest/foo/", None),
+        ];
+        let best = select_best(&docs, "foo").unwrap();
+        assert_eq!(best.url, "https://docs.rs/foo/latest/foo/");
     }
 
     // ── select_best ───────────────────────────────────────────────────────────
