@@ -248,3 +248,71 @@ fn test_fetch_client_new_without_store() {
     let client = FetchClient::new(config).unwrap();
     assert!(client.store.is_none());
 }
+
+/// Spin up a TCP listener that returns a fixed HTTP status for every request.
+/// Handles multiple connections so retry loops get the same status each time.
+#[cfg(test)]
+async fn spawn_status_server(status: u16, body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let response = format!(
+        "HTTP/1.1 {status} Status\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    tokio::spawn(async move {
+        loop {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let resp = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    format!("http://{addr}/")
+}
+
+#[tokio::test]
+async fn fetch_and_extract_rejects_non_2xx_status() {
+    let url = spawn_status_server(429, "# 429 Too Many Requests\n\nnginx").await;
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+    let result = client.fetch_and_extract(&url).await;
+    assert!(
+        result.is_err(),
+        "fetch_and_extract must return Err for 429 responses, got Ok"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("429"),
+        "error message should include status code, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn fetch_and_extract_rejects_500_status() {
+    let url = spawn_status_server(500, "<html><body>Internal Server Error</body></html>").await;
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+    let result = client.fetch_and_extract(&url).await;
+    assert!(
+        result.is_err(),
+        "fetch_and_extract must return Err for 500 responses, got Ok"
+    );
+}
+
+#[tokio::test]
+async fn fetch_and_extract_rejects_404_status() {
+    let url = spawn_status_server(404, "<html><body>Not Found</body></html>").await;
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+    let result = client.fetch_and_extract(&url).await;
+    assert!(
+        result.is_err(),
+        "fetch_and_extract must return Err for 404 responses, got Ok"
+    );
+}

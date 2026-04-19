@@ -201,6 +201,10 @@ impl FetchClient {
         let final_url = response.url().to_string();
         let headers = response.headers().clone();
 
+        if !(200u16..300).contains(&status) {
+            return Err(FetchError::Build(format!("HTTP {status}")));
+        }
+
         if is_pdf_content_type(&headers) {
             debug!(status, "detected PDF response, using pdf extraction");
             let bytes = response.body().to_vec();
