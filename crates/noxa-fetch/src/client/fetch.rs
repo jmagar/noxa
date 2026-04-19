@@ -51,7 +51,7 @@ impl FetchClient {
                             attempt = attempt + 1,
                             "retryable status, will retry"
                         );
-                        last_err = Some(FetchError::Build(format!("HTTP {}", result.status)));
+                        last_err = Some(FetchError::HttpStatus(result.status));
                         continue;
                     }
                     if attempt > 0 {
@@ -158,7 +158,7 @@ impl FetchClient {
                                     attempt = attempt + 1,
                                     "retryable status, will retry"
                                 );
-                                last_err = Some(FetchError::Build(format!("HTTP {}", r.status())));
+                                last_err = Some(FetchError::HttpStatus(r.status()));
                                 continue 'retry;
                             }
                             result = Some(r);
@@ -202,7 +202,7 @@ impl FetchClient {
         let headers = response.headers().clone();
 
         if !(200u16..300).contains(&status) {
-            return Err(FetchError::Build(format!("HTTP {status}")));
+            return Err(FetchError::HttpStatus(status));
         }
 
         if is_pdf_content_type(&headers) {
