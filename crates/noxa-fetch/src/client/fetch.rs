@@ -199,11 +199,12 @@ impl FetchClient {
 
         let status = response.status();
         let final_url = response.url().to_string();
-        let headers = response.headers().clone();
 
         if !(200u16..300).contains(&status) {
             return Err(FetchError::HttpStatus(status));
         }
+
+        let headers = response.headers().clone();
 
         if is_pdf_content_type(&headers) {
             debug!(status, "detected PDF response, using pdf extraction");
