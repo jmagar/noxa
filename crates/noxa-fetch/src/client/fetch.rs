@@ -44,14 +44,14 @@ impl FetchClient {
 
             match self.fetch_once(url).await {
                 Ok(result) => {
-                    if is_retryable_status(result.status) && attempt < delays.len() - 1 {
+                    if is_retryable_status(result.status) {
                         warn!(
                             url,
                             status = result.status,
                             attempt = attempt + 1,
                             "retryable status, will retry"
                         );
-                        last_err = Some(FetchError::Build(format!("HTTP {}", result.status)));
+                        last_err = Some(FetchError::HttpStatus(result.status));
                         continue;
                     }
                     if attempt > 0 {
@@ -152,8 +152,13 @@ impl FetchClient {
                     Ok(resp) => match Response::from_wreq(resp).await {
                         Ok(r) => {
                             if is_retryable_status(r.status()) && attempt < delays.len() - 1 {
-                                warn!(url, status = r.status(), attempt = attempt + 1, "retryable status, will retry");
-                                last_err = Some(FetchError::Build(format!("HTTP {}", r.status())));
+                                warn!(
+                                    url,
+                                    status = r.status(),
+                                    attempt = attempt + 1,
+                                    "retryable status, will retry"
+                                );
+                                last_err = Some(FetchError::HttpStatus(r.status()));
                                 continue 'retry;
                             }
                             result = Some(r);
@@ -177,7 +182,9 @@ impl FetchClient {
                     }
                 }
             }
-            result.ok_or_else(|| last_err.unwrap_or_else(|| FetchError::Build("all retries exhausted".into())))?
+            result.ok_or_else(|| {
+                last_err.unwrap_or_else(|| FetchError::Build("all retries exhausted".into()))
+            })?
         };
 
         if is_challenge_response(&response)
@@ -192,6 +199,11 @@ impl FetchClient {
 
         let status = response.status();
         let final_url = response.url().to_string();
+
+        if !response.is_success() {
+            return Err(FetchError::HttpStatus(status));
+        }
+
         let headers = response.headers().clone();
 
         if is_pdf_content_type(&headers) {
@@ -207,12 +219,11 @@ impl FetchClient {
 
             let pdf_mode = self.pdf_mode.clone();
             let final_url_clone = final_url.clone();
-            let pdf_result = tokio::task::spawn_blocking(move || {
-                noxa_pdf::extract_pdf(&bytes, pdf_mode)
-            })
-            .await
-            .map_err(|e| FetchError::Build(format!("PDF spawn_blocking panic: {e}")))?
-            .map_err(FetchError::Pdf)?;
+            let pdf_result =
+                tokio::task::spawn_blocking(move || noxa_pdf::extract_pdf(&bytes, pdf_mode))
+                    .await
+                    .map_err(|e| FetchError::Build(format!("PDF spawn_blocking panic: {e}")))?
+                    .map_err(FetchError::Pdf)?;
             Ok(pdf_to_extraction_result(&pdf_result, &final_url_clone))
         } else if let Some(doc_type) =
             crate::document::is_document_content_type(&headers, &final_url)

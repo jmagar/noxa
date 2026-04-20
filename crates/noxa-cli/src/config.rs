@@ -61,6 +61,7 @@ pub struct NoxaConfig {
 /// directly. The struct is kept here as the canonical schema so that future
 /// cloud-routing logic has a typed home without breaking existing config files.
 #[derive(Debug, Default, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct CloudConfig {
     pub provider: Option<String>,
     pub project: Option<String>,
@@ -199,6 +200,7 @@ pub struct ResolvedConfig {
     // Cloud — parsed and stored but not yet consumed by CLI runtime.
     // TODO: wire cloud config fields into the CloudClient / smart-fetch path
     // once per-domain cloud routing is implemented (tracked in cloud.rs).
+    #[allow(dead_code)]
     pub cloud: Option<CloudConfig>,
 }
 

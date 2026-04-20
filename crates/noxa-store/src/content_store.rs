@@ -3,10 +3,14 @@
 //! The `.json` sidecar next to each `.md` now uses a versioned envelope format
 //! (`Sidecar`) that keeps the full `ExtractionResult` in `current` plus a
 //! `changelog` of every content change over time.
+mod enumerate;
+mod manifest;
 mod migrate;
 mod permissions;
 mod write;
 
+pub use enumerate::{DomainEntry, DomainUrlsResult, StoredDoc};
+use manifest::ManifestCacheHandle;
 use migrate::parse_sidecar_or_migrate;
 
 use std::path::{Component, PathBuf};
@@ -41,6 +45,8 @@ pub struct FilesystemContentStore {
     canonical_root: std::sync::Arc<std::sync::OnceLock<PathBuf>>,
     pub max_content_bytes: Option<usize>,
     pub max_changelog_entries: Option<usize>,
+    /// Lazy-populated, TTL-backed manifest cache.  Shared across clones.
+    pub(crate) manifest_cache: ManifestCacheHandle,
 }
 
 impl FilesystemContentStore {
@@ -55,6 +61,7 @@ impl FilesystemContentStore {
             canonical_root,
             max_content_bytes: Some(2 * 1024 * 1024),
             max_changelog_entries: Some(100),
+            manifest_cache: ManifestCacheHandle::new(),
         }
     }
 

@@ -60,7 +60,12 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref query) = cli.retrieve {
-        run_retrieve(query, content_store_root(resolved.output_dir.as_deref()));
+        if let Err(e) =
+            run_retrieve(query, content_store_root(resolved.output_dir.as_deref())).await
+        {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
         return;
     }
 
@@ -123,12 +128,19 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref filter) = cli.list {
-        run_list(filter, content_store_root(resolved.output_dir.as_deref()));
+        if let Err(e) = run_list(filter, content_store_root(resolved.output_dir.as_deref())).await {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
         return;
     }
 
     if let Some(ref pattern) = cli.grep {
-        run_grep(pattern, content_store_root(resolved.output_dir.as_deref()));
+        if let Err(e) = run_grep(pattern, content_store_root(resolved.output_dir.as_deref())).await
+        {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
         return;
     }
 
@@ -192,7 +204,11 @@ pub(crate) async fn run() {
     }
 
     // Extract the first URL from the already-collected entries to avoid re-reading --urls-file.
-    let first_url = entries.into_iter().next().map(|(url, _)| url).unwrap_or_default();
+    let first_url = entries
+        .into_iter()
+        .next()
+        .map(|(url, _)| url)
+        .unwrap_or_default();
 
     // Single-page extraction (handles both HTML and PDF via content-type detection)
     match fetch_and_extract(&cli, &resolved).await {
@@ -224,4 +240,3 @@ pub(crate) async fn run() {
         }
     }
 }
-

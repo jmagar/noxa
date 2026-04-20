@@ -166,7 +166,10 @@ pub(crate) fn dedup_adjacent_descriptions(input: &str) -> String {
             // Case-insensitive "learn more" check covers all variants
             if let Some(_rest_lower) = next_lower.strip_prefix("learn more") {
                 // Slice the original string past "learn more" (10 ASCII chars)
-                let rest = next["learn more".len()..].trim().trim_start_matches('*').trim();
+                let rest = next["learn more".len()..]
+                    .trim()
+                    .trim_start_matches('*')
+                    .trim();
                 if !rest.is_empty() && rest.len() > 15 && current.contains(rest) {
                     skip_next = true;
                 }

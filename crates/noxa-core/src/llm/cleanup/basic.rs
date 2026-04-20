@@ -46,21 +46,23 @@ pub(crate) fn decode_html_entities(input: &str) -> String {
 }
 
 pub(crate) fn strip_invisible_unicode(input: &str) -> String {
-    if !input.chars().any(|c| matches!(
-        c,
-        '\u{200B}'
-            | '\u{200C}'
-            | '\u{200D}'
-            | '\u{200E}'
-            | '\u{200F}'
-            | '\u{FEFF}'
-            | '\u{00AD}'
-            | '\u{2060}'
-            | '\u{2062}'
-            | '\u{2063}'
-            | '\u{2064}'
-            | '\u{034F}'
-    )) {
+    if !input.chars().any(|c| {
+        matches!(
+            c,
+            '\u{200B}'
+                | '\u{200C}'
+                | '\u{200D}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{FEFF}'
+                | '\u{00AD}'
+                | '\u{2060}'
+                | '\u{2062}'
+                | '\u{2063}'
+                | '\u{2064}'
+                | '\u{034F}'
+        )
+    }) {
         return input.to_string();
     }
 
@@ -275,9 +277,8 @@ static BOLD_RE: Lazy<Regex> = Lazy::new(|| {
 });
 // Italic *text* — inner must not start/end with space or asterisk; and opening *
 // must not be immediately followed by another * (already handled by BOLD_RE running first).
-static ITALIC_STAR_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\*([^\s*][^*\n]*[^\s*]|[^\s*])\*").unwrap()
-});
+static ITALIC_STAR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\*([^\s*][^*\n]*[^\s*]|[^\s*])\*").unwrap());
 // Italic _text_ — keep existing word-boundary requirement
 static ITALIC_UNDER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b_([^_\n]+)_\b").unwrap());
 

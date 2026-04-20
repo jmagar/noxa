@@ -56,13 +56,19 @@ pub(super) fn extract_fonts(decls: &[css::CssDecl]) -> Vec<String> {
 pub(crate) fn extract_font_name_from_url(url: &str) -> Option<String> {
     let filename = url.rsplit('/').next()?;
     // Use rsplit_once to strip only the last extension, preserving dots in stem
-    let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
+    let stem = filename
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(filename);
     let clean = stem
         .split('-')
         .take_while(|part| {
             let lower = part.to_lowercase();
             // Skip version tokens like v12, v3, etc.
-            if lower.starts_with('v') && lower[1..].chars().all(|c| c.is_ascii_digit()) && lower.len() > 1 {
+            if lower.starts_with('v')
+                && lower[1..].chars().all(|c| c.is_ascii_digit())
+                && lower.len() > 1
+            {
                 return false;
             }
             !matches!(
@@ -119,7 +125,8 @@ fn percent_decode(s: &str) -> String {
     let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
             && let (Some(hi), Some(lo)) = (
                 (bytes[i + 1] as char).to_digit(16),
                 (bytes[i + 2] as char).to_digit(16),

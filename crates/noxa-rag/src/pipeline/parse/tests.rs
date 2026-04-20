@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::fs;
 
-use super::{build_point_payload, parse_file, IngestionProvenance};
+use super::{IngestionProvenance, build_point_payload, parse_file};
 
 #[tokio::test]
 async fn parse_file_json_recovers_provenance_fields() {

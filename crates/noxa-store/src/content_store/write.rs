@@ -26,16 +26,6 @@ impl FilesystemContentStore {
         }
 
         let to_store = sanitize_extraction(url, extraction.clone());
-        if self.is_oversized(&to_store, &md_path, &json_path) {
-            return Ok(StoreResult {
-                md_path,
-                json_path,
-                is_new: false,
-                changed: false,
-                word_count_delta: 0,
-                diff: None,
-            });
-        }
 
         let now = Utc::now();
         let existing_sidecar = self.load_existing_sidecar(&json_path, now).await?;
@@ -48,6 +38,17 @@ impl FilesystemContentStore {
         })
         .await??;
 
+        if self.is_oversized(&to_store, &json_bytes, &md_path, &json_path) {
+            return Ok(StoreResult {
+                md_path,
+                json_path,
+                is_new: false,
+                changed: false,
+                word_count_delta: 0,
+                diff: None,
+            });
+        }
+
         write_sidecar_files(
             &md_path,
             &json_path,
@@ -56,6 +57,10 @@ impl FilesystemContentStore {
             is_new || changed,
         )
         .await?;
+
+        // Invalidate the manifest cache so the next list_all_docs() call picks
+        // up the newly written document.
+        self.manifest_cache.invalidate().await;
 
         Ok(StoreResult {
             md_path,
@@ -70,12 +75,13 @@ impl FilesystemContentStore {
     fn is_oversized(
         &self,
         extraction: &noxa_core::ExtractionResult,
+        json_bytes: &[u8],
         md_path: &Path,
         json_path: &Path,
     ) -> bool {
-        let estimated = extraction.content.markdown.len()
-            + extraction.content.plain_text.len()
-            ;
+        // Measure the actual bytes that will be written to disk:
+        // markdown file + serialized sidecar JSON file.
+        let estimated = extraction.content.markdown.len() + json_bytes.len();
         if let Some(max) = self.max_content_bytes
             && estimated > max
         {

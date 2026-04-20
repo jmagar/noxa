@@ -1,0 +1,517 @@
+//! Store-native enumeration: list domains, list docs per domain, iterate all sidecars.
+//!
+//! This module consolidates filesystem traversal, sidecar parsing, and legacy-envelope
+//! compatibility that previously lived in the CLI layer.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use chrono::DateTime;
+
+use crate::content_store::FilesystemContentStore;
+use crate::content_store::manifest::ManifestCache;
+use crate::content_store::migrate::parse_sidecar_or_migrate;
+use crate::paths::sanitize_component;
+use crate::types::StoreError;
+
+// ── Public types ─────────────────────────────────────────────────────────────
+
+/// One document entry returned by enumeration APIs.
+#[derive(Debug, Clone)]
+pub struct StoredDoc {
+    /// The URL of the document (from sidecar or reconstructed from path).
+    pub url: String,
+    /// Absolute path to the `.md` file.
+    pub md_path: PathBuf,
+    /// Absolute path to the `.json` sidecar.
+    pub json_path: PathBuf,
+    /// Title extracted from the sidecar, if available.
+    pub title: Option<String>,
+}
+
+/// One domain entry returned by [`FilesystemContentStore::list_domains`].
+#[derive(Debug, Clone)]
+pub struct DomainEntry {
+    /// Sanitized directory name (e.g. `"docs_example_com"`).
+    pub name: String,
+    /// Number of `.md` files under this domain directory.
+    pub doc_count: usize,
+    /// Original host extracted from the first sidecar (e.g. `"code.claude.com"`).
+    /// `None` when no sidecars exist yet or they are all unreadable.
+    pub original_domain: Option<String>,
+}
+
+/// Result returned by [`FilesystemContentStore::list_domain_urls`].
+#[derive(Debug, Clone)]
+pub struct DomainUrlsResult {
+    /// All URLs successfully parsed from sidecars under the domain directory.
+    pub urls: Vec<String>,
+    /// Number of `.json` sidecar files that were present but could not be parsed
+    /// (corrupt, truncated, or unrecognised format).
+    pub skipped: usize,
+}
+
+// ── FilesystemContentStore impl ──────────────────────────────────────────────
+
+impl FilesystemContentStore {
+    /// Return all domain directories under the store root, sorted alphabetically,
+    /// together with their `.md` doc counts.
+    ///
+    /// Returns an empty `Vec` (not an error) when the root does not exist yet.
+    pub async fn list_domains(&self) -> Result<Vec<DomainEntry>, StoreError> {
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let canonical_root = self.get_canonical_root()?;
+
+        let mut read_dir = match tokio::fs::read_dir(&self.root).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut entries: Vec<DomainEntry> = Vec::new();
+        while let Some(entry) = read_dir.next_entry().await? {
+            let path = entry.path();
+            let ft = match tokio::fs::symlink_metadata(&path).await {
+                Ok(m) => m.file_type(),
+                Err(_) => continue,
+            };
+            if !ft.is_dir() || ft.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let (doc_count, original_domain) =
+                count_md_and_peek_domain_async(&path, &canonical_root).await;
+            entries.push(DomainEntry {
+                name,
+                doc_count,
+                original_domain,
+            });
+        }
+
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
+
+    /// Return all documents stored under the given domain, sorted by path.
+    ///
+    /// `domain` can be a raw display form (`"docs.example.com"` or
+    /// `"www.docs.example.com"`); it is sanitized internally to match the
+    /// on-disk directory name.
+    ///
+    /// Returns an empty `Vec` when the domain directory does not exist.
+    /// Corrupt sidecars are skipped with a warning (matching pre-existing CLI
+    /// behaviour) rather than propagating an error.
+    pub async fn list_docs(&self, domain: &str) -> Result<Vec<StoredDoc>, StoreError> {
+        let dir = match self.domain_dir(domain) {
+            Some(d) => d,
+            None => return Ok(Vec::new()),
+        };
+
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let canonical_root = self.get_canonical_root()?;
+        let mut docs = Vec::new();
+        collect_docs_async(&dir, &self.root, &canonical_root, &mut docs).await;
+        docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+        Ok(docs)
+    }
+
+    /// Return all documents in the entire store, sorted by path.
+    ///
+    /// Results are served from the in-memory manifest cache when available and
+    /// fresh (TTL: 30 s).  The cache is populated on the first call and
+    /// invalidated whenever a document is written.
+    ///
+    /// Corrupt sidecars are skipped with a warning.
+    pub async fn list_all_docs(&self) -> Result<Vec<StoredDoc>, StoreError> {
+        let mut retries = 0u8;
+
+        loop {
+            // --- Fast path: cache hit ---
+            {
+                let guard = self.manifest_cache.0.lock().await;
+                if let Some(cache) = guard.cache.as_ref() {
+                    if cache.is_fresh() {
+                        let mut docs: Vec<StoredDoc> = cache.docs.values().cloned().collect();
+                        docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+                        return Ok(docs);
+                    }
+                }
+            }
+
+            // --- Slow path: full walk ---
+            if !self.root.exists() {
+                return Ok(Vec::new());
+            }
+
+            let walk_generation = self.manifest_cache.generation_for_walk().await;
+
+            let canonical_root = self.get_canonical_root()?;
+            let mut read_dir = match tokio::fs::read_dir(&self.root).await {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) => return Err(e.into()),
+            };
+
+            let mut docs = Vec::new();
+            while let Some(entry) = read_dir.next_entry().await? {
+                let path = entry.path();
+                let ft = match tokio::fs::symlink_metadata(&path).await {
+                    Ok(m) => m.file_type(),
+                    Err(_) => continue,
+                };
+                if !ft.is_dir() || ft.is_symlink() {
+                    continue;
+                }
+                collect_docs_async(&path, &self.root, &canonical_root, &mut docs).await;
+            }
+
+            docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+
+            let mut guard = self.manifest_cache.0.lock().await;
+            if guard.generation != walk_generation {
+                // Cache invalidated during traversal; rerun with current generation.
+                if retries >= 3 {
+                    return Ok(docs);
+                }
+                retries += 1;
+                continue;
+            }
+
+            // Populate the cache with the results of this walk.
+            let map: HashMap<String, StoredDoc> = docs
+                .iter()
+                .map(|d| (d.md_path.to_string_lossy().into_owned(), d.clone()))
+                .collect();
+            guard.cache = Some(ManifestCache {
+                docs: map,
+                populated_at: Instant::now(),
+            });
+
+            return Ok(docs);
+        }
+    }
+
+    /// Collect all URLs stored under `domain`, used by the refresh workflow.
+    ///
+    /// This replaces the CLI-level `collect_refresh_urls` function with an
+    /// implementation that lives inside the storage boundary, applies the same
+    /// symlink-escape check, and uses typed sidecar parsing.
+    ///
+    /// Returns a [`DomainUrlsResult`] that includes both the parsed URLs and a
+    /// count of sidecars that were skipped due to parse or I/O errors, so
+    /// callers can surface those skips to users instead of silently ignoring
+    /// them.
+    pub async fn list_domain_urls(&self, domain: &str) -> Result<DomainUrlsResult, StoreError> {
+        let dir = match self.domain_dir(domain) {
+            Some(d) => d,
+            None => {
+                return Ok(DomainUrlsResult {
+                    urls: Vec::new(),
+                    skipped: 0,
+                });
+            }
+        };
+
+        if !dir.exists() {
+            return Ok(DomainUrlsResult {
+                urls: Vec::new(),
+                skipped: 0,
+            });
+        }
+
+        let canonical_root = self.get_canonical_root()?;
+        let mut urls: Vec<String> = Vec::new();
+        let mut skipped: usize = 0;
+        collect_urls_async(&dir, &canonical_root, &mut urls, &mut skipped).await;
+        urls.sort();
+        urls.dedup();
+        Ok(DomainUrlsResult { urls, skipped })
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// Resolve the on-disk directory for `domain`, sanitizing input.
+    /// Returns `None` if the domain component is empty after sanitization.
+    fn domain_dir(&self, domain: &str) -> Option<PathBuf> {
+        let raw = domain.trim();
+        // Strip leading "www." before sanitizing (mirrors CLI behaviour).
+        let raw = raw.strip_prefix("www.").unwrap_or(raw);
+        let component = sanitize_component(raw);
+        if component.is_empty() || component == "index" {
+            return None;
+        }
+        Some(self.root.join(component))
+    }
+}
+
+// ── Async filesystem helpers ──────────────────────────────────────────────────
+
+/// Recursively walk `dir` and collect `StoredDoc` entries for every `.md` file.
+///
+/// Symlinks that would escape `canonical_root` are silently skipped.
+/// Corrupt/missing sidecars fall back to URL reconstruction from path.
+async fn collect_docs_async(
+    dir: &Path,
+    store_root: &Path,
+    canonical_root: &Path,
+    out: &mut Vec<StoredDoc>,
+) {
+    // Safety: reject any traversal that escapes the canonical root.
+    match tokio::fs::canonicalize(dir).await {
+        Ok(canonical_dir) if canonical_dir.starts_with(canonical_root) => {}
+        _ => return, // escape or I/O error → skip
+    }
+
+    let mut read_dir = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        paths.push(entry.path());
+    }
+    paths.sort();
+
+    for path in paths {
+        let ft = match tokio::fs::symlink_metadata(&path).await {
+            Ok(m) => m.file_type(),
+            Err(_) => continue,
+        };
+
+        if ft.is_symlink() {
+            // Do not follow symlinks — they can escape the root.
+            continue;
+        }
+
+        if ft.is_dir() {
+            // Use Box::pin to allow async recursion.
+            Box::pin(collect_docs_async(&path, store_root, canonical_root, out)).await;
+            continue;
+        }
+
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+
+        let json_path = path.with_extension("json");
+        let (url, title) = parse_sidecar_for_doc(&json_path).await;
+        let url = url.or_else(|| reconstruct_url_from_store_path(&path, store_root));
+        if let Some(url) = url {
+            out.push(StoredDoc {
+                url,
+                md_path: path,
+                json_path,
+                title,
+            });
+        }
+    }
+}
+
+/// Recursively collect URLs from `.json` sidecars under `dir`.
+///
+/// Symlinks that would escape `canonical_root` are silently skipped.
+/// Sidecars that exist but cannot be parsed increment `skipped`.
+async fn collect_urls_async(
+    dir: &Path,
+    canonical_root: &Path,
+    out: &mut Vec<String>,
+    skipped: &mut usize,
+) {
+    // Safety: reject traversal escaping the canonical root.
+    match tokio::fs::canonicalize(dir).await {
+        Ok(canonical_dir) if canonical_dir.starts_with(canonical_root) => {}
+        _ => return,
+    }
+
+    let mut read_dir = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        paths.push(entry.path());
+    }
+    paths.sort();
+
+    for path in paths {
+        let ft = match tokio::fs::symlink_metadata(&path).await {
+            Ok(m) => m.file_type(),
+            Err(_) => continue,
+        };
+
+        if ft.is_symlink() {
+            continue;
+        }
+
+        if ft.is_dir() {
+            Box::pin(collect_urls_async(&path, canonical_root, out, skipped)).await;
+            continue;
+        }
+
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        match parse_url_from_sidecar_file(&path).await {
+            Some(url) => out.push(url),
+            None => {
+                // The file exists but could not be parsed — count as a corrupt sidecar.
+                *skipped += 1;
+            }
+        }
+    }
+}
+
+// ── Sidecar parsing helpers ───────────────────────────────────────────────────
+
+/// Parse a sidecar file and return `(url, title)`.
+///
+/// Uses the typed `Sidecar` / legacy-migration path; falls back to `(None, None)`
+/// on missing or corrupt sidecars.
+async fn parse_sidecar_for_doc(json_path: &Path) -> (Option<String>, Option<String>) {
+    let contents = match tokio::fs::read_to_string(json_path).await {
+        Ok(s) => s,
+        Err(_) => return (None, None),
+    };
+    let mtime = tokio::fs::metadata(json_path)
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(DateTime::from)
+        .unwrap_or_else(chrono::Utc::now);
+
+    match tokio::task::spawn_blocking(move || parse_sidecar_or_migrate(&contents, mtime)).await {
+        Ok(Ok(sidecar)) => {
+            let url = if sidecar.url.is_empty() {
+                sidecar.current.metadata.url.clone()
+            } else {
+                Some(sidecar.url)
+            };
+            let title = sidecar.current.metadata.title.clone();
+            (url, title)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "skipping corrupt sidecar");
+            (None, None)
+        }
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "skipping corrupt sidecar");
+            (None, None)
+        }
+    }
+}
+
+/// Parse only the URL from a sidecar file (used by URL enumeration for refresh).
+async fn parse_url_from_sidecar_file(json_path: &Path) -> Option<String> {
+    let (url, _title) = parse_sidecar_for_doc(json_path).await;
+    url
+}
+
+/// Count `.md` files and extract the original host from the first sidecar found.
+async fn count_md_and_peek_domain_async(
+    dir: &Path,
+    canonical_root: &Path,
+) -> (usize, Option<String>) {
+    collect_domain_metadata_async(dir, canonical_root).await
+}
+
+async fn collect_domain_metadata_async(
+    dir: &Path,
+    canonical_root: &Path,
+) -> (usize, Option<String>) {
+    match tokio::fs::canonicalize(dir).await {
+        Ok(canonical_dir) if canonical_dir.starts_with(canonical_root) => {}
+        _ => return (0, None),
+    }
+
+    let mut read_dir = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return (0, None),
+    };
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        paths.push(entry.path());
+    }
+    paths.sort();
+
+    let mut count = 0usize;
+    let mut original_domain = None;
+
+    for path in paths {
+        let ft = match tokio::fs::symlink_metadata(&path).await {
+            Ok(m) => m.file_type(),
+            Err(_) => continue,
+        };
+
+        if ft.is_symlink() {
+            continue;
+        }
+
+        if ft.is_dir() {
+            let (nested_count, nested_domain) =
+                Box::pin(collect_domain_metadata_async(&path, canonical_root)).await;
+            count += nested_count;
+            if original_domain.is_none() {
+                original_domain = nested_domain;
+            }
+            continue;
+        }
+
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            count += 1;
+            continue;
+        }
+
+        if path.extension().and_then(|e| e.to_str()) == Some("json") && original_domain.is_none() {
+            original_domain = parse_original_domain_from_sidecar(&path).await;
+        }
+    }
+
+    (count, original_domain)
+}
+
+async fn parse_original_domain_from_sidecar(json_path: &Path) -> Option<String> {
+    let (url, _title) = parse_sidecar_for_doc(json_path).await;
+    url.and_then(|u| {
+        url::Url::parse(&u).ok().and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|h| h.strip_prefix("www.").unwrap_or(h).to_string())
+        })
+    })
+}
+
+/// Reconstruct a URL from its store path when the sidecar is missing or corrupt.
+///
+/// This is a best-effort fallback: it reverses the sanitized path back to a
+/// plausible `https://` URL.
+pub(super) fn reconstruct_url_from_store_path(path: &Path, store_root: &Path) -> Option<String> {
+    let rel = path.strip_prefix(store_root).ok()?;
+    let mut components = rel.components();
+    let domain = components.next()?.as_os_str().to_str()?.replace('_', ".");
+    let stem = rel.with_extension("");
+    let mut segments = stem
+        .components()
+        .skip(1)
+        .filter_map(|part| part.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if segments.last().copied() == Some("index") {
+        segments.pop();
+    }
+    let mut url = format!("https://{domain}");
+    if !segments.is_empty() {
+        url.push('/');
+        url.push_str(&segments.join("/"));
+    }
+    Some(url)
+}

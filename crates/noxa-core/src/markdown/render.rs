@@ -109,8 +109,12 @@ pub(super) fn node_to_md(
 
             // Skip base64 data URIs and blob URLs (they bloat markdown).
             // Use case-insensitive checks per RFC 3986 (schemes are case-insensitive).
-            let src = if raw_src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:"))
-                || raw_src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("blob:"))
+            let src = if raw_src
+                .get(..5)
+                .is_some_and(|p| p.eq_ignore_ascii_case("data:"))
+                || raw_src
+                    .get(..5)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("blob:"))
             {
                 String::new()
             } else {

@@ -248,3 +248,80 @@ fn test_fetch_client_new_without_store() {
     let client = FetchClient::new(config).unwrap();
     assert!(client.store.is_none());
 }
+
+/// Spin up a TCP listener that returns a fixed HTTP status for every request.
+/// Handles multiple connections so retry loops get the same status each time.
+#[cfg(test)]
+async fn spawn_status_server(status: u16, body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let response = format!(
+        "HTTP/1.1 {status} Status\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    tokio::spawn(async move {
+        loop {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let resp = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        socket.read(&mut buf),
+                    )
+                    .await;
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    format!("http://{addr}/")
+}
+
+#[tokio::test]
+async fn fetch_rejects_retryable_status_after_exhaustion() {
+    // fetch() had a latent bug: on the last retry attempt with a retryable
+    // status (429/5xx), it returned Ok(FetchResult{status:429}) because the
+    // condition `attempt < delays.len()-1` was false and the result fell
+    // through to `return Ok`. Fixed by removing that guard so the `continue`
+    // on the last iteration exits the loop and Err(last_err) is returned.
+    let url = spawn_status_server(429, "# 429 Too Many Requests\n\nnginx").await;
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+    let result = client.fetch(&url).await;
+    assert!(
+        result.is_err(),
+        "fetch must return Err for 429 after retry exhaustion, got Ok"
+    );
+    assert!(
+        matches!(result.unwrap_err(), FetchError::HttpStatus(429)),
+        "expected HttpStatus(429)"
+    );
+}
+
+#[tokio::test]
+async fn fetch_and_extract_rejects_non_2xx_statuses() {
+    let cases: &[(u16, &str)] = &[
+        (429, "# 429 Too Many Requests\n\nnginx"),
+        (500, "<html><body>Internal Server Error</body></html>"),
+        (404, "<html><body>Not Found</body></html>"),
+    ];
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+    for &(status, body) in cases {
+        let url = spawn_status_server(status, body).await;
+        let result = client.fetch_and_extract(&url).await;
+        assert!(
+            result.is_err(),
+            "fetch_and_extract must return Err for {status}, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains(&status.to_string()),
+            "error for {status} should include status code, got: {msg}"
+        );
+    }
+}

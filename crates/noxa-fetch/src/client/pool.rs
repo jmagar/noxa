@@ -110,8 +110,8 @@ pub(super) fn pick_for_host<'a>(clients: &'a [wreq::Client], host: &str) -> &'a 
     // Use a simple stable hash derived from the byte values of the host string.
     // This is deterministic across process restarts (unlike DefaultHasher which
     // uses a random seed), so the same host always maps to the same client.
-    let hash: usize = host
-        .bytes()
-        .fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+    let hash: usize = host.bytes().fold(0usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as usize)
+    });
     &clients[hash % clients.len()]
 }

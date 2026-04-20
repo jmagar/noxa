@@ -30,6 +30,7 @@ pub mod mcp_bridge;
 pub mod pipeline;
 pub mod store;
 pub mod types;
+pub(crate) mod url_util;
 
 // Re-export most-used types at crate root
 pub use config::{RagConfig, load_config};

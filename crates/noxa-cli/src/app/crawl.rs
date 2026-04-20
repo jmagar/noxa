@@ -21,11 +21,7 @@ pub(crate) fn spawn_crawl_background(cli: &Cli, resolved: &config::ResolvedConfi
     }
 
     // Open /dev/null for writing to use as a writable sink for stdout/stderr fallback.
-    let open_devnull = || {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/null")
-    };
+    let open_devnull = || std::fs::OpenOptions::new().write(true).open("/dev/null");
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -137,6 +133,7 @@ pub(crate) async fn run_crawl(cli: &Cli, resolved: &config::ResolvedConfig) -> R
         progress_tx: Some(progress_tx),
         cancel_flag: Some(Arc::clone(&cancel_flag)),
         extraction_options: build_extraction_options(resolved),
+        body_retention: BodyRetention::Full,
     };
 
     // Load resume state if --crawl-state file exists

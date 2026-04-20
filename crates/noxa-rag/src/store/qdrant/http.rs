@@ -68,6 +68,7 @@ pub(crate) struct SearchResponse {
 
 #[derive(Deserialize)]
 pub(crate) struct SearchHit {
+    pub id: Option<serde_json::Value>,
     pub score: f32,
     pub payload: Option<HashMap<String, serde_json::Value>>,
 }

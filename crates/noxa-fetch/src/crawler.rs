@@ -21,6 +21,23 @@ use crate::client::{FetchClient, FetchConfig};
 use crate::error::FetchError;
 use crate::sitemap;
 
+/// Controls how extracted page bodies are retained in the aggregate `CrawlResult`.
+///
+/// On large crawls the `Vec<PageResult>` can hold full extraction payloads for every
+/// visited page, which may exhaust available memory. `MetadataOnly` drops the heavy
+/// content fields from the aggregate copy once progress has been streamed/persisted,
+/// keeping only lightweight metadata (title, URL, word count, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BodyRetention {
+    /// Keep every field of `ExtractionResult` in the aggregate vec (default).
+    #[default]
+    Full,
+    /// After streaming the full `PageResult` via `progress_tx`, clear the heavy
+    /// content fields (`markdown`, `plain_text`, `links`, `images`, `code_blocks`,
+    /// `raw_html`) before pushing to the aggregate vec.  `metadata` is preserved.
+    MetadataOnly,
+}
+
 /// Controls crawl scope, depth, concurrency, and politeness.
 #[derive(Debug, Clone)]
 pub struct CrawlConfig {
@@ -53,6 +70,9 @@ pub struct CrawlConfig {
     /// CSS selector / extraction options forwarded to every page fetch.
     /// Defaults to `ExtractionOptions::default()` (no filtering).
     pub extraction_options: noxa_core::ExtractionOptions,
+    /// Controls whether full extraction bodies are kept in the aggregate `CrawlResult`.
+    /// Defaults to `BodyRetention::Full` (backward-compatible).
+    pub body_retention: BodyRetention,
 }
 
 impl Default for CrawlConfig {
@@ -70,6 +90,7 @@ impl Default for CrawlConfig {
             progress_tx: None,
             cancel_flag: None,
             extraction_options: noxa_core::ExtractionOptions::default(),
+            body_retention: BodyRetention::Full,
         }
     }
 }
@@ -119,6 +140,22 @@ pub struct Crawler {
     client: Arc<FetchClient>,
     config: CrawlConfig,
     seed_origin: String,
+}
+
+/// Clear heavy content fields from an extraction result, retaining only
+/// lightweight metadata (title, URL, word count, etc.).
+///
+/// Called in `MetadataOnly` body-retention mode after progress has been
+/// streamed so that large payloads are not held in the aggregate `CrawlResult`.
+fn clear_extraction_body_for_metadata_only(extraction: &mut noxa_core::ExtractionResult) {
+    extraction.content.markdown = String::new();
+    extraction.content.plain_text = String::new();
+    extraction.content.links = Vec::new();
+    extraction.content.images = Vec::new();
+    extraction.content.code_blocks = Vec::new();
+    extraction.content.raw_html = None;
+    extraction.structured_data = Vec::new();
+    extraction.domain_data = None;
 }
 
 impl Crawler {
@@ -365,9 +402,19 @@ impl Crawler {
                     }
                 }
 
-                // Stream progress if a channel is configured
+                // Stream progress if a channel is configured.
+                // The clone is sent *before* any field clearing so subscribers
+                // always receive the full payload regardless of body_retention.
                 if let Some(tx) = &self.config.progress_tx {
                     let _ = tx.send(page.clone());
+                }
+
+                // When MetadataOnly, drop heavy content fields now that progress
+                // has been streamed and links have already been harvested above.
+                if self.config.body_retention == BodyRetention::MetadataOnly {
+                    if let Some(ref mut extraction) = page.extraction {
+                        clear_extraction_body_for_metadata_only(extraction);
+                    }
                 }
 
                 pages.push(page);
@@ -684,5 +731,100 @@ mod tests {
         assert!(glob_match("/blog*", "/blog"));
         assert!(glob_match("/blog*", "/blog-post"));
         assert!(!glob_match("/blog*", "/blog/post")); // * doesn't cross /
+    }
+
+    // -- BodyRetention tests --
+
+    /// Helper that builds a synthetic `PageResult` with non-empty content.
+    fn make_page_result(url: &str) -> PageResult {
+        use noxa_core::{Content, ExtractionResult, Link, Metadata};
+        PageResult {
+            url: url.to_string(),
+            depth: 0,
+            extraction: Some(ExtractionResult {
+                metadata: Metadata {
+                    title: Some("Test Page".to_string()),
+                    description: None,
+                    author: None,
+                    published_date: None,
+                    language: None,
+                    url: Some(url.to_string()),
+                    site_name: None,
+                    image: None,
+                    favicon: None,
+                    word_count: 42,
+                    content_hash: None,
+                    source_type: None,
+                    file_path: None,
+                    last_modified: None,
+                    is_truncated: None,
+                    technologies: vec![],
+                    seed_url: None,
+                    crawl_depth: None,
+                    search_query: None,
+                    fetched_at: None,
+                },
+                content: Content {
+                    markdown: "# Hello".to_string(),
+                    plain_text: "Hello".to_string(),
+                    links: vec![Link {
+                        text: "Example".to_string(),
+                        href: "https://example.com/other".to_string(),
+                    }],
+                    images: vec![],
+                    code_blocks: vec![],
+                    raw_html: Some("<h1>Hello</h1>".to_string()),
+                },
+                domain_data: None,
+                structured_data: vec![],
+            }),
+            error: None,
+            elapsed: std::time::Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn body_retention_full_default() {
+        // Default retention is Full
+        assert_eq!(BodyRetention::default(), BodyRetention::Full);
+        let config = CrawlConfig::default();
+        assert_eq!(config.body_retention, BodyRetention::Full);
+    }
+
+    #[test]
+    fn body_retention_metadata_only_clears_content() {
+        // Simulate what the crawler does in MetadataOnly mode after streaming.
+        let mut page = make_page_result("https://example.com/");
+
+        // Mimic the clearing block via the production helper
+        if let Some(ref mut extraction) = page.extraction {
+            clear_extraction_body_for_metadata_only(extraction);
+        }
+
+        // extraction is still Some — ok_count logic is preserved
+        assert!(page.extraction.is_some());
+
+        let ext = page.extraction.as_ref().unwrap();
+        // Heavy fields are gone
+        assert!(ext.content.markdown.is_empty());
+        assert!(ext.content.plain_text.is_empty());
+        assert!(ext.content.links.is_empty());
+        assert!(ext.content.raw_html.is_none());
+
+        // Lightweight metadata is preserved
+        assert_eq!(ext.metadata.title.as_deref(), Some("Test Page"));
+        assert_eq!(ext.metadata.word_count, 42);
+        assert_eq!(ext.metadata.url.as_deref(), Some("https://example.com/"));
+    }
+
+    #[test]
+    fn body_retention_full_keeps_content() {
+        let page = make_page_result("https://example.com/");
+        // Full retention: content must still be present
+        let ext = page.extraction.as_ref().unwrap();
+        assert_eq!(ext.content.markdown, "# Hello");
+        assert_eq!(ext.content.plain_text, "Hello");
+        assert_eq!(ext.content.links.len(), 1);
+        assert!(ext.content.raw_html.is_some());
     }
 }

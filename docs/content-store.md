@@ -138,6 +138,26 @@ audit-grade durability guarantee.
 
 The validation helpers fail closed on DNS resolution failure.
 
+## Enumeration and Scaling
+
+`FilesystemContentStore` exposes four enumeration methods added in Wave 1A:
+
+| Method | Scope | Cost |
+|---|---|---|
+| `list_domains()` | store root (one level) | O(total docs across all domains) — recursive `.md` count per domain via blocking walk |
+| `list_docs(domain)` | one domain directory | O(docs in domain), parses each `.json` sidecar |
+| `list_all_docs()` | entire store | O(total doc count), recursive walk + sidecar parse for every document |
+| `list_domain_urls(domain)` | one domain directory | O(docs in domain), recursive walk + sidecar parse |
+
+The domain-scoped methods (`list_domains`, `list_docs`, `list_domain_urls`) perform a filesystem traversal on every call. `list_all_docs()` may return from a TTL-bounded in-memory manifest cache; on cache miss or TTL expiry it performs a full traversal. There is no persistent on-disk index. Latency scales linearly with document count and directory depth:
+
+- Small stores (< 1 000 docs): traversal typically completes in tens of milliseconds.
+- Large stores (10 000+ docs): traversal and sidecar-parsing overhead reaches several seconds.
+
+`--retrieve` (fuzzy query) calls `list_all_docs()` across the entire store.
+`--refresh <domain>` calls `list_domain_urls()` scoped to one domain directory.
+Exact-URL `--retrieve` bypasses enumeration entirely and is an O(1) path lookup.
+
 ## Deferred / Not Implemented Here
 
 These items are not part of the current crate:
@@ -147,6 +167,10 @@ These items are not part of the current crate:
 - backend traits such as `ContentBackend` or `OperationsBackend`
 - query/read APIs over `.operations.ndjson`
 - store-level refresh orchestration
+
+> **See also:** Refresh and retrieval orchestration currently lives in the CLI:
+> `crates/noxa-cli/src/app/refresh.rs` (domain re-fetch loop) and
+> `crates/noxa-cli/src/app/retrieve.rs` (fuzzy/exact retrieval entrypoint).
 
 If those features are added later, this document should be updated alongside the
 implementation.

@@ -24,4 +24,7 @@ pub enum FetchError {
 
     #[error("client build failed: {0}")]
     Build(String),
+
+    #[error("HTTP {0}")]
+    HttpStatus(u16),
 }

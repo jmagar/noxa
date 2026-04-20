@@ -24,6 +24,7 @@ strip-ansi-escapes = "0.2"        # .log file preprocessing
 
 # Async runtime
 tokio = { workspace = true }
+futures = "0.3"
 
 # Serialization
 serde = { workspace = true }

@@ -4,6 +4,43 @@ use crate::content_store::FilesystemContentStore;
 use crate::paths::url_to_store_path;
 use crate::types::StoreError;
 
+fn make_extraction_with_url(markdown: &str, url: &str, title: &str) -> noxa_core::ExtractionResult {
+    noxa_core::ExtractionResult {
+        metadata: noxa_core::Metadata {
+            title: Some(title.into()),
+            description: None,
+            author: None,
+            published_date: None,
+            language: None,
+            url: Some(url.to_string()),
+            site_name: None,
+            image: None,
+            favicon: None,
+            word_count: markdown.split_whitespace().count(),
+            content_hash: None,
+            source_type: None,
+            file_path: None,
+            last_modified: None,
+            is_truncated: None,
+            technologies: vec![],
+            seed_url: None,
+            crawl_depth: None,
+            search_query: None,
+            fetched_at: None,
+        },
+        content: noxa_core::Content {
+            markdown: markdown.to_string(),
+            plain_text: markdown.to_string(),
+            links: vec![],
+            images: vec![],
+            code_blocks: vec![],
+            raw_html: None,
+        },
+        domain_data: None,
+        structured_data: vec![],
+    }
+}
+
 fn make_extraction(markdown: &str) -> noxa_core::ExtractionResult {
     noxa_core::ExtractionResult {
         metadata: noxa_core::Metadata {
@@ -222,6 +259,59 @@ async fn test_max_content_bytes_guard_skips_oversized() {
 }
 
 #[tokio::test]
+async fn test_sidecar_bloat_triggers_guard_despite_small_markdown() {
+    // The old heuristic only checked markdown.len() + plain_text.len() and ignored
+    // sidecar growth from metadata cardinality. This test verifies that a document
+    // with small markdown but bulky metadata (many technologies, long description,
+    // lots of links, changelog history) is correctly rejected once the serialized
+    // sidecar + markdown exceeds max_content_bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = FilesystemContentStore::new(dir.path());
+
+    // First: set a large enough cap that the first write succeeds.
+    store.max_content_bytes = Some(64 * 1024); // 64 KiB
+
+    // Build an extraction with small markdown but very bulky metadata.
+    let small_markdown = "# Small\n\nTiny content.";
+    let mut extraction = make_extraction(small_markdown);
+    // Stuff the metadata with many technologies to inflate the sidecar JSON.
+    extraction.metadata.technologies = (0..500)
+        .map(|i| format!("technology-framework-{i:04}"))
+        .collect();
+    extraction.metadata.description = Some("x".repeat(10_000)); // 10 KB description
+
+    // Populate links to further inflate the sidecar's current.content.links array.
+    extraction.content.links = (0..200)
+        .map(|i| noxa_core::Link {
+            href: format!("https://example.com/link-{i:04}/very/long/path/segment"),
+            text: format!("Link text for item number {i} with extra padding"),
+        })
+        .collect();
+
+    let result = store
+        .write("https://example.com/bloat", &extraction)
+        .await
+        .unwrap();
+    // First write: sidecar is small enough, should succeed.
+    assert!(result.is_new, "first write should succeed under 64 KiB cap");
+
+    // Now tighten the cap to something that the markdown alone would pass but
+    // the full sidecar (which holds the ExtractionResult with all those fields)
+    // would exceed. The serialized sidecar is well above 2 KB given the above.
+    store.max_content_bytes = Some(512); // 512 bytes
+
+    let result2 = store
+        .write("https://example.com/bloat", &extraction)
+        .await
+        .unwrap();
+    // Guard must fire: markdown is ~22 bytes but sidecar JSON is many KB.
+    assert!(
+        !result2.is_new && !result2.changed,
+        "oversized sidecar should be rejected even when markdown alone is small"
+    );
+}
+
+#[tokio::test]
 async fn test_sidecar_first_write_has_one_changelog_entry() {
     let dir = tempfile::tempdir().unwrap();
     let store = FilesystemContentStore::new(dir.path());
@@ -412,4 +502,505 @@ async fn test_atomic_write_no_tmp_files_after_completion() {
             "tmp file left behind: {rendered}"
         );
     }
+}
+
+// ── Enumeration API tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_domains_empty_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path().join("nonexistent"));
+    let domains = store.list_domains().await.unwrap();
+    assert!(domains.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_domains_returns_entries_with_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://example.com/page1",
+            &make_extraction_with_url("content a", "https://example.com/page1", "Page 1"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://example.com/page2",
+            &make_extraction_with_url("content b", "https://example.com/page2", "Page 2"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://docs.example.com/intro",
+            &make_extraction_with_url("intro", "https://docs.example.com/intro", "Intro"),
+        )
+        .await
+        .unwrap();
+
+    let domains = store.list_domains().await.unwrap();
+    assert_eq!(domains.len(), 2);
+    // Alphabetical order
+    assert_eq!(domains[0].name, "docs_example_com");
+    assert_eq!(domains[0].doc_count, 1);
+    assert_eq!(domains[1].name, "example_com");
+    assert_eq!(domains[1].doc_count, 2);
+}
+
+#[tokio::test]
+async fn test_list_domains_uses_metadata_url_when_sidecar_url_is_blank() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let url = "https://docs.example.com/intro";
+    store
+        .write(url, &make_extraction_with_url("intro", url, "Intro"))
+        .await
+        .unwrap();
+
+    let json_path = dir
+        .path()
+        .join(url_to_store_path(url))
+        .with_extension("json");
+    let mut sidecar: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&json_path).await.unwrap()).unwrap();
+    sidecar["url"] = serde_json::Value::String(String::new());
+    tokio::fs::write(&json_path, serde_json::to_vec(&sidecar).unwrap())
+        .await
+        .unwrap();
+
+    let domains = store.list_domains().await.unwrap();
+    assert_eq!(domains.len(), 1);
+    assert_eq!(domains[0].name, "docs_example_com");
+    assert_eq!(domains[0].doc_count, 1);
+    assert_eq!(
+        domains[0].original_domain.as_deref(),
+        Some("docs.example.com")
+    );
+}
+
+#[tokio::test]
+async fn test_list_docs_filters_by_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://example.com/page",
+            &make_extraction_with_url("content", "https://example.com/page", "Page"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://other.com/page",
+            &make_extraction_with_url("other", "https://other.com/page", "Other"),
+        )
+        .await
+        .unwrap();
+
+    let docs = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].url, "https://example.com/page");
+    assert_eq!(docs[0].title.as_deref(), Some("Page"));
+}
+
+#[tokio::test]
+async fn test_list_docs_strips_www_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://example.com/about",
+            &make_extraction_with_url("about", "https://example.com/about", "About"),
+        )
+        .await
+        .unwrap();
+
+    let docs_with_www = store.list_docs("www.example.com").await.unwrap();
+    let docs_without_www = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs_with_www.len(), 1);
+    assert_eq!(docs_without_www.len(), 1);
+    assert_eq!(docs_with_www[0].url, docs_without_www[0].url);
+}
+
+#[tokio::test]
+async fn test_list_docs_nonexistent_domain_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let docs = store.list_docs("nothere.example.com").await.unwrap();
+    assert!(docs.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_docs_legacy_sidecar_format() {
+    // Write a legacy raw ExtractionResult (no Sidecar envelope) directly to disk.
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let extraction = make_extraction_with_url("# Legacy", "https://example.com/legacy", "Legacy");
+    let rel = url_to_store_path("https://example.com/legacy");
+    let json_path = dir.path().join(&rel).with_extension("json");
+    let md_path = dir.path().join(&rel).with_extension("md");
+    tokio::fs::create_dir_all(json_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&json_path, serde_json::to_vec(&extraction).unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&md_path, b"# Legacy").await.unwrap();
+
+    let docs = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs.len(), 1);
+    assert!(docs[0].url.contains("example.com"));
+}
+
+#[tokio::test]
+async fn test_list_docs_missing_sidecar_falls_back_to_url_reconstruction() {
+    // Write only the .md file, no .json sidecar.
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let rel = url_to_store_path("https://example.com/noside");
+    let md_path = dir.path().join(&rel).with_extension("md");
+    tokio::fs::create_dir_all(md_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&md_path, b"content").await.unwrap();
+
+    let docs = store.list_docs("example.com").await.unwrap();
+    assert_eq!(docs.len(), 1);
+    // Reconstructed URL should at least contain the domain
+    assert!(docs[0].url.contains("example.com"));
+}
+
+#[tokio::test]
+async fn test_list_all_docs_empty_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path().join("nonexistent"));
+    let docs = store.list_all_docs().await.unwrap();
+    assert!(docs.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_all_docs_spans_multiple_domains() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://alpha.com/a",
+            &make_extraction_with_url("a", "https://alpha.com/a", "A"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://beta.com/b",
+            &make_extraction_with_url("b", "https://beta.com/b", "B"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://alpha.com/c",
+            &make_extraction_with_url("c", "https://alpha.com/c", "C"),
+        )
+        .await
+        .unwrap();
+
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(docs.len(), 3);
+    let urls: Vec<&str> = docs.iter().map(|d| d.url.as_str()).collect();
+    assert!(urls.contains(&"https://alpha.com/a"));
+    assert!(urls.contains(&"https://alpha.com/c"));
+    assert!(urls.contains(&"https://beta.com/b"));
+}
+
+#[tokio::test]
+async fn test_list_domain_urls_scoped_to_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://docs.example.com/book",
+            &make_extraction_with_url("book", "https://docs.example.com/book", "Book"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            "https://other.com/page",
+            &make_extraction_with_url("page", "https://other.com/page", "Page"),
+        )
+        .await
+        .unwrap();
+
+    let result = store.list_domain_urls("docs.example.com").await.unwrap();
+    assert_eq!(result.urls.len(), 1);
+    assert_eq!(result.urls[0], "https://docs.example.com/book");
+    assert_eq!(result.skipped, 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_list_domain_urls_skips_symlink_escapes() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store_root = dir.path().join("content");
+    let outside_dir = dir.path().join("outside");
+    tokio::fs::create_dir_all(&store_root).await.unwrap();
+    tokio::fs::create_dir_all(&outside_dir).await.unwrap();
+
+    let store = FilesystemContentStore::new(&store_root);
+    store
+        .write(
+            "https://example.com/legit",
+            &make_extraction_with_url("legit", "https://example.com/legit", "Legit"),
+        )
+        .await
+        .unwrap();
+
+    // Plant a fully-valid JSON sidecar outside the store root.
+    // Using a parseable payload is critical: if the symlink IS followed the URL
+    // "https://escaped.example.com/" will surface in the results, causing the
+    // assertion below to fail and exposing the traversal bug.  An invalid
+    // `current` block would silently fail to parse and the test would pass even
+    // when the escape was not prevented.
+    tokio::fs::write(
+        outside_dir.join("evil.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "url": "https://escaped.example.com/",
+            "first_seen": "2024-01-01T00:00:00Z",
+            "last_fetched": "2024-01-01T00:00:00Z",
+            "fetch_count": 1,
+            "current": {
+                "metadata": {
+                    "title": "Escaped",
+                    "description": null,
+                    "author": null,
+                    "published_date": null,
+                    "language": null,
+                    "url": "https://escaped.example.com/",
+                    "site_name": null,
+                    "image": null,
+                    "favicon": null,
+                    "word_count": 1,
+                    "content_hash": null,
+                    "source_type": null,
+                    "file_path": null,
+                    "last_modified": null,
+                    "is_truncated": null,
+                    "technologies": [],
+                    "seed_url": null,
+                    "crawl_depth": null,
+                    "search_query": null,
+                    "fetched_at": null
+                },
+                "content": {
+                    "markdown": "escaped",
+                    "plain_text": "escaped",
+                    "links": [],
+                    "images": [],
+                    "code_blocks": [],
+                    "raw_html": null
+                },
+                "domain_data": null,
+                "structured_data": []
+            },
+            "changelog": []
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+
+    // Create a symlink inside the domain dir pointing outside
+    let domain_dir = store_root.join("example_com");
+    symlink(&outside_dir, domain_dir.join("escape")).unwrap();
+
+    let result = store.list_domain_urls("example.com").await.unwrap();
+    // Only the legit URL should appear; the symlink escape should be skipped.
+    // If the symlink IS followed the escaped URL would appear here, failing both assertions.
+    assert_eq!(result.urls, vec!["https://example.com/legit".to_string()]);
+    assert!(
+        !result
+            .urls
+            .contains(&"https://escaped.example.com/".to_string()),
+        "symlink escape was not prevented: escaped URL appeared in results"
+    );
+}
+
+#[tokio::test]
+async fn test_list_domain_urls_counts_corrupt_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+
+    // Write one valid entry so there is at least one parseable sidecar.
+    store
+        .write(
+            "https://example.com/good",
+            &make_extraction_with_url("good", "https://example.com/good", "Good"),
+        )
+        .await
+        .unwrap();
+
+    // Plant a corrupt JSON sidecar directly in the domain directory.
+    let domain_dir = dir.path().join("example_com");
+    tokio::fs::write(domain_dir.join("corrupt.json"), b"this is not json at all")
+        .await
+        .unwrap();
+
+    let result = store.list_domain_urls("example.com").await.unwrap();
+    assert_eq!(result.urls, vec!["https://example.com/good".to_string()]);
+    assert_eq!(
+        result.skipped, 1,
+        "corrupt sidecar should be counted as skipped"
+    );
+}
+
+// ── Manifest cache tests ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_manifest_cache_populates_on_first_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://cache.example.com/doc",
+            &make_extraction_with_url("body", "https://cache.example.com/doc", "Doc"),
+        )
+        .await
+        .unwrap();
+
+    // First call: cache is None → walk happens.
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(docs.len(), 1);
+
+    // After the call the cache should be populated.
+    let guard = store.manifest_cache.0.lock().await;
+    assert!(
+        guard.cache.is_some(),
+        "cache should be Some after first list_all_docs"
+    );
+    assert!(guard.cache.as_ref().unwrap().is_fresh());
+}
+
+#[tokio::test]
+async fn test_manifest_cache_hit_does_not_see_out_of_band_file() {
+    // Write a file directly to disk (bypassing the store API) *after* the
+    // cache has been populated.  A cache-hit call should NOT see it, proving
+    // the cache is actually being used.
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://hit.example.com/a",
+            &make_extraction_with_url("a", "https://hit.example.com/a", "A"),
+        )
+        .await
+        .unwrap();
+
+    // Prime the cache.
+    let docs_first = store.list_all_docs().await.unwrap();
+    assert_eq!(docs_first.len(), 1);
+
+    // Plant a new .md file on disk without going through write() so the
+    // cache is NOT invalidated.
+    let rel = url_to_store_path("https://hit.example.com/b");
+    let md_path = dir.path().join(&rel).with_extension("md");
+    tokio::fs::create_dir_all(md_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&md_path, b"sneaky").await.unwrap();
+
+    // Second call within TTL should still return 1 (cached).
+    let docs_cached = store.list_all_docs().await.unwrap();
+    assert_eq!(
+        docs_cached.len(),
+        1,
+        "cache hit should not reflect out-of-band file write"
+    );
+}
+
+#[tokio::test]
+async fn test_write_invalidates_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://inv.example.com/a",
+            &make_extraction_with_url("a", "https://inv.example.com/a", "A"),
+        )
+        .await
+        .unwrap();
+
+    // Prime the cache.
+    let _ = store.list_all_docs().await.unwrap();
+    {
+        let guard = store.manifest_cache.0.lock().await;
+        assert!(guard.cache.is_some(), "cache should be populated");
+    }
+
+    // Another write should invalidate the cache.
+    store
+        .write(
+            "https://inv.example.com/b",
+            &make_extraction_with_url("b", "https://inv.example.com/b", "B"),
+        )
+        .await
+        .unwrap();
+    {
+        let guard = store.manifest_cache.0.lock().await;
+        assert!(
+            guard.cache.is_none(),
+            "cache should be invalidated after write"
+        );
+    }
+
+    // Next list_all_docs should re-walk and return both docs.
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(
+        docs.len(),
+        2,
+        "should see both docs after cache invalidation"
+    );
+}
+
+#[tokio::test]
+async fn test_manifest_cache_ttl_forces_rewalk() {
+    use crate::content_store::manifest::{CACHE_TTL, ManifestCache, ManifestCacheState};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    store
+        .write(
+            "https://ttl.example.com/a",
+            &make_extraction_with_url("a", "https://ttl.example.com/a", "A"),
+        )
+        .await
+        .unwrap();
+
+    // Manually insert a stale cache entry (populated_at = now - TTL - 1s).
+    {
+        let mut guard = store.manifest_cache.0.lock().await;
+        *guard = ManifestCacheState {
+            cache: Some(ManifestCache {
+                docs: HashMap::new(), // empty — would return 0 if served
+                populated_at: Instant::now()
+                    .checked_sub(CACHE_TTL + Duration::from_secs(1))
+                    .expect("time arithmetic should not overflow"),
+            }),
+            generation: 0,
+        };
+    }
+
+    // list_all_docs should detect the stale cache and re-walk.
+    let docs = store.list_all_docs().await.unwrap();
+    assert_eq!(
+        docs.len(),
+        1,
+        "stale cache should trigger re-walk and return real docs"
+    );
 }

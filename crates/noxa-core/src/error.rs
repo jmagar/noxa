@@ -26,10 +26,7 @@ pub enum ExtractError {
     JavaScriptRuntimeInit { reason: String },
 
     #[error("JavaScript runtime failed during {stage}: {reason}")]
-    JavaScriptRuntimeFailure {
-        stage: &'static str,
-        reason: String,
-    },
+    JavaScriptRuntimeFailure { stage: &'static str, reason: String },
 
     #[error("JavaScript execution timed out after {timeout_ms}ms")]
     JavaScriptTimeout { timeout_ms: u64 },

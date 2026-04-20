@@ -15,7 +15,7 @@ pub mod tls;
 
 pub use browser::BrowserProfile;
 pub use client::{BatchExtractResult, BatchResult, FetchClient, FetchConfig, FetchResult};
-pub use crawler::{CrawlConfig, CrawlResult, CrawlState, Crawler, PageResult};
+pub use crawler::{BodyRetention, CrawlConfig, CrawlResult, CrawlState, Crawler, PageResult};
 pub use error::FetchError;
 pub use http::HeaderMap;
 pub use noxa_pdf::PdfMode;
