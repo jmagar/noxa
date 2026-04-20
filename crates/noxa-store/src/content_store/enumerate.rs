@@ -64,6 +64,8 @@ impl FilesystemContentStore {
             return Ok(Vec::new());
         }
 
+        let canonical_root = self.get_canonical_root()?;
+
         let mut read_dir = match tokio::fs::read_dir(&self.root).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -81,11 +83,13 @@ impl FilesystemContentStore {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            let count_path = path.clone();
             let (doc_count, original_domain) =
-                tokio::task::spawn_blocking(move || count_md_and_peek_domain_sync(&count_path))
-                    .await?;
-            entries.push(DomainEntry { name, doc_count, original_domain });
+                count_md_and_peek_domain_async(&path, &canonical_root).await;
+            entries.push(DomainEntry {
+                name,
+                doc_count,
+                original_domain,
+            });
         }
 
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -126,59 +130,72 @@ impl FilesystemContentStore {
     ///
     /// Corrupt sidecars are skipped with a warning.
     pub async fn list_all_docs(&self) -> Result<Vec<StoredDoc>, StoreError> {
-        // --- Fast path: cache hit ---
-        {
-            let guard = self.manifest_cache.0.lock().await;
-            if let Some(cache) = guard.as_ref() {
-                if cache.is_fresh() {
-                    let mut docs: Vec<StoredDoc> = cache.docs.values().cloned().collect();
-                    docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
-                    return Ok(docs);
+        let mut retries = 0u8;
+
+        loop {
+            // --- Fast path: cache hit ---
+            {
+                let guard = self.manifest_cache.0.lock().await;
+                if let Some(cache) = guard.cache.as_ref() {
+                    if cache.is_fresh() {
+                        let mut docs: Vec<StoredDoc> = cache.docs.values().cloned().collect();
+                        docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+                        return Ok(docs);
+                    }
                 }
             }
-        }
 
-        // --- Slow path: full walk ---
-        if !self.root.exists() {
-            return Ok(Vec::new());
-        }
+            // --- Slow path: full walk ---
+            if !self.root.exists() {
+                return Ok(Vec::new());
+            }
 
-        let canonical_root = self.get_canonical_root()?;
-        let mut read_dir = match tokio::fs::read_dir(&self.root).await {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
+            let walk_generation = self.manifest_cache.generation_for_walk().await;
 
-        let mut docs = Vec::new();
-        while let Some(entry) = read_dir.next_entry().await? {
-            let path = entry.path();
-            let ft = match tokio::fs::symlink_metadata(&path).await {
-                Ok(m) => m.file_type(),
-                Err(_) => continue,
+            let canonical_root = self.get_canonical_root()?;
+            let mut read_dir = match tokio::fs::read_dir(&self.root).await {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) => return Err(e.into()),
             };
-            if !ft.is_dir() || ft.is_symlink() {
+
+            let mut docs = Vec::new();
+            while let Some(entry) = read_dir.next_entry().await? {
+                let path = entry.path();
+                let ft = match tokio::fs::symlink_metadata(&path).await {
+                    Ok(m) => m.file_type(),
+                    Err(_) => continue,
+                };
+                if !ft.is_dir() || ft.is_symlink() {
+                    continue;
+                }
+                collect_docs_async(&path, &self.root, &canonical_root, &mut docs).await;
+            }
+
+            docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+
+            let mut guard = self.manifest_cache.0.lock().await;
+            if guard.generation != walk_generation {
+                // Cache invalidated during traversal; rerun with current generation.
+                if retries >= 3 {
+                    return Ok(docs);
+                }
+                retries += 1;
                 continue;
             }
-            collect_docs_async(&path, &self.root, &canonical_root, &mut docs).await;
-        }
 
-        docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
-
-        // Populate the cache with the results of this walk.
-        {
-            let mut guard = self.manifest_cache.0.lock().await;
+            // Populate the cache with the results of this walk.
             let map: HashMap<String, StoredDoc> = docs
                 .iter()
                 .map(|d| (d.md_path.to_string_lossy().into_owned(), d.clone()))
                 .collect();
-            *guard = Some(ManifestCache {
+            guard.cache = Some(ManifestCache {
                 docs: map,
                 populated_at: Instant::now(),
             });
-        }
 
-        Ok(docs)
+            return Ok(docs);
+        }
     }
 
     /// Collect all URLs stored under `domain`, used by the refresh workflow.
@@ -399,65 +416,79 @@ async fn parse_url_from_sidecar_file(json_path: &Path) -> Option<String> {
     url
 }
 
-// ── Sync helpers (called from async context via blocking) ─────────────────────
-
-/// Count `.md` files under `dir` recursively (synchronous, used for domain listing).
-fn count_md_files_sync(dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|e| {
-            let Ok(file_type) = e.file_type() else {
-                return 0;
-            };
-            if file_type.is_symlink() {
-                0
-            } else if file_type.is_dir() {
-                count_md_files_sync(&e.path())
-            } else if e.path().extension().and_then(|x| x.to_str()) == Some("md") {
-                1
-            } else {
-                0
-            }
-        })
-        .sum()
+/// Count `.md` files and extract the original host from the first sidecar found.
+async fn count_md_and_peek_domain_async(
+    dir: &Path,
+    canonical_root: &Path,
+) -> (usize, Option<String>) {
+    collect_domain_metadata_async(dir, canonical_root).await
 }
 
-/// Find the first `.json` sidecar under `dir`, recursively (synchronous).
-fn find_first_json_sync(dir: &Path) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(ft) = entry.file_type() else { continue };
+async fn collect_domain_metadata_async(
+    dir: &Path,
+    canonical_root: &Path,
+) -> (usize, Option<String>) {
+    match tokio::fs::canonicalize(dir).await {
+        Ok(canonical_dir) if canonical_dir.starts_with(canonical_root) => {}
+        _ => return (0, None),
+    }
+
+    let mut read_dir = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return (0, None),
+    };
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        paths.push(entry.path());
+    }
+    paths.sort();
+
+    let mut count = 0usize;
+    let mut original_domain = None;
+
+    for path in paths {
+        let ft = match tokio::fs::symlink_metadata(&path).await {
+            Ok(m) => m.file_type(),
+            Err(_) => continue,
+        };
+
         if ft.is_symlink() {
             continue;
-        } else if ft.is_dir() {
-            if let Some(p) = find_first_json_sync(&path) {
-                return Some(p);
+        }
+
+        if ft.is_dir() {
+            let (nested_count, nested_domain) =
+                Box::pin(collect_domain_metadata_async(&path, canonical_root)).await;
+            count += nested_count;
+            if original_domain.is_none() {
+                original_domain = nested_domain;
             }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            return Some(path);
+            continue;
+        }
+
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            count += 1;
+            continue;
+        }
+
+        if path.extension().and_then(|e| e.to_str()) == Some("json") && original_domain.is_none() {
+            original_domain = parse_original_domain_from_sidecar(&path).await;
         }
     }
-    None
+
+    (count, original_domain)
 }
 
-/// Count `.md` files and extract the original host from the first sidecar found.
-fn count_md_and_peek_domain_sync(dir: &Path) -> (usize, Option<String>) {
-    let count = count_md_files_sync(dir);
-    let original_domain = find_first_json_sync(dir)
-        .and_then(|p| std::fs::read_to_string(&p).ok())
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|val| {
-            val.get("url")
-                .and_then(|u| u.as_str())
-                .map(str::to_string)
+async fn parse_original_domain_from_sidecar(json_path: &Path) -> Option<String> {
+    let (url, _title) = parse_sidecar_for_doc(json_path).await;
+    url.and_then(|u| {
+        url::Url::parse(&u).ok().and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|h| h.strip_prefix("www.").unwrap_or(h).to_string())
         })
-        .and_then(|url| url::Url::parse(&url).ok())
-        .and_then(|u| u.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h).to_string()));
-    (count, original_domain)
+    })
 }
 
 /// Reconstruct a URL from its store path when the sidecar is missing or corrupt.

@@ -7,16 +7,17 @@
 //!
 //! ## Design choices
 //!
-//! * **Invalidate, don't update** — every `write()` sets the cache to `None`.
-//!   Incremental maintenance is error-prone (oversized-skip path, changelog
-//!   trimming, etc.).  The store is never large enough that re-populating the
-//!   whole cache is expensive.
+//! * **Invalidate, don't update** — every `write()` clears the cache and bumps a
+//!   generation token.  Incremental maintenance is error-prone (oversized-skip
+//!   path, changelog trimming, etc.).
 //! * **TTL safety net** — a 30-second TTL ensures the cache can never drift
 //!   from disk state if the process is long-running or the store is modified
 //!   externally.
+//! * **Generation checks** — `list_all_docs()` captures a generation token before
+//!   walking and only publishes a fresh snapshot when the token is unchanged.
 //! * **Arc<tokio::sync::Mutex<…>>** so `FilesystemContentStore` stays `Clone`.
 //! * **Errors are not cached** — if the walk fails, the caller gets the error
-//!   and the cache remains `None`.
+//!   and the cache remains invalid.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use super::enumerate::StoredDoc;
 /// and the full walk is re-run.
 pub(crate) const CACHE_TTL: Duration = Duration::from_secs(30);
 
-/// The payload stored inside the mutex.
+/// The payload stored for cached manifests.
 #[derive(Debug)]
 pub(crate) struct ManifestCache {
     /// All documents in the store, keyed by file path (string form) to
@@ -47,31 +48,41 @@ impl ManifestCache {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ManifestCacheState {
+    pub cache: Option<ManifestCache>,
+    pub generation: u64,
+}
+
 /// A shareable, `Clone`-able handle to the manifest cache.
 ///
-/// Internally an `Arc<Mutex<Option<ManifestCache>>>` so cloning the store
-/// shares the same cache (consistent semantics across handles pointing to the
-/// same store root).
+/// Internally an `Arc<tokio::sync::Mutex<...>>` so cloning the store shares the
+/// same state (consistent semantics across handles pointing to the same store
+/// root).
 #[derive(Clone, Debug)]
-pub(crate) struct ManifestCacheHandle(pub Arc<Mutex<Option<ManifestCache>>>);
+pub(crate) struct ManifestCacheHandle(pub Arc<Mutex<ManifestCacheState>>);
 
 impl ManifestCacheHandle {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(None)))
+        Self(Arc::new(Mutex::new(ManifestCacheState {
+            cache: None,
+            generation: 0,
+        })))
     }
 
-    /// Invalidate the cache.  Called by every write path so that the next
-    /// `list_all_docs()` call triggers a fresh walk.
+    /// Capture the current generation token for a traversal race check.
+    pub async fn generation_for_walk(&self) -> u64 {
+        self.0.lock().await.generation
+    }
+
+    /// Invalidate the cache and advance the generation token.
     ///
-    /// # Known TOCTOU race
-    /// A concurrent `list_all_docs()` call may observe the `None` set here,
-    /// perform a full walk, and then overwrite this invalidation by storing a
-    /// new snapshot that excludes the just-written document.  The 30-second TTL
-    /// bounds the drift window.  A generation counter (increment on invalidate,
-    /// check before committing the repopulated snapshot) would close this race
-    /// but is deferred as a future improvement.
+    /// `list_all_docs()` records the generation before traversal and only
+    /// publishes a new snapshot if the token is unchanged when the walk
+    /// completes.
     pub async fn invalidate(&self) {
         let mut guard = self.0.lock().await;
-        *guard = None;
+        guard.generation = guard.generation.saturating_add(1);
+        guard.cache = None;
     }
 }

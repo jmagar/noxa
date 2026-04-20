@@ -60,7 +60,9 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref query) = cli.retrieve {
-        if let Err(e) = run_retrieve(query, content_store_root(resolved.output_dir.as_deref())).await {
+        if let Err(e) =
+            run_retrieve(query, content_store_root(resolved.output_dir.as_deref())).await
+        {
             eprintln!("error: {e}");
             process::exit(1);
         }
@@ -134,7 +136,8 @@ pub(crate) async fn run() {
     }
 
     if let Some(ref pattern) = cli.grep {
-        if let Err(e) = run_grep(pattern, content_store_root(resolved.output_dir.as_deref())).await {
+        if let Err(e) = run_grep(pattern, content_store_root(resolved.output_dir.as_deref())).await
+        {
             eprintln!("error: {e}");
             process::exit(1);
         }

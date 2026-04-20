@@ -24,7 +24,9 @@ pub(crate) fn classify_query(query: &str) -> (bool, String) {
                         && host
                             .split('.')
                             .next_back()
-                            .map(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()))
+                            .map(|tld| {
+                                tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+                            })
                             .unwrap_or(false)
                 })
                 .unwrap_or(false)
@@ -37,6 +39,7 @@ pub(crate) fn classify_query(query: &str) -> (bool, String) {
 /// NOTE: this predicate is used in tests and as a conceptual aid.  The live
 /// `run_retrieve` path still performs a direct FS probe (which is cheaper and
 /// identical in effect) rather than iterating `list_all_docs`.
+#[cfg(test)]
 pub(crate) fn is_exact_url_match(doc: &noxa_store::StoredDoc, query: &str) -> bool {
     let (looks_like_url, normalised) = classify_query(query);
     if !looks_like_url {
@@ -58,7 +61,10 @@ const STOP_WORDS: &[&str] = &[
 ];
 
 fn filter_stop_words(terms: Vec<String>) -> Vec<String> {
-    terms.into_iter().filter(|t| !STOP_WORDS.contains(&t.as_str())).collect()
+    terms
+        .into_iter()
+        .filter(|t| !STOP_WORDS.contains(&t.as_str()))
+        .collect()
 }
 
 /// Score a single document against `terms` (lower-cased query tokens).
@@ -130,11 +136,15 @@ pub(crate) fn top_scored<'a>(
 /// Select the best-matching document for a fuzzy `query`.
 ///
 /// Returns `None` when no document scores above zero.
+#[cfg(test)]
 pub(crate) fn select_best<'a>(
     docs: &'a [noxa_store::StoredDoc],
     query: &str,
 ) -> Option<&'a noxa_store::StoredDoc> {
-    top_scored(docs, query, 1).into_iter().next().map(|(_, doc)| doc)
+    top_scored(docs, query, 1)
+        .into_iter()
+        .next()
+        .map(|(_, doc)| doc)
 }
 
 // ── CLI entry-point ───────────────────────────────────────────────────────────
@@ -170,7 +180,7 @@ pub(crate) async fn run_retrieve(
         }
         eprintln!("{yellow}not cached:{reset} {bold}{url}{reset}");
         eprintln!("{dim}run:{reset} {cyan}noxa {url}{reset} {dim}to fetch and store it{reset}");
-        return Ok(());
+        eprintln!();
     }
 
     // Fuzzy query — score docs by word-token matches in URL and title.
@@ -211,18 +221,16 @@ pub(crate) async fn run_retrieve(
             let raw: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
             let terms = filter_stop_words(raw);
             if !terms.is_empty() {
-                let excerpt = content
-                    .lines()
-                    .enumerate()
-                    .find(|(_, line)| {
-                        let lower = line.to_lowercase();
-                        terms.iter().any(|t| lower.contains(t.as_str()))
-                    });
+                let excerpt = content.lines().enumerate().find(|(_, line)| {
+                    let lower = line.to_lowercase();
+                    terms.iter().any(|t| lower.contains(t.as_str()))
+                });
                 if let Some((lineno, line)) = excerpt {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         let display = if trimmed.len() > 100 {
-                            format!("{}...", &trimmed[..97])
+                            let preview: String = trimmed.chars().take(97).collect();
+                            format!("{preview}...")
                         } else {
                             trimmed.to_string()
                         };
@@ -409,8 +417,16 @@ mod tests {
         let doc_trust = make_doc("https://example.com/trust-issues", None);
         let doc_rusty = make_doc("https://example.com/rusty-tools", None);
         let terms = vec!["rust".to_string()];
-        assert_eq!(score_doc(&doc_trust, &terms), 0, "'rust' should not match 'trust'");
-        assert_eq!(score_doc(&doc_rusty, &terms), 0, "'rust' should not match 'rusty'");
+        assert_eq!(
+            score_doc(&doc_trust, &terms),
+            0,
+            "'rust' should not match 'trust'"
+        );
+        assert_eq!(
+            score_doc(&doc_rusty, &terms),
+            0,
+            "'rust' should not match 'rusty'"
+        );
     }
 
     #[test]
@@ -427,7 +443,10 @@ mod tests {
     fn stop_words_filtered_from_query() {
         let input = vec!["the".to_string(), "rust".to_string(), "book".to_string()];
         let filtered = filter_stop_words(input);
-        assert!(!filtered.contains(&"the".to_string()), "'the' should be filtered");
+        assert!(
+            !filtered.contains(&"the".to_string()),
+            "'the' should be filtered"
+        );
         assert!(filtered.contains(&"rust".to_string()));
         assert!(filtered.contains(&"book".to_string()));
     }
@@ -562,7 +581,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("does_not_exist");
         // Must not panic or hang.
-        run_retrieve("rust async runtime", store_root).await.unwrap();
+        run_retrieve("rust async runtime", store_root)
+            .await
+            .unwrap();
     }
 
     /// Fuzzy query against an empty (but existing) store — hits the
@@ -573,7 +594,9 @@ mod tests {
         let store_root = dir.path().join("content");
         tokio::fs::create_dir_all(&store_root).await.unwrap();
         // No docs written — store is empty.
-        run_retrieve("authentication oauth guide", store_root).await.unwrap();
+        run_retrieve("authentication oauth guide", store_root)
+            .await
+            .unwrap();
     }
 
     /// Exact URL query for a URL that is NOT cached — hits the "not cached"
@@ -583,7 +606,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("content");
         tokio::fs::create_dir_all(&store_root).await.unwrap();
-        run_retrieve("https://docs.example.com/api", store_root).await.unwrap();
+        run_retrieve("https://docs.example.com/api", store_root)
+            .await
+            .unwrap();
     }
 
     /// Exact URL query for a URL that IS cached — hits the happy-path FS probe
@@ -634,7 +659,9 @@ mod tests {
         // Multi-word query — "oauth authentication" should score highest on the
         // first doc (matches both terms) while still exercising the multi-doc
         // display path.
-        run_retrieve("oauth authentication", store_root).await.unwrap();
+        run_retrieve("oauth authentication", store_root)
+            .await
+            .unwrap();
     }
 
     /// Single-doc store with a fuzzy query — exercises the path where

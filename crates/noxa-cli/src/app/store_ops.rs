@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::Arc;
+
+const GREP_READ_CONCURRENCY: usize = 16;
 
 const MAX_URL_DISPLAY: usize = 80;
 
@@ -92,10 +95,7 @@ pub(crate) async fn run_list(filter: &str, store_root: std::path::PathBuf) -> Re
     Ok(())
 }
 
-pub(crate) async fn run_grep(
-    pattern: &str,
-    store_root: std::path::PathBuf,
-) -> Result<(), String> {
+pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) -> Result<(), String> {
     if !store_root.exists() {
         eprintln!(
             "{dim}no local docs yet — run{reset} {cyan}noxa <url>{reset} {dim}or{reset} {cyan}noxa --search \"...\"{reset} {dim}to build your store{reset}"
@@ -152,11 +152,17 @@ pub(crate) async fn run_grep(
             };
 
             // Read all files concurrently then process results in path order.
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(GREP_READ_CONCURRENCY));
             let mut set = tokio::task::JoinSet::new();
             for doc in &docs {
                 let md_path = doc.md_path.clone();
                 let url = doc.url.clone();
+                let semaphore = Arc::clone(&semaphore);
                 set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("semaphore closed unexpectedly");
                     let content = tokio::fs::read_to_string(&md_path).await;
                     (url, md_path, content)
                 });
@@ -199,7 +205,7 @@ pub(crate) async fn run_grep(
                 );
             }
         }
-        Err(e) => eprintln!("error running rg: {e}"),
+        Err(e) => return Err(format!("error running rg: {e}")),
     }
     Ok(())
 }

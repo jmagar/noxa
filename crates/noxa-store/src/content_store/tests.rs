@@ -550,6 +550,37 @@ async fn test_list_domains_returns_entries_with_counts() {
 }
 
 #[tokio::test]
+async fn test_list_domains_uses_metadata_url_when_sidecar_url_is_blank() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+    let url = "https://docs.example.com/intro";
+    store
+        .write(url, &make_extraction_with_url("intro", url, "Intro"))
+        .await
+        .unwrap();
+
+    let json_path = dir
+        .path()
+        .join(url_to_store_path(url))
+        .with_extension("json");
+    let mut sidecar: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&json_path).await.unwrap()).unwrap();
+    sidecar["url"] = serde_json::Value::String(String::new());
+    tokio::fs::write(&json_path, serde_json::to_vec(&sidecar).unwrap())
+        .await
+        .unwrap();
+
+    let domains = store.list_domains().await.unwrap();
+    assert_eq!(domains.len(), 1);
+    assert_eq!(domains[0].name, "docs_example_com");
+    assert_eq!(domains[0].doc_count, 1);
+    assert_eq!(
+        domains[0].original_domain.as_deref(),
+        Some("docs.example.com")
+    );
+}
+
+#[tokio::test]
 async fn test_list_docs_filters_by_domain() {
     let dir = tempfile::tempdir().unwrap();
     let store = FilesystemContentStore::new(dir.path());
@@ -848,10 +879,10 @@ async fn test_manifest_cache_populates_on_first_call() {
     // After the call the cache should be populated.
     let guard = store.manifest_cache.0.lock().await;
     assert!(
-        guard.is_some(),
+        guard.cache.is_some(),
         "cache should be Some after first list_all_docs"
     );
-    assert!(guard.as_ref().unwrap().is_fresh());
+    assert!(guard.cache.as_ref().unwrap().is_fresh());
 }
 
 #[tokio::test]
@@ -907,7 +938,7 @@ async fn test_write_invalidates_cache() {
     let _ = store.list_all_docs().await.unwrap();
     {
         let guard = store.manifest_cache.0.lock().await;
-        assert!(guard.is_some(), "cache should be populated");
+        assert!(guard.cache.is_some(), "cache should be populated");
     }
 
     // Another write should invalidate the cache.
@@ -920,7 +951,10 @@ async fn test_write_invalidates_cache() {
         .unwrap();
     {
         let guard = store.manifest_cache.0.lock().await;
-        assert!(guard.is_none(), "cache should be invalidated after write");
+        assert!(
+            guard.cache.is_none(),
+            "cache should be invalidated after write"
+        );
     }
 
     // Next list_all_docs should re-walk and return both docs.
@@ -934,7 +968,7 @@ async fn test_write_invalidates_cache() {
 
 #[tokio::test]
 async fn test_manifest_cache_ttl_forces_rewalk() {
-    use crate::content_store::manifest::{CACHE_TTL, ManifestCache};
+    use crate::content_store::manifest::{CACHE_TTL, ManifestCache, ManifestCacheState};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -951,12 +985,15 @@ async fn test_manifest_cache_ttl_forces_rewalk() {
     // Manually insert a stale cache entry (populated_at = now - TTL - 1s).
     {
         let mut guard = store.manifest_cache.0.lock().await;
-        *guard = Some(ManifestCache {
-            docs: HashMap::new(), // empty — would return 0 if served
-            populated_at: Instant::now()
-                .checked_sub(CACHE_TTL + Duration::from_secs(1))
-                .expect("time arithmetic should not overflow"),
-        });
+        *guard = ManifestCacheState {
+            cache: Some(ManifestCache {
+                docs: HashMap::new(), // empty — would return 0 if served
+                populated_at: Instant::now()
+                    .checked_sub(CACHE_TTL + Duration::from_secs(1))
+                    .expect("time arithmetic should not overflow"),
+            }),
+            generation: 0,
+        };
     }
 
     // list_all_docs should detect the stale cache and re-walk.
