@@ -296,7 +296,8 @@ async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metada
     let watch_dir = tempdir().expect("temp watch dir");
     let config = RagConfig {
         source: SourceConfig::FsWatcher {
-            watch_dir: watch_dir.path().to_path_buf(),
+            watch_dirs: vec![watch_dir.path().to_path_buf()],
+            watch_dir: None,
             debounce_ms: 500,
         },
         embed_provider: EmbedProviderConfig::Tei {

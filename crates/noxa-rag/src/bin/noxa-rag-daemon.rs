@@ -79,19 +79,21 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config(config_path)
         .map_err(|e| format!("failed to load config from {}: {e}", config_path.display()))?;
 
-    // Ensure watch_dir exists (create if missing — convenience for first-run).
-    let watch_dir = match &config.source {
-        SourceConfig::FsWatcher { watch_dir, .. } => watch_dir.clone(),
+    // Ensure all watch_dirs exist (create if missing — convenience for first-run).
+    let watch_dirs = match &config.source {
+        SourceConfig::FsWatcher { watch_dirs, .. } => watch_dirs.clone(),
     };
 
-    if !watch_dir.exists() {
-        std::fs::create_dir_all(&watch_dir).map_err(|e| {
-            format!(
-                "watch_dir does not exist and could not be created ({}): {e}",
-                watch_dir.display()
-            )
-        })?;
-        eprintln!("[noxa-rag] created watch_dir: {}", watch_dir.display());
+    for watch_dir in &watch_dirs {
+        if !watch_dir.exists() {
+            std::fs::create_dir_all(watch_dir).map_err(|e| {
+                format!(
+                    "watch_dir does not exist and could not be created ({}): {e}",
+                    watch_dir.display()
+                )
+            })?;
+            eprintln!("[noxa-rag] created watch_dir: {}", watch_dir.display());
+        }
     }
 
     // Build embed provider — startup probe (exits 1 if TEI unavailable).

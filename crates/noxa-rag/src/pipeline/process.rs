@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -171,7 +171,7 @@ pub(crate) async fn process_job(
     tokenizer: &Arc<Tokenizer>,
     config: &RagConfig,
     url_locks: &Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    watch_root: &Path,
+    watch_roots: &[PathBuf],
     counters: &Arc<SessionCounters>,
     failed_jobs_log_lock: &Arc<tokio::sync::Mutex<()>>,
 ) -> Result<JobStats, RagError> {
@@ -184,7 +184,7 @@ pub(crate) async fn process_job(
             job.path.display()
         ))
     })?;
-    if !scan::path_is_within_watch_root(&canonical, watch_root) {
+    if !scan::path_is_within_any_watch_root(&canonical, watch_roots) {
         tracing::warn!(
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"

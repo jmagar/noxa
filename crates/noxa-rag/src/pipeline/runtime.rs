@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -41,7 +41,7 @@ impl notify_debouncer_mini::DebounceEventHandler for BoundedSender {
 fn spawn_workers(
     pipeline: &Pipeline,
     rx: Arc<Mutex<mpsc::Receiver<IndexJob>>>,
-    watch_root: Arc<PathBuf>,
+    watch_roots: Arc<Vec<PathBuf>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::with_capacity(pipeline.config.pipeline.embed_concurrency);
 
@@ -54,7 +54,7 @@ fn spawn_workers(
         let url_locks = pipeline.url_locks.clone();
         let counters = pipeline.counters.clone();
         let failed_jobs_log_lock = pipeline.failed_jobs_log_lock.clone();
-        let watch_root = watch_root.clone();
+        let watch_roots = watch_roots.clone();
 
         let handle = tokio::spawn(async move {
             tracing::debug!(worker_id, "index worker started");
@@ -74,7 +74,7 @@ fn spawn_workers(
                                 &tokenizer,
                                 &config,
                                 &url_locks,
-                                watch_root.as_ref(),
+                                &watch_roots,
                                 &counters,
                                 &failed_jobs_log_lock,
                             )
@@ -135,7 +135,7 @@ fn spawn_workers(
 /// The debouncer is moved into the `spawn_blocking` closure so it stays alive
 /// for the entire lifetime of the bridge task.
 fn setup_watcher(
-    watch_dir: &Path,
+    watch_dirs: &[PathBuf],
     debounce_ms: u64,
     tx: mpsc::Sender<IndexJob>,
     shutdown: tokio_util::sync::CancellationToken,
@@ -145,17 +145,18 @@ fn setup_watcher(
     let mut debouncer = new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
         .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
 
-    debouncer
-        .watcher()
-        .watch(watch_dir, RecursiveMode::Recursive)
-        .map_err(|e| {
-            RagError::Generic(format!(
-                "failed to watch directory {}: {e}",
-                watch_dir.display()
-            ))
-        })?;
-
-    tracing::info!(path = %watch_dir.display(), "watching directory recursively");
+    for watch_dir in watch_dirs {
+        debouncer
+            .watcher()
+            .watch(watch_dir, RecursiveMode::Recursive)
+            .map_err(|e| {
+                RagError::Generic(format!(
+                    "failed to watch directory {}: {e}",
+                    watch_dir.display()
+                ))
+            })?;
+        tracing::info!(path = %watch_dir.display(), "watching directory recursively");
+    }
 
     let bridge_handle = tokio::task::spawn_blocking(move || {
         // Keep debouncer alive for the duration of the bridge.
@@ -225,12 +226,20 @@ fn spawn_startup_scan(
     tx: mpsc::Sender<IndexJob>,
     store: DynVectorStore,
     shutdown: tokio_util::sync::CancellationToken,
-    watch_dir: PathBuf,
+    watch_dirs: Vec<PathBuf>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let paths = match tokio::task::spawn_blocking({
-            let dir = watch_dir.clone();
-            move || scan::collect_indexable_paths(&dir)
+            let dirs = watch_dirs.clone();
+            move || {
+                let mut all: Vec<PathBuf> = dirs
+                    .iter()
+                    .flat_map(|d| scan::collect_indexable_paths(d))
+                    .collect();
+                all.sort();
+                all.dedup();
+                all
+            }
         })
         .await
         {
@@ -447,11 +456,12 @@ async fn drain_and_report(
 
 pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     // --- validate config & extract source params ---
-    let (watch_dir, debounce_ms) = match &pipeline.config.source {
+    let (watch_dirs, debounce_ms) = match &pipeline.config.source {
         SourceConfig::FsWatcher {
-            watch_dir,
+            watch_dirs,
             debounce_ms,
-        } => (watch_dir.clone(), *debounce_ms),
+            ..
+        } => (watch_dirs.clone(), *debounce_ms),
     };
 
     if pipeline.config.pipeline.embed_concurrency == 0 {
@@ -461,25 +471,25 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     }
 
     tracing::info!(
-        watch_dir = %watch_dir.display(),
+        watch_dirs = ?watch_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
         debounce_ms,
         embed_concurrency = pipeline.config.pipeline.embed_concurrency,
         "pipeline starting"
     );
 
     let session_start = Instant::now();
-    let watch_root = Arc::new(scan::canonical_watch_root(&watch_dir).await?);
+    let watch_roots = Arc::new(scan::canonical_watch_roots(&watch_dirs).await?);
 
     // --- channel ---
     let (tx, rx) = mpsc::channel::<IndexJob>(256);
     let rx = Arc::new(Mutex::new(rx));
 
     // --- spawn workers ---
-    let worker_handles = spawn_workers(pipeline, rx, watch_root);
+    let worker_handles = spawn_workers(pipeline, rx, watch_roots);
 
     // --- setup fs watcher + blocking bridge ---
     let bridge_handle = setup_watcher(
-        &watch_dir,
+        &watch_dirs,
         debounce_ms,
         tx.clone(),
         pipeline.shutdown.clone(),
@@ -490,7 +500,7 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         tx.clone(),
         pipeline.store.clone(),
         pipeline.shutdown.clone(),
-        watch_dir.clone(),
+        watch_dirs,
     );
 
     // --- heartbeat ---
@@ -614,7 +624,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (tx, mut rx) = mpsc::channel::<super::super::IndexJob>(256);
 
-        let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), watch_dir);
+        let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), vec![watch_dir]);
 
         // Wait for the scan to finish before draining.
         handle.await.expect("startup scan panicked");

@@ -123,15 +123,25 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
     Some((hash, url))
 }
 
-/// Returns the canonical watch root computed once at startup.
-pub(crate) async fn canonical_watch_root(watch_dir: &Path) -> Result<PathBuf, RagError> {
-    tokio::fs::canonicalize(watch_dir)
-        .await
-        .map_err(|e| RagError::Generic(format!("canonicalize watch_dir failed: {e}")))
+/// Canonicalizes each watch directory and returns the resulting list.
+/// Returns an error if any directory cannot be canonicalized.
+pub(crate) async fn canonical_watch_roots(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, RagError> {
+    let mut canonical = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let c = tokio::fs::canonicalize(dir)
+            .await
+            .map_err(|e| RagError::Generic(format!("canonicalize watch_dir failed: {e}")))?;
+        canonical.push(c);
+    }
+    Ok(canonical)
 }
 
-pub(crate) fn path_is_within_watch_root(canonical_path: &Path, watch_root: &Path) -> bool {
-    canonical_path.starts_with(watch_root)
+/// Returns `true` iff `canonical_path` is under at least one of the given canonical roots.
+pub(crate) fn path_is_within_any_watch_root(
+    canonical_path: &Path,
+    watch_roots: &[PathBuf],
+) -> bool {
+    watch_roots.iter().any(|root| canonical_path.starts_with(root))
 }
 
 /// Walk up the directory tree from `file_path` to find a `.git/HEAD` file.
@@ -173,8 +183,8 @@ fn git_head_path(git_entry: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_watch_root, collect_indexable_paths, detect_git_branch, is_indexable,
-        path_is_within_watch_root,
+        canonical_watch_roots, collect_indexable_paths, detect_git_branch, is_indexable,
+        path_is_within_any_watch_root,
     };
     use std::fs;
 
@@ -227,25 +237,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canonical_watch_root_resolves_once_up_front() {
+    async fn canonical_watch_roots_resolves_once_up_front() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let nested = tmp.path().join("watch/../watch");
         tokio::fs::create_dir_all(&nested)
             .await
             .expect("create watch dir");
 
-        let canonical = canonical_watch_root(&nested)
+        let roots = canonical_watch_roots(&[nested.to_path_buf()])
             .await
-            .expect("canonical watch root");
+            .expect("canonical watch roots");
         let expected = tokio::fs::canonicalize(tmp.path().join("watch"))
             .await
             .expect("expected canonical path");
 
-        assert_eq!(canonical, expected);
+        assert_eq!(roots, vec![expected]);
     }
 
     #[tokio::test]
-    async fn path_is_within_watch_root_rejects_escape() {
+    async fn canonical_watch_roots_nonexistent_dir_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nonexistent = tmp.path().join("does_not_exist");
+        let result = canonical_watch_roots(&[nonexistent]).await;
+        assert!(result.is_err(), "nonexistent dir should return error");
+    }
+
+    #[tokio::test]
+    async fn path_is_within_any_watch_root_rejects_escape() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let watch = tmp.path().join("watch");
         let outside = tmp.path().join("outside");
@@ -256,7 +274,9 @@ mod tests {
             .await
             .expect("create outside");
 
-        let watch_root = canonical_watch_root(&watch).await.expect("watch root");
+        let watch_roots = canonical_watch_roots(&[watch.to_path_buf()])
+            .await
+            .expect("watch roots");
         let outside_file = outside.join("doc.json");
         tokio::fs::write(&outside_file, "{}")
             .await
@@ -266,9 +286,70 @@ mod tests {
             .expect("canonical outside file");
 
         assert!(
-            !path_is_within_watch_root(&canonical_outside, &watch_root),
+            !path_is_within_any_watch_root(&canonical_outside, &watch_roots),
             "paths outside the cached watch root should be rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn path_is_within_any_watch_root_matches_first_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root1 = tmp.path().join("root1");
+        let root2 = tmp.path().join("root2");
+        tokio::fs::create_dir_all(&root1).await.expect("create root1");
+        tokio::fs::create_dir_all(&root2).await.expect("create root2");
+
+        let file1 = root1.join("doc.json");
+        tokio::fs::write(&file1, "{}").await.expect("write file1");
+        let canonical1 = tokio::fs::canonicalize(&file1).await.expect("canonicalize");
+
+        let watch_roots = canonical_watch_roots(&[root1.to_path_buf(), root2.to_path_buf()])
+            .await
+            .expect("watch roots");
+
+        assert!(path_is_within_any_watch_root(&canonical1, &watch_roots));
+    }
+
+    #[tokio::test]
+    async fn path_is_within_any_watch_root_matches_second_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root1 = tmp.path().join("root1");
+        let root2 = tmp.path().join("root2");
+        tokio::fs::create_dir_all(&root1).await.expect("create root1");
+        tokio::fs::create_dir_all(&root2).await.expect("create root2");
+
+        let file2 = root2.join("doc.md");
+        tokio::fs::write(&file2, "# hi").await.expect("write file2");
+        let canonical2 = tokio::fs::canonicalize(&file2).await.expect("canonicalize");
+
+        let watch_roots = canonical_watch_roots(&[root1.to_path_buf(), root2.to_path_buf()])
+            .await
+            .expect("watch roots");
+
+        assert!(path_is_within_any_watch_root(&canonical2, &watch_roots));
+    }
+
+    #[tokio::test]
+    async fn path_is_within_any_watch_root_rejects_no_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root1 = tmp.path().join("root1");
+        let outside = tmp.path().join("outside");
+        tokio::fs::create_dir_all(&root1).await.expect("create root1");
+        tokio::fs::create_dir_all(&outside).await.expect("create outside");
+
+        let outside_file = outside.join("secret.txt");
+        tokio::fs::write(&outside_file, "data")
+            .await
+            .expect("write outside file");
+        let canonical_outside = tokio::fs::canonicalize(&outside_file)
+            .await
+            .expect("canonicalize");
+
+        let watch_roots = canonical_watch_roots(&[root1.to_path_buf()])
+            .await
+            .expect("watch roots");
+
+        assert!(!path_is_within_any_watch_root(&canonical_outside, &watch_roots));
     }
 
     #[test]

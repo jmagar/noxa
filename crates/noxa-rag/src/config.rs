@@ -31,14 +31,47 @@ fn default_uuid_namespace() -> uuid::Uuid {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceConfig {
     FsWatcher {
-        watch_dir: PathBuf,
+        /// Primary field — always non-empty after `load_config` normalization.
+        #[serde(default)]
+        watch_dirs: Vec<PathBuf>,
+        /// Legacy single-dir form. Consumed during normalization; always `None` post-load.
+        #[serde(default)]
+        watch_dir: Option<PathBuf>,
         #[serde(default = "default_debounce_ms")]
         debounce_ms: u64,
     },
 }
 
-fn default_debounce_ms() -> u64 {
+pub(crate) fn default_debounce_ms() -> u64 {
     500
+}
+
+fn normalize_source(config: &mut RagConfig) -> Result<(), RagError> {
+    match &mut config.source {
+        SourceConfig::FsWatcher {
+            watch_dirs,
+            watch_dir,
+            ..
+        } => {
+            let has_dirs = !watch_dirs.is_empty();
+            let has_legacy = watch_dir.is_some();
+
+            if has_dirs && has_legacy {
+                return Err(RagError::Config(
+                    "set watch_dir and watch_dirs simultaneously".to_string(),
+                ));
+            }
+            if !has_dirs && !has_legacy {
+                return Err(RagError::Config(
+                    "watch_dirs must not be empty".to_string(),
+                ));
+            }
+            if has_legacy {
+                *watch_dirs = vec![watch_dir.take().unwrap()];
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,12 +173,11 @@ pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     let root: TomlRoot = toml::from_str(&content)
         .map_err(|e| RagError::Config(format!("config parse error: {}", e)))?;
 
-    let config = root.rag.ok_or_else(|| {
-        RagError::Config(format!(
-            "missing [rag] section in {}",
-            path.display()
-        ))
+    let mut config = root.rag.ok_or_else(|| {
+        RagError::Config(format!("missing [rag] section in {}", path.display()))
     })?;
+
+    normalize_source(&mut config)?;
 
     // Validate embed_concurrency > 0
     if config.pipeline.embed_concurrency == 0 {
@@ -166,4 +198,129 @@ pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     }
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn minimal_toml(source_section: &str) -> String {
+        format!(
+            r#"
+{source_section}
+
+[rag.embed_provider]
+type = "tei"
+url = "http://127.0.0.1:8080"
+model = "test"
+
+[rag.vector_store]
+type = "qdrant"
+url = "http://127.0.0.1:6333"
+collection = "test"
+
+[rag.chunker]
+
+[rag.pipeline]
+"#
+        )
+    }
+
+    fn write_config(content: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(content.as_bytes()).expect("write");
+        f
+    }
+
+    #[test]
+    fn load_config_legacy_watch_dir_normalizes_to_watch_dirs() {
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
+        let toml = minimal_toml(&format!(
+            r#"[rag.source]
+type = "fs_watcher"
+watch_dir = "{}"
+"#,
+            tmp_dir.path().display()
+        ));
+        let f = write_config(&toml);
+        let config = load_config(f.path()).expect("load_config");
+        match &config.source {
+            SourceConfig::FsWatcher {
+                watch_dirs,
+                watch_dir,
+                ..
+            } => {
+                assert_eq!(watch_dirs.len(), 1);
+                assert_eq!(watch_dirs[0], tmp_dir.path());
+                assert!(watch_dir.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn load_config_watch_dirs_passes_through_unchanged() {
+        let tmp1 = tempfile::tempdir().expect("tempdir1");
+        let tmp2 = tempfile::tempdir().expect("tempdir2");
+        let toml = minimal_toml(&format!(
+            r#"[rag.source]
+type = "fs_watcher"
+watch_dirs = ["{}", "{}"]
+"#,
+            tmp1.path().display(),
+            tmp2.path().display()
+        ));
+        let f = write_config(&toml);
+        let config = load_config(f.path()).expect("load_config");
+        match &config.source {
+            SourceConfig::FsWatcher { watch_dirs, .. } => {
+                assert_eq!(watch_dirs.len(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn load_config_both_set_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let toml = minimal_toml(&format!(
+            r#"[rag.source]
+type = "fs_watcher"
+watch_dir = "{path}"
+watch_dirs = ["{path}"]
+"#,
+            path = tmp.path().display()
+        ));
+        let f = write_config(&toml);
+        let err = load_config(f.path()).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("simultaneously"),
+            "error should mention 'simultaneously', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_config_neither_set_returns_error() {
+        let toml = minimal_toml(
+            r#"[rag.source]
+type = "fs_watcher"
+"#,
+        );
+        let f = write_config(&toml);
+        let err = load_config(f.path()).expect_err("should fail");
+        assert!(matches!(err, RagError::Config(_)));
+    }
+
+    #[test]
+    fn load_config_empty_watch_dirs_returns_error() {
+        let toml = minimal_toml(
+            r#"[rag.source]
+type = "fs_watcher"
+watch_dirs = []
+"#,
+        );
+        let f = write_config(&toml);
+        let err = load_config(f.path()).expect_err("should fail");
+        assert!(matches!(err, RagError::Config(_)));
+    }
 }
