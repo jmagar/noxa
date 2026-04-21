@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-cli"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "clap",
@@ -2295,8 +2295,10 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "strip-ansi-escapes",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -2305,7 +2307,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-core"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "ego-tree",
  "once_cell",
@@ -2323,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-fetch"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "calamine",
@@ -2348,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-llm"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2362,7 +2364,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-mcp"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "dirs",
  "dotenvy",
@@ -2388,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-pdf"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "pdf-extract",
  "thiserror 2.0.18",
@@ -2397,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-rag"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2433,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "noxa-store"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -3121,7 +3123,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",

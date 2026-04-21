@@ -2,11 +2,23 @@ use super::*;
 use crate::setup;
 
 pub(crate) async fn run() {
-    dotenvy::dotenv().ok();
+    noxa_mcp::load_env().ok();
 
     if matches!(std::env::args().nth(1).as_deref(), Some("setup")) {
         setup::run();
         return;
+    }
+
+    match (std::env::args().nth(1).as_deref(), std::env::args().nth(2).as_deref()) {
+        (Some("rag"), Some("start")) => {
+            run_rag_start();
+            return;
+        }
+        (Some("rag"), Some("stop")) => {
+            run_rag_stop();
+            return;
+        }
+        _ => {}
     }
 
     if matches!(std::env::args().nth(1).as_deref(), Some("mcp")) {
@@ -48,6 +60,21 @@ pub(crate) async fn run() {
 
     if let Some(ref domain) = cli.status {
         run_status(domain);
+        return;
+    }
+
+    if cli.watch_crawls {
+        run_crawl_watch().await;
+        return;
+    }
+
+    if cli.watch_rag {
+        run_rag_watch().await;
+        return;
+    }
+
+    if cli.watch_store {
+        run_store_watch().await;
         return;
     }
 

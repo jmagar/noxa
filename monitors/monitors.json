@@ -1,0 +1,20 @@
+[
+  {
+    "name": "crawl-watcher",
+    "command": "noxa --watch-crawls",
+    "description": "Notifies Claude when a background crawl completes, stalls, or has high error rate",
+    "when": "always"
+  },
+  {
+    "name": "rag-health",
+    "command": "noxa --watch-rag",
+    "description": "Auto-starts noxa-rag-daemon if not running, restarts it if it dies, and notifies Claude when TEI or Qdrant go offline, come back up, finish indexing, or log failures",
+    "when": "always"
+  },
+  {
+    "name": "store-usage",
+    "command": "noxa --watch-store",
+    "description": "Notifies Claude when content store crosses disk usage thresholds or grows rapidly",
+    "when": "always"
+  }
+]

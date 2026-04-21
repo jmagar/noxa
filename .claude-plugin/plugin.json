@@ -1,14 +1,23 @@
 {
-  "name": "noxa",
-  "version": "0.5.1",
-  "description": "noxa CLI, MCP server, and skills for AI-assisted web extraction",
-  "author": {
-    "name": "jmagar"
-  },
-  "homepage": "https://noxa.io",
-  "repository": "https://github.com/jmagar/noxa",
-  "license": "AGPL-3.0",
-  "keywords": ["web", "extraction", "mcp", "ai"],
-  "skills": "./plugin/skills/",
-  "mcpServers": "./plugin/.mcp.json"
+    "name": "noxa",
+    "version": "0.6.0",
+    "description": "noxa CLI, MCP server, and skills for AI-assisted web extraction",
+    "author": {
+        "name": "Jacob Magar",
+        "email": "jmagar@tootie.tv",
+        "url": "https://github.com/jmagar/noxa"
+    },
+    "homepage": "https://github.com/jmagar/noxa",
+    "repository": "https://github.com/jmagar/noxa",
+    "keywords": [
+        "web",
+        "extraction",
+        "mcp",
+        "ai",
+        "cli",
+        "crawl",
+        "scrape"
+    ],
+    "mcpServers": "./.mcp.json",
+    "monitors": "./monitors/monitors.json"
 }

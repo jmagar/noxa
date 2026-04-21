@@ -3,10 +3,18 @@ use std::path::{Path, PathBuf};
 
 use crate::{Browser, OutputFormat, PdfModeArg};
 
-/// Non-secret, non-URL configuration defaults loaded from config.json.
+/// Wrapper that owns the `[cli]` section of noxa.toml.
+/// Unknown top-level sections (e.g. `[rag]`) are silently ignored.
+#[derive(Debug, Default, Deserialize)]
+struct TomlRoot {
+    #[serde(default)]
+    cli: NoxaConfig,
+}
+
+/// Non-secret, non-URL configuration defaults loaded from noxa.toml `[cli]`.
 /// All fields optional — absent means "use the hard default".
-/// Unknown fields are silently ignored (serde default) so config files
-/// written for a newer version of noxa work on older binaries.
+/// Unknown fields are silently ignored so config files written for a newer
+/// version of noxa work on older binaries.
 ///
 /// DELIBERATELY EXCLUDED:
 /// - on_change: passes content to sh -c; must remain CLI-only to prevent
@@ -16,8 +24,7 @@ use crate::{Browser, OutputFormat, PdfModeArg};
 /// BOOL FLAG LIMITATION:
 /// only_main_content, metadata, verbose, use_sitemap set to true here
 /// cannot be overridden to false from the CLI for a single run (no --no-flag
-/// variant in clap). Edit config.json or use NOXA_CONFIG=/dev/null (or an
-/// empty file) to bypass.
+/// variant in clap). Use NOXA_CONFIG=/dev/null (or an empty file) to bypass.
 #[derive(Debug, Default, Deserialize)]
 pub struct NoxaConfig {
     // Output
@@ -49,117 +56,114 @@ pub struct NoxaConfig {
     pub llm_provider: Option<String>,
     pub llm_model: Option<String>,
     pub output_dir: Option<PathBuf>,
-
-    #[serde(default)]
-    pub cloud: Option<CloudConfig>,
-}
-
-/// Cloud deployment configuration (loaded from config.json `cloud` key).
-///
-/// These fields are parsed and stored in `ResolvedConfig.cloud` but are not yet
-/// consumed by the CLI runtime — the cloud fallback path reads `NOXA_API_KEY`
-/// directly. The struct is kept here as the canonical schema so that future
-/// cloud-routing logic has a typed home without breaking existing config files.
-#[derive(Debug, Default, Deserialize, Clone)]
-#[allow(dead_code)]
-pub struct CloudConfig {
-    pub provider: Option<String>,
-    pub project: Option<String>,
-    pub zone: Option<String>,
-    pub cluster: Option<String>,
-    pub service_account_key: Option<String>,
-    pub disabled: Option<bool>,
 }
 
 impl NoxaConfig {
-    /// Load config from an explicit path, NOXA_CONFIG env var, or ./config.json.
-    /// Returns an empty (all-None) config if the file doesn't exist.
-    /// Prints an error and exits if the file exists but is invalid JSON.
+    /// Load config from an explicit path, NOXA_CONFIG env var, ~/.noxa/noxa.toml,
+    /// or a noxa.toml sibling to the running binary.
+    /// Returns an empty (all-None) config if no file is found.
+    /// Prints an error and exits if the file exists but is invalid TOML.
     pub fn load(explicit_path: Option<&str>) -> Self {
         let noxa_config_env = std::env::var("NOXA_CONFIG").ok();
         let was_explicit = explicit_path.is_some() || noxa_config_env.is_some();
 
-        let path_str = explicit_path
-            .map(String::from)
-            .or(noxa_config_env)
-            .unwrap_or_else(|| "config.json".to_string());
+        let path = if let Some(p) = explicit_path.map(PathBuf::from).or_else(|| noxa_config_env.map(PathBuf::from)) {
+            p
+        } else {
+            match find_config_file() {
+                Some(p) => p,
+                None => return Self::default(),
+            }
+        };
 
-        let path = Path::new(&path_str);
         if !path.exists() {
             if was_explicit {
-                let display_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&path_str);
+                let display_name = display_name(&path);
                 eprintln!("error: config file not found: {display_name}");
                 std::process::exit(1);
             }
             return Self::default();
         }
 
-        let content = match std::fs::read_to_string(path) {
+        let content = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
-                let display_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&path_str);
-                eprintln!("error: cannot read config file {display_name}: {e}");
+                eprintln!("error: cannot read config file {}: {e}", display_name(&path));
                 std::process::exit(1);
             }
         };
 
-        if path_str == "/dev/null" || content.trim().is_empty() {
+        if path.to_str() == Some("/dev/null") || content.trim().is_empty() {
             return Self::default();
         }
 
-        let display_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&path_str);
+        let name = display_name(&path);
 
-        // Detect secret-looking keys in the raw JSON before parsing
-        let secret_keys = [
-            "api_key",
-            "proxy",
-            "webhook",
-            "llm_base_url",
-            "password",
-            "token",
-            "secret",
-        ];
-        let has_secrets = secret_keys
-            .iter()
-            .any(|k| content.contains(&format!("\"{k}\"")));
+        // Detect secret-looking keys in raw TOML before parsing
+        let secret_keys = ["api_key", "proxy", "webhook", "llm_base_url", "password", "token", "secret"];
+        let has_secrets = secret_keys.iter().any(|k| {
+            // TOML syntax: `key = ` (with optional whitespace)
+            content.contains(&format!("{k} =")) || content.contains(&format!("{k}="))
+        });
 
         use crate::theme::*;
-
         if has_secrets {
             eprintln!(
-                "{dim}config:{reset} {cyan}{bold}{display_name}{reset}  \
+                "{dim}config:{reset} {cyan}{bold}{name}{reset}  \
                  {yellow}⚠  secrets detected — api_key, proxy, webhook belong in .env{reset}"
             );
         } else {
-            eprintln!("{dim}config:{reset} {cyan}{bold}{display_name}{reset}  {green}✓{reset}");
+            eprintln!("{dim}config:{reset} {cyan}{bold}{name}{reset}  {green}✓{reset}");
         }
         tracing::debug!("config path: {}", path.display());
 
-        match serde_json::from_str(&content) {
-            Ok(cfg) => cfg,
+        match toml::from_str::<TomlRoot>(&content) {
+            Ok(root) => root.cli,
             Err(e) => {
-                eprintln!("error: invalid JSON in config file {display_name}: {e}");
+                eprintln!("error: invalid TOML in config file {name}: {e}");
                 std::process::exit(1);
             }
         }
     }
 }
 
+/// Search for noxa.toml in the standard locations (no explicit path given).
+/// 1. ~/.noxa/noxa.toml
+/// 2. Directory containing the running binary
+/// 3. Current working directory (dev/in-repo convenience)
+fn find_config_file() -> Option<PathBuf> {
+    if let Some(home) = dirs::home_dir() {
+        let p = home.join(".noxa").join("noxa.toml");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("noxa.toml");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join("noxa.toml");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| path.to_str().unwrap_or("config"))
+        .to_string()
+}
+
 /// Fully resolved configuration after merging CLI flags > config file > hard defaults.
 /// All fields are concrete — no Option<T>. This is what the rest of main.rs reads.
-///
-/// The merge uses clap's ValueSource to detect which fields were explicitly set on
-/// the command line. CLI-explicit values always win. Config fills in the rest.
-/// Hard defaults are the fallback of last resort.
 pub struct ResolvedConfig {
     // Output
     pub format: OutputFormat,
@@ -171,13 +175,11 @@ pub struct ResolvedConfig {
     pub timeout: u64,
     pub pdf_mode: PdfModeArg,
     pub only_main_content: bool,
-    /// CLI-only output flag — not configurable via config.json (it is a per-run mode, not a persistent default).
+    /// CLI-only output flag — not configurable via noxa.toml.
     pub raw_html: bool,
 
     // CSS selectors
-    /// Vec<String> — CSS selectors passed directly to extraction filter.
     pub include_selectors: Vec<String>,
-    /// Vec<String> — CSS selectors passed directly to extraction filter.
     pub exclude_selectors: Vec<String>,
 
     // Crawl
@@ -186,9 +188,7 @@ pub struct ResolvedConfig {
     pub concurrency: usize,
     pub delay: u64,
     pub path_prefix: Option<String>,
-    /// Vec<String> — never joined to a comma-string. Passed directly to CrawlConfig.
     pub include_paths: Vec<String>,
-    /// Vec<String> — never joined to a comma-string. Passed directly to CrawlConfig.
     pub exclude_paths: Vec<String>,
     pub use_sitemap: bool,
 
@@ -196,12 +196,6 @@ pub struct ResolvedConfig {
     pub llm_provider: Option<String>,
     pub llm_model: Option<String>,
     pub output_dir: Option<PathBuf>,
-
-    // Cloud — parsed and stored but not yet consumed by CLI runtime.
-    // TODO: wire cloud config fields into the CloudClient / smart-fetch path
-    // once per-domain cloud routing is implemented (tracked in cloud.rs).
-    #[allow(dead_code)]
-    pub cloud: Option<CloudConfig>,
 }
 
 use clap::parser::ValueSource;
@@ -324,24 +318,6 @@ pub fn resolve(cli: &crate::Cli, matches: &clap::ArgMatches, cfg: &NoxaConfig) -
         } else {
             cfg.output_dir.clone()
         },
-        cloud: if explicit("cloud_provider")
-            || explicit("cloud_project")
-            || explicit("cloud_zone")
-            || explicit("cloud_cluster")
-            || explicit("cloud_service_account_key")
-            || explicit("cloud_disabled")
-        {
-            Some(CloudConfig {
-                provider: cli.cloud_provider.clone(),
-                project: cli.cloud_project.clone(),
-                zone: cli.cloud_zone.clone(),
-                cluster: cli.cloud_cluster.clone(),
-                service_account_key: cli.cloud_service_account_key.clone(),
-                disabled: Some(cli.cloud_disabled),
-            })
-        } else {
-            cfg.cloud.clone()
-        },
     }
 }
 
@@ -350,30 +326,34 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
 
+    fn from_toml(s: &str) -> NoxaConfig {
+        toml::from_str::<TomlRoot>(s).unwrap().cli
+    }
+
     #[test]
     fn test_noxa_config_deserialize_full() {
-        let json = r#"{
-            "format": "llm",
-            "depth": 3,
-            "max_pages": 100,
-            "concurrency": 10,
-            "delay": 200,
-            "browser": "firefox",
-            "timeout": 60,
-            "only_main_content": true,
-            "use_sitemap": true,
-            "path_prefix": "/docs/",
-            "include_paths": ["/docs/*", "/api/*"],
-            "exclude_paths": ["/changelog/*", "/blog/*"],
-            "include_selectors": ["article", ".content"],
-            "exclude_selectors": ["nav", "footer"],
-            "llm_provider": "gemini",
-            "llm_model": "gemini-2.5-pro",
-            "pdf_mode": "fast",
-            "metadata": true,
-            "verbose": false
-        }"#;
-        let cfg: NoxaConfig = serde_json::from_str(json).unwrap();
+        let cfg = from_toml(r#"
+            [cli]
+            format = "llm"
+            depth = 3
+            max_pages = 100
+            concurrency = 10
+            delay = 200
+            browser = "firefox"
+            timeout = 60
+            only_main_content = true
+            use_sitemap = true
+            path_prefix = "/docs/"
+            include_paths = ["/docs/*", "/api/*"]
+            exclude_paths = ["/changelog/*", "/blog/*"]
+            include_selectors = ["article", ".content"]
+            exclude_selectors = ["nav", "footer"]
+            llm_provider = "gemini"
+            llm_model = "gemini-2.5-pro"
+            pdf_mode = "fast"
+            metadata = true
+            verbose = false
+        "#);
         assert!(matches!(cfg.format, Some(crate::OutputFormat::Llm)));
         assert_eq!(cfg.depth, Some(3));
         assert_eq!(
@@ -385,30 +365,49 @@ mod tests {
 
     #[test]
     fn test_noxa_config_empty() {
-        let cfg: NoxaConfig = serde_json::from_str("{}").unwrap();
+        let cfg = from_toml("");
         assert!(cfg.format.is_none());
         assert!(cfg.depth.is_none());
     }
 
     #[test]
     fn test_noxa_config_unknown_fields_ignored() {
-        // Unknown fields must NOT cause a parse failure
-        let cfg: NoxaConfig =
-            serde_json::from_str(r#"{"depth": 2, "future_field": true}"#).unwrap();
+        let cfg = from_toml(r#"
+            [cli]
+            depth = 2
+            future_field = true
+        "#);
         assert_eq!(cfg.depth, Some(2));
     }
 
     #[test]
     fn test_noxa_config_output_dir_deserialize() {
-        let cfg: NoxaConfig = serde_json::from_str(r#"{"output_dir":"out"}"#).unwrap();
+        let cfg = from_toml(r#"
+            [cli]
+            output_dir = "out"
+        "#);
         assert_eq!(cfg.output_dir, Some(PathBuf::from("out")));
+    }
+
+    #[test]
+    fn test_noxa_config_rag_section_ignored() {
+        // [rag] section must not cause a parse error
+        let cfg = from_toml(r#"
+            [cli]
+            depth = 5
+
+            [rag]
+            uuid_namespace = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        "#);
+        assert_eq!(cfg.depth, Some(5));
     }
 
     #[test]
     fn test_resolve_uses_config_output_dir() {
         let cli = crate::Cli::parse_from(["noxa"]);
         let matches = crate::Cli::command().get_matches_from(["noxa"]);
-        let cfg: NoxaConfig = serde_json::from_str(r#"{"output_dir":"out"}"#).unwrap();
+        let cfg = from_toml(r#"[cli]
+output_dir = "out""#);
         let resolved = resolve(&cli, &matches, &cfg);
         assert_eq!(resolved.output_dir, Some(PathBuf::from("out")));
     }
@@ -436,18 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_implicit_missing_file_returns_default() {
-        // When no explicit path and ./config.json doesn't exist, silently return default.
-        // The simplest test: call with None and rely on ./config.json not existing in test env.
-        // If CWD has config.json this test is skipped to avoid flakiness.
-        if std::path::Path::new("config.json").exists() {
-            return; // skip: CWD has config.json
-        }
-        let cfg = NoxaConfig::load(None);
-        assert!(cfg.format.is_none());
-    }
-
-    #[test]
     fn test_load_dev_null_returns_default() {
         let cfg = NoxaConfig::load(Some("/dev/null"));
         assert!(cfg.format.is_none());
@@ -458,7 +445,7 @@ mod tests {
     fn test_load_whitespace_file_returns_default() {
         let mut path = std::env::temp_dir();
         let suffix = format!(
-            "noxa-config-{}-{}.json",
+            "noxa-config-{}-{}.toml",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -473,30 +460,5 @@ mod tests {
         assert!(cfg.llm_model.is_none());
 
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_noxa_config_cloud_fields() {
-        let json = r#"{
-            "cloud": {
-                "provider": "gcp",
-                "project": "my-gcp-project",
-                "zone": "us-central1-a",
-                "cluster": "my-cluster",
-                "service_account_key": "/path/to/key.json",
-                "disabled": false
-            }
-        }"#;
-        let cfg: NoxaConfig = serde_json::from_str(json).unwrap();
-        let cloud = cfg.cloud.unwrap();
-        assert_eq!(cloud.provider, Some("gcp".to_string()));
-        assert_eq!(cloud.project, Some("my-gcp-project".to_string()));
-        assert_eq!(cloud.zone, Some("us-central1-a".to_string()));
-        assert_eq!(cloud.cluster, Some("my-cluster".to_string()));
-        assert_eq!(
-            cloud.service_account_key,
-            Some("/path/to/key.json".to_string())
-        );
-        assert_eq!(cloud.disabled, Some(false));
     }
 }

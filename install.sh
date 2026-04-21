@@ -41,7 +41,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # 2. Build & install noxa
 # ---------------------------------------------------------------------------
 info "Installing noxa via cargo..."
-cargo install --git https://github.com/jmagar/noxa --bin noxa --bin noxa-mcp --locked 2>&1 \
+cargo install --git https://github.com/jmagar/noxa --bin noxa --bin noxa-mcp --bin noxa-rag-daemon --locked 2>&1 \
     | grep -E '^(error|warning: unused|Compiling|Finished|Installing|Replacing)' || true
 
 if ! command -v noxa &>/dev/null; then

@@ -5,12 +5,15 @@ description: >-
   a URL using the noxa CLI, crawl a website, get the text of a web page, monitor or watch
   a page for changes, extract brand identity (colors, fonts, logos) from a site,
   batch-process URLs, summarize a web page with an LLM, extract structured data from a
-  page, run deep research on a topic, or save crawl output to files.
-  Trigger on phrases like: "scrape", "extract from", "get content from", "crawl", "fetch
-  this page", "what does this site say", "get the text of", "monitor changes", "watch this
-  URL", "brand colors of", "sitemap of", "summarize this URL", "deep research". Use this
-  skill before running noxa — it covers the correct flag combinations for every workflow
-  and prevents common mistakes.
+  page, run deep research on a topic, save crawl output to files, or interact with the
+  local content store (list cached pages, retrieve stored docs, search cached content,
+  check crawl status, refresh a domain). Trigger on phrases like: "scrape", "extract from",
+  "get content from", "crawl", "fetch this page", "what does this site say", "get the text
+  of", "monitor changes", "watch this URL", "brand colors of", "sitemap of", "summarize
+  this URL", "deep research", "list cached docs", "retrieve from cache", "what have I
+  scraped", "search my stored pages", "check crawl status", "set up noxa". Use this skill
+  before running noxa — it covers the correct flag combinations for every workflow and
+  prevents common mistakes.
 ---
 
 # Noxa — Web Content Extraction for AI
@@ -41,7 +44,9 @@ To choose the right mode, identify what the user wants from this URL:
 | Track changes once | Diff |
 | Continuously watch for changes | Watch |
 | Get brand colors/fonts/logos | Brand |
+| List / search / retrieve cached docs | Local doc store |
 | Debug a 403 or bad output | Raw HTML |
+| First-time setup / MCP registration | `noxa setup` |
 
 ---
 
@@ -78,31 +83,35 @@ Use `-f llm` when passing content to Claude — it cuts token usage by ~67%.
 
 ## Crawling a site
 
+> **Crawl runs in the background by default.** Output goes to a log file, not stdout.
+> **Always use `--output-dir` to capture results.** Never pipe crawl output or redirect stdout — you will get nothing.
+> **Never use `--wait`.** It streams raw live-progress logs to stdout, flooding context with noise. There is no scenario where an AI agent should use `--wait`.
+
 ```bash
-# Crawl with defaults (depth 1, up to 20 pages)
+# Crawl with defaults — pages saved to content store (~/.noxa/content/)
 noxa --crawl https://docs.example.com
 
+# Save pages to a local directory (required if you need files on disk)
+noxa --crawl --output-dir ./docs https://docs.example.com
+
 # Control scope
-noxa --crawl --depth 3 --max-pages 100 https://docs.example.com
+noxa --crawl --depth 3 --max-pages 100 --output-dir ./docs https://docs.example.com
 
 # Seed from sitemap first (finds more pages)
-noxa --crawl --sitemap --depth 2 https://docs.example.com
+noxa --crawl --sitemap --depth 2 --output-dir ./docs https://docs.example.com
 
 # Filter by path prefix (strict prefix match)
-noxa --crawl --path-prefix /docs https://docs.example.com
+noxa --crawl --path-prefix /docs --output-dir ./docs https://docs.example.com
 
 # Filter by glob patterns (more flexible than --path-prefix)
-noxa --crawl --include-paths "/api/*,/guide/*" https://docs.example.com
-noxa --crawl --exclude-paths "/changelog/*,/blog/*" https://docs.example.com
+noxa --crawl --include-paths "/api/*,/guide/*" --output-dir ./docs https://docs.example.com
+noxa --crawl --exclude-paths "/changelog/*,/blog/*" --output-dir ./docs https://docs.example.com
 
 # Control concurrency and delay (ms between requests)
-noxa --crawl --concurrency 5 --delay 500 https://example.com
+noxa --crawl --concurrency 5 --delay 500 --output-dir ./docs https://example.com
 
 # Save/resume crawl state (Ctrl+C saves progress; rerunning resumes)
-noxa --crawl --crawl-state state.json --max-pages 500 https://docs.example.com
-
-# Save each page to a separate file instead of stdout
-noxa --crawl --output-dir ./output https://docs.example.com
+noxa --crawl --crawl-state state.json --max-pages 500 --output-dir ./docs https://docs.example.com
 ```
 
 Good for: building search indexes, ingesting documentation, research.
@@ -169,7 +178,7 @@ export NOXA_LLM_BASE_URL=http://localhost:11434  # for Ollama or OpenAI-compatib
 ```bash
 # Summarize (default: 3 sentences)
 noxa --summarize https://example.com
-noxa --summarize 5 https://example.com   # pass sentence count as positional arg after the flag
+noxa --summarize 5 https://example.com   # optional sentence count (default: 3)
 
 # Extract with natural language
 noxa --extract-prompt "Get all pricing tiers with name, price, and features" https://stripe.com/pricing
@@ -339,6 +348,44 @@ noxa --cloud https://spa-site.com
 
 ---
 
+## Local doc store
+
+Every successful fetch is auto-persisted to `~/.noxa/content/`. Use these flags to read back from the store without re-fetching.
+
+```bash
+# List all cached domains
+noxa --list
+
+# List all cached docs for a specific domain
+noxa --list docs.rust-lang.org
+
+# Retrieve a cached doc by exact URL or fuzzy query
+noxa --retrieve https://docs.rust-lang.org/book/ch04-01-what-is-ownership.html
+noxa --retrieve "rust ownership"
+
+# Full-text search across all cached docs (uses ripgrep if available)
+noxa --grep "authentication"
+
+# Check the status of a background crawl
+noxa --status docs.rust-lang.org
+
+# Re-fetch all cached docs for a domain (refresh stale content)
+noxa --refresh docs.rust-lang.org
+```
+
+---
+
+## First-time setup
+
+```bash
+# Interactive setup: config, API keys, MCP server registration
+noxa setup
+```
+
+Run this once after installation. Registers noxa as an MCP server with Claude Desktop and prompts for API keys.
+
+---
+
 ## Content store
 
 Every successful fetch auto-persists to `~/.noxa/content/{domain}/{path}.{md,json}`. Works for single URLs, batch, crawl, PDF, documents, and MCP tools. The `.json` file holds the full `ExtractionResult`; the `.md` file holds just the markdown.
@@ -377,14 +424,16 @@ noxa --output-dir ./out https://example.com
 
 ## Config file
 
-noxa loads `./config.json` by default. Override with `--config` or `NOXA_CONFIG`:
+noxa loads `noxa.toml` from `~/.noxa/noxa.toml`, the binary's directory, or CWD (in that order). Override with `--config` or `NOXA_CONFIG`:
 
 ```bash
-noxa --config ~/.noxa/config.json https://example.com
-export NOXA_CONFIG=/etc/noxa/config.json
+noxa --config /path/to/noxa.toml https://example.com
+export NOXA_CONFIG=/etc/noxa/noxa.toml
 ```
 
-Config uses snake_case keys that match `config/config.example.json` and the Rust config struct. Useful for setting defaults like `llm_provider`, `browser`, `concurrency`, `timeout`.
+Config uses a `[cli]` section with snake_case keys matching the Rust config struct. See `config/config.example.toml` for the full schema.
+
+> **Gotcha:** Bool flags set to `true` in `[cli]` (`only_main_content`, `metadata`, `verbose`, `use_sitemap`) cannot be overridden to `false` from the CLI for a single run — there is no `--no-flag` variant. Use `NOXA_CONFIG=/dev/null` to bypass the config entirely for one run.
 
 ---
 
@@ -427,7 +476,7 @@ If a site returns 403, try `--browser firefox` or `--browser random`. If still b
 | `NOXA_LLM_PROVIDER` | `--llm-provider` | LLM provider (gemini/openai/ollama/anthropic) |
 | `NOXA_LLM_MODEL` | `--llm-model` | LLM model name override |
 | `NOXA_LLM_BASE_URL` | `--llm-base-url` | LLM base URL (Ollama/OpenAI-compatible) |
-| `NOXA_CONFIG` | `--config` | Path to config.json |
+| `NOXA_CONFIG` | `--config` | Path to noxa.toml (default: `~/.noxa/noxa.toml`, binary dir, or CWD) |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `OLLAMA_HOST` | — | Ollama endpoint (default: http://localhost:11434) |
@@ -437,11 +486,11 @@ If a site returns 403, try `--browser firefox` or `--browser random`. If still b
 ## Common recipes
 
 ```bash
-# Read docs site as a single LLM-optimized text file
-noxa --crawl --sitemap --depth 3 --max-pages 500 -f llm https://docs.example.com > docs.txt
+# Crawl a docs site — pages saved individually under ./docs/
+noxa --crawl --sitemap --depth 3 --max-pages 500 -f llm --output-dir ./docs https://docs.example.com
 
-# Save full crawl to individual files
-noxa --crawl --sitemap --depth 2 --output-dir ./docs -f llm https://docs.example.com
+# Then read back from content store or individual files
+noxa --retrieve https://docs.example.com/some-page
 
 # Extract all external links from a page
 noxa https://example.com -f json | jq -r '.content.links[] | select(.href | startswith("http")) | .href'

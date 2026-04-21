@@ -92,7 +92,7 @@ Three binaries: `noxa` (CLI), `noxa-mcp` (MCP server), `noxa-rag-daemon` (RAG pi
 |----------|---------|
 | `NOXA_API_KEY` | Noxa Cloud API key (required for `--research`, `--cloud`) |
 | `SEARXNG_URL` | SearXNG instance URL (enables `--search` without cloud) |
-| `NOXA_CONFIG` | Path to `config.json` override |
+| `NOXA_CONFIG` | Path to `noxa.toml` override (default: `~/.noxa/noxa.toml` or binary dir) |
 | `NOXA_NO_STORE` | Disable automatic content store persistence |
 | `GEMINI_MODEL` | Gemini model override (default: `gemini-2.5-pro`) |
 | `OPENAI_API_KEY` | OpenAI API key for LLM provider chain |

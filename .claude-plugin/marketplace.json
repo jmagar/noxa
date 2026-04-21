@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Marketplace for the noxa plugin",
-    "version": "0.5.0",
+    "version": "0.5.1",
     "pluginRoot": "./"
   },
   "plugins": [
@@ -13,7 +13,7 @@
       "name": "noxa",
       "source": "./",
       "description": "noxa CLI, MCP server, and skills for AI-assisted web extraction",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "category": "Productivity",
       "tags": ["web", "extraction", "mcp", "skills"]
     }

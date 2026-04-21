@@ -1,9 +1,9 @@
 # Noxa CLI — Complete Flag Reference
 
-All flags for the `noxa` binary. Sourced directly from `crates/noxa-cli/src/main.rs`.
+All flags for the `noxa` binary. Sourced directly from `crates/noxa-cli/src/app/cli.rs`.
 
 Priority order when the same setting appears in multiple places:
-**CLI flag > config.json > environment variable > hard default**
+**CLI flag > noxa.toml [cli] > environment variable > hard default**
 
 ---
 
@@ -20,12 +20,13 @@ Priority order when the same setting appears in multiple places:
 - [Watch Mode](#watch-mode)
 - [Search](#search)
 - [Content Store](#content-store)
+- [Local Doc Store](#local-doc-store)
 - [Brand Extraction](#brand-extraction)
 - [PDF](#pdf)
 - [Cloud API](#cloud-api)
 - [Config File](#config-file)
 - [Environment Variables](#environment-variables)
-- [config.json Reference](#configjson-reference)
+- [noxa.toml [cli] Reference](#noxatoml-cli-reference)
 
 ---
 
@@ -46,7 +47,7 @@ Priority order when the same setting appears in multiple places:
 |------|-------|---------|-------------|
 | `--format <FMT>` | `-f` | `markdown` | Output format: `markdown`, `json`, `text`, `llm`, `html`. Use `llm` when feeding to Claude — 67% fewer tokens than raw HTML. |
 | `--metadata` | | false | Include YAML frontmatter with title, source URL, word count. Always included in JSON format. |
-| `--raw-html` | | false | Output the raw fetched HTML with no extraction. Useful for debugging. CLI-only — not settable in config.json. |
+| `--raw-html` | | false | Output the raw fetched HTML with no extraction. Useful for debugging. CLI-only — not settable in noxa.toml [cli]. |
 | `--output-dir <DIR>` | | — | Save each page to a separate file instead of stdout. Works with `--crawl`, batch, and single-URL mode. Filenames derived from URL paths (e.g. `/docs/api` → `docs/api.md`). |
 | `--verbose` / `-v` | `-v` | false | Enable verbose extraction pipeline logging to stderr. |
 
@@ -57,8 +58,8 @@ Priority order when the same setting appears in multiple places:
 | Flag | Description |
 |------|-------------|
 | `--only-main-content` | Auto-detect and extract only the main content element (`<article>`, `<main>`). Strips nav, sidebar, footer. |
-| `--include <SELECTORS>` | Comma-separated CSS selectors to include (e.g. `"article,.content"`). In config.json: `include_selectors` array. |
-| `--exclude <SELECTORS>` | Comma-separated CSS selectors to exclude (e.g. `"nav,footer,.ads"`). In config.json: `exclude_selectors` array. |
+| `--include <SELECTORS>` | Comma-separated CSS selectors to include (e.g. `"article,.content"`). In noxa.toml [cli]: `include_selectors` array. |
+| `--exclude <SELECTORS>` | Comma-separated CSS selectors to exclude (e.g. `"nav,footer,.ads"`). In noxa.toml [cli]: `exclude_selectors` array. |
 
 ---
 
@@ -91,15 +92,16 @@ All crawl flags require `--crawl` to be active, except `--map` and `--sitemap` w
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--crawl` | false | Enable recursive BFS crawl of same-origin links. |
+| `--crawl` | false | Enable recursive BFS crawl of same-origin links. Runs in the background by default — output goes to a log file, not stdout. Always use `--output-dir` to capture results. |
+| `--wait` | false | Block and stream live crawl progress to stdout instead of running in the background. **Never use this as an AI agent** — it floods context with raw progress logs. Use `--output-dir` or `--status` instead. |
 | `--depth <N>` | `1` | Max crawl depth from the start URL. |
 | `--max-pages <N>` | `20` | Maximum number of pages to crawl. |
 | `--concurrency <N>` | `5` | Max concurrent fetch workers during crawl. |
 | `--delay <MS>` | `100` | Delay between requests in milliseconds. |
 | `--path-prefix <PREFIX>` | — | Only crawl URLs whose path starts with this prefix (strict string match). |
-| `--include-paths <GLOBS>` | — | Comma-separated glob patterns for paths to include (e.g. `"/api/*,/guides/**"`). More flexible than `--path-prefix`. In config.json: `include_paths` array. |
-| `--exclude-paths <GLOBS>` | — | Comma-separated glob patterns for paths to exclude (e.g. `"/changelog/*,/blog/*"`). In config.json: `exclude_paths` array. |
-| `--sitemap` | false | Seed the crawl frontier from sitemap discovery (checks `robots.txt` and `/sitemap.xml`). Also usable standalone to enable sitemaps without crawling. In config.json: `use_sitemap`. |
+| `--include-paths <GLOBS>` | — | Comma-separated glob patterns for paths to include (e.g. `"/api/*,/guides/**"`). More flexible than `--path-prefix`. In noxa.toml [cli]: `include_paths` array. |
+| `--exclude-paths <GLOBS>` | — | Comma-separated glob patterns for paths to exclude (e.g. `"/changelog/*,/blog/*"`). In noxa.toml [cli]: `exclude_paths` array. |
+| `--sitemap` | false | Seed the crawl frontier from sitemap discovery (checks `robots.txt` and `/sitemap.xml`). Also usable standalone to enable sitemaps without crawling. In noxa.toml [cli]: `use_sitemap`. |
 | `--map` | false | Discover and print all URLs from the site's sitemaps without fetching content. One URL per line; JSON array with `-f json`. |
 | `--crawl-state <FILE>` | — | Path to a JSON file for saving/resuming crawl state. On Ctrl+C: saves progress. On next run: resumes from where it left off. |
 
@@ -140,7 +142,7 @@ Provider setup:
 |------|---------|-------------|
 | `--watch` | false | Continuously poll a URL for changes and report diffs. |
 | `--watch-interval <SECS>` | `300` | Poll interval in seconds. |
-| `--on-change <CMD>` | — | Shell command to run when a change is detected. Receives the diff JSON on stdin. CLI-only — intentionally excluded from config.json to prevent shell injection via config file writes. |
+| `--on-change <CMD>` | — | Shell command to run when a change is detected. Receives the diff JSON on stdin. CLI-only — intentionally excluded from noxa.toml [cli] to prevent shell injection via config file writes. |
 | `--webhook <URL>` | `NOXA_WEBHOOK_URL` | POST a JSON payload when changes are detected (watch), a crawl completes, or a batch finishes. Auto-detects Discord and Slack URLs and wraps the payload accordingly. |
 
 ---
@@ -169,6 +171,22 @@ Every successful `fetch_and_extract` call automatically persists the result to `
 | `--no-store` | `NOXA_NO_STORE` | false | Disable automatic content persistence for this run. Set `NOXA_NO_STORE` to any non-empty value to disable globally. |
 
 `--file` and `--stdin` paths call `noxa_core::extract()` directly and do not write to the store.
+
+---
+
+## Local Doc Store
+
+Read back from the auto-persisted content at `~/.noxa/content/`.
+
+| Flag | Description |
+|------|-------------|
+| `--list [DOMAIN]` | List cached domains (no value) or all cached docs for a specific domain with URL → path mapping. |
+| `--retrieve <QUERY>` | Return a cached doc by exact URL or fuzzy query string. |
+| `--grep <PATTERN>` | Full-text search across all cached docs using ripgrep (falls back to built-in grep). |
+| `--status <DOMAIN>` | Show the status of a background crawl for the given domain or URL. |
+| `--refresh <DOMAIN>` | Re-fetch all cached docs for a stored domain. |
+| `--watch-crawls` | Stream crawl progress and completion notifications to stdout. Each line is a notification. |
+| `--watch-store` | Monitor content store disk usage; notifies on threshold crossings (1/5/10 GB) and growth spikes (>500 MB per poll). |
 
 ---
 
@@ -203,18 +221,18 @@ noxa.io is the optional hosted rendering service. Handles Cloudflare, DataDome, 
 
 ## Config File
 
-noxa loads `./config.json` by default. Override with `--config <PATH>` or `NOXA_CONFIG`.
+noxa loads `noxa.toml` from `~/.noxa/noxa.toml`, the binary's directory, or CWD (in that order). Override with `--config <PATH>` or `NOXA_CONFIG`.
 
 ```bash
-noxa --config ~/.noxa/config.json https://example.com
-export NOXA_CONFIG=/etc/noxa/config.json
+noxa --config /path/to/noxa.toml https://example.com
+export NOXA_CONFIG=/etc/noxa/noxa.toml
 ```
 
 **Important caveats:**
-- CLI flags always win over config.json values.
-- `on_change` is intentionally excluded from config.json (security: prevents shell injection via config writes).
-- Secrets and URLs (`api_key`, `proxy`, `webhook`, `llm_base_url`) belong in `.env`, not config.json.
-- Bool flags set to `true` in config.json (`only_main_content`, `metadata`, `verbose`, `use_sitemap`) **cannot** be overridden to `false` from the CLI for a single run (clap has no `--no-flag` variant). Use `NOXA_CONFIG=/dev/null` to bypass the config entirely.
+- CLI flags always win over `[cli]` section values.
+- `on_change` is intentionally excluded from `[cli]` (security: prevents shell injection via config writes).
+- Secrets and URLs (`api_key`, `proxy`, `webhook`, `llm_base_url`) belong in `.env`, not `noxa.toml`.
+- Bool flags set to `true` in `[cli]` (`only_main_content`, `metadata`, `verbose`, `use_sitemap`) **cannot** be overridden to `false` from the CLI for a single run (clap has no `--no-flag` variant). Use `NOXA_CONFIG=/dev/null` to bypass the config entirely.
 
 ---
 
@@ -231,7 +249,7 @@ export NOXA_CONFIG=/etc/noxa/config.json
 | `NOXA_LLM_PROVIDER` | `--llm-provider` | LLM provider (`gemini`/`openai`/`ollama`/`anthropic`) |
 | `NOXA_LLM_MODEL` | `--llm-model` | LLM model name override |
 | `NOXA_LLM_BASE_URL` | `--llm-base-url` | LLM base URL for Ollama or OpenAI-compatible endpoints |
-| `NOXA_CONFIG` | `--config` | Path to config.json |
+| `NOXA_CONFIG` | `--config` | Path to noxa.toml (default: `~/.noxa/noxa.toml`, binary dir, or CWD) |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `OLLAMA_HOST` | — | Ollama endpoint (default: `http://localhost:11434`) |
@@ -239,39 +257,38 @@ export NOXA_CONFIG=/etc/noxa/config.json
 
 ---
 
-## config.json Reference
+## noxa.toml [cli] Reference
 
-All fields are optional. Unknown fields are silently ignored.
+All fields are optional. Unknown fields are silently ignored. See `config/config.example.toml` for the full annotated example.
 
-```json
-{
-  "format": "llm",
-  "metadata": true,
-  "verbose": false,
+```toml
+[cli]
+format = "llm"
+metadata = true
+verbose = false
 
-  "browser": "firefox",
-  "timeout": 60,
-  "pdf_mode": "fast",
-  "only_main_content": true,
+browser = "firefox"
+timeout = 60
+pdf_mode = "fast"
+only_main_content = true
 
-  "include_selectors": ["article", ".content"],
-  "exclude_selectors": ["nav", "footer"],
+include_selectors = ["article", ".content"]
+exclude_selectors = ["nav", "footer"]
 
-  "depth": 3,
-  "max_pages": 100,
-  "concurrency": 10,
-  "delay": 200,
-  "path_prefix": "/docs/",
-  "include_paths": ["/docs/*", "/api/*"],
-  "exclude_paths": ["/changelog/*", "/blog/*"],
-  "use_sitemap": true,
+depth = 3
+max_pages = 100
+concurrency = 10
+delay = 200
+path_prefix = "/docs/"
+include_paths = ["/docs/*", "/api/*"]
+exclude_paths = ["/changelog/*", "/blog/*"]
+use_sitemap = true
 
-  "llm_provider": "gemini",
-  "llm_model": "gemini-2.5-pro"
-}
+llm_provider = "gemini"
+llm_model = "gemini-2.5-pro"
 ```
 
-**Not configurable via config.json** (CLI-only or secrets):
+**Not configurable via `[cli]`** (CLI-only or secrets):
 - `on_change` — shell injection risk
 - `api_key`, `proxy`, `webhook`, `llm_base_url` — secrets/URLs belong in `.env`
 - `raw_html` — per-run mode, not a persistent default

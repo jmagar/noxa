@@ -3,7 +3,7 @@ use super::*;
 #[derive(Parser)]
 #[command(name = "noxa", about = "Extract web content for LLMs", version)]
 pub(crate) struct Cli {
-    /// Path to config.json (default: ./config.json, override with NOXA_CONFIG env var)
+    /// Path to noxa.toml (default: ~/.noxa/noxa.toml or binary dir, override with NOXA_CONFIG env var)
     #[arg(long, global = true)]
     pub(crate) config: Option<String>,
 
@@ -263,6 +263,25 @@ pub(crate) struct Cli {
     /// Example: noxa --status code.claude.com
     #[arg(long)]
     pub(crate) status: Option<String>,
+
+    /// Stream crawl progress and completion notifications to stdout.
+    /// Each stdout line is a notification delivered to Claude via the plugin monitor.
+    /// Example: noxa --watch-crawls
+    #[arg(long)]
+    pub(crate) watch_crawls: bool,
+
+    /// Monitor TEI and Qdrant availability for the RAG pipeline.
+    /// Emits a notification when either service goes offline or comes back up.
+    /// Respects NOXA_RAG_TEI_URL, NOXA_RAG_QDRANT_URL, NOXA_RAG_COLLECTION env vars.
+    /// Example: noxa --watch-rag
+    #[arg(long)]
+    pub(crate) watch_rag: bool,
+
+    /// Monitor content store disk usage. Notifies on threshold crossings (1/5/10GB)
+    /// and growth spikes (>500MB in one poll window).
+    /// Example: noxa --watch-store
+    #[arg(long)]
+    pub(crate) watch_store: bool,
 
     /// Re-fetch all cached docs for a stored domain.
     /// Example: noxa --refresh docs.rust-lang.org

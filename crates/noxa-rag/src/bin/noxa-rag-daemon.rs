@@ -20,7 +20,7 @@ use noxa_rag::{
 #[command(name = "noxa-rag-daemon", about = "noxa RAG indexing daemon")]
 struct Args {
     /// Config file path
-    #[arg(long, default_value = "noxa-rag.toml")]
+    #[arg(long, default_value = "noxa.toml")]
     config: PathBuf,
 
     /// Log level (overrides RUST_LOG)

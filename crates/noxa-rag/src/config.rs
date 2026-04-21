@@ -3,7 +3,13 @@ use std::path::{Path, PathBuf};
 
 use crate::error::RagError;
 
-/// Top-level configuration deserialized from noxa-rag.toml.
+/// Wrapper that owns the `[rag]` section of noxa.toml.
+#[derive(Debug, Deserialize)]
+struct TomlRoot {
+    rag: Option<RagConfig>,
+}
+
+/// RAG pipeline configuration from the `[rag]` section of noxa.toml.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RagConfig {
     pub source: SourceConfig,
@@ -125,14 +131,21 @@ fn default_embed_concurrency() -> usize {
     4
 }
 
-/// Load and validate config from a TOML file.
+/// Load and validate the `[rag]` section from a noxa.toml file.
 pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         RagError::Config(format!("cannot read config file {}: {}", path.display(), e))
     })?;
 
-    let config: RagConfig = toml::from_str(&content)
+    let root: TomlRoot = toml::from_str(&content)
         .map_err(|e| RagError::Config(format!("config parse error: {}", e)))?;
+
+    let config = root.rag.ok_or_else(|| {
+        RagError::Config(format!(
+            "missing [rag] section in {}",
+            path.display()
+        ))
+    })?;
 
     // Validate embed_concurrency > 0
     if config.pipeline.embed_concurrency == 0 {

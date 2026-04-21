@@ -1,0 +1,112 @@
+# noxa.toml — example configuration
+# Copy to noxa.toml (repo root, ~/.noxa/noxa.toml, or next to the binary).
+# Secrets (api_key, proxy, webhook, llm_base_url) go in .env — NOT here.
+#
+# BOOL FLAG LIMITATION: flags set to true here cannot be overridden to false
+# from the CLI for a single run (no --no-flag support). Use NOXA_CONFIG=/dev/null
+# to bypass this config entirely for one run.
+#
+# LLM provider/model are optional overrides. Leave them unset to keep the
+# Gemini -> OpenAI -> Ollama -> Anthropic fallback chain intact.
+#
+# on_change is intentionally absent — it must remain a CLI-only flag.
+# Unknown fields are silently ignored, so this file works across noxa versions.
+
+[cli]
+# Output format: markdown (default), llm, json, text, html
+format = "markdown"
+
+# Browser impersonation: chrome (default), firefox, random
+browser = "chrome"
+
+# Request timeout in seconds
+timeout = 30
+
+# PDF extraction mode: auto (default), fast, full
+pdf_mode = "auto"
+
+# Include metadata (OG tags, title, description) in output
+metadata = false
+
+# Enable verbose logging
+verbose = false
+
+# Write output files to this directory instead of stdout
+# output_dir = "/home/user/noxa-output"
+
+# Strip everything except the main article content
+only_main_content = false
+
+# CSS selectors — empty arrays mean "no filtering"
+include_selectors = []
+exclude_selectors = ["nav", "footer", ".sidebar", ".cookie-banner"]
+
+# Crawl settings
+depth = 1
+max_pages = 20
+concurrency = 5
+delay = 100
+
+# Restrict crawl to URL paths matching this prefix
+# path_prefix = "/docs/"
+
+# Glob patterns for paths to include or exclude during crawl
+include_paths = []
+exclude_paths = ["/changelog/*", "/blog/*", "/releases/*"]
+
+# Seed the crawl frontier from sitemap discovery
+use_sitemap = false
+
+# LLM provider override (gemini, openai, ollama, anthropic)
+# Unset = use the Gemini -> OpenAI -> Ollama -> Anthropic fallback chain
+# llm_provider = "gemini"
+# llm_model = "gemini-2.5-pro"
+
+
+# ---------------------------------------------------------------------------
+# RAG daemon — only needed if you run `noxa rag start`
+# ---------------------------------------------------------------------------
+
+[rag.source]
+type = "fs_watcher"
+watch_dir = "/home/user/.noxa/content"
+debounce_ms = 500
+
+# TEI (local) embed provider
+[rag.embed_provider]
+type = "tei"
+url = "http://localhost:52000"
+model = "Qwen/Qwen3-Embedding-0.6B"
+# local_path is required — the Rust tokenizers crate cannot download from HF Hub.
+# Download: huggingface-cli download Qwen/Qwen3-Embedding-0.6B tokenizer.json --local-dir <dir>
+local_path = "/home/user/.cache/huggingface/hub/models--Qwen--Qwen3-Embedding-0.6B/snapshots/<sha>"
+
+# Alternatively, use OpenAI embeddings:
+# [rag.embed_provider]
+# type = "open_ai"
+# api_key = "sk-..."   # put this in .env instead: OPENAI_API_KEY
+# model = "text-embedding-3-small"
+
+# Or VoyageAI:
+# [rag.embed_provider]
+# type = "voyage_ai"
+# api_key = "pa-..."   # put this in .env instead
+# model = "voyage-3-lite"
+
+[rag.vector_store]
+type = "qdrant"
+# REST URL — port 6333 (or port-mapped equivalent)
+url = "http://127.0.0.1:6333"
+collection = "noxa_rag"
+# api_key = "..."   # put this in .env: NOXA_RAG_QDRANT_API_KEY
+
+[rag.chunker]
+target_tokens = 512
+overlap_tokens = 64
+min_words = 50
+max_chunks_per_page = 100
+
+[rag.pipeline]
+embed_concurrency = 4
+# Must be an absolute path — the systemd daemon runs with CWD = /
+# failed_jobs_log = "/home/user/.noxa/rag-failed.jsonl"

@@ -3,6 +3,7 @@ target/
 .env
 .env.bak
 config.json
+noxa.toml
 proxies.txt
 .claude/skills/
 .omc

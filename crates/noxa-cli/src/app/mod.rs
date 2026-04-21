@@ -28,6 +28,11 @@ mod batch;
 mod cli;
 mod crawl;
 mod crawl_status;
+mod crawl_watch;
+mod rag_daemon;
+mod rag_watch;
+mod store_watch;
+mod watch_singleton;
 mod diff_brand;
 mod entry;
 mod fetching {
@@ -53,6 +58,10 @@ mod watch;
 pub(crate) use batch::run_batch;
 pub(crate) use cli::{Browser, Cli, OutputFormat, PdfModeArg};
 pub(crate) use crawl::{run_crawl, run_map, spawn_crawl_background};
+pub(crate) use crawl_watch::run_crawl_watch;
+pub(crate) use rag_daemon::{run_rag_start, run_rag_stop};
+pub(crate) use rag_watch::run_rag_watch;
+pub(crate) use store_watch::run_store_watch;
 pub(crate) use crawl_status::*;
 pub(crate) use diff_brand::{run_brand, run_diff};
 pub(crate) use entry::run;
@@ -127,6 +136,15 @@ pub(crate) fn detect_empty(result: &ExtractionResult) -> EmptyReason {
     }
 
     EmptyReason::None
+}
+
+/// Strip all ANSI/VT escape sequences and control characters from user-supplied
+/// strings before printing to prevent terminal injection.
+pub(crate) fn sanitize_display(s: &str) -> String {
+    strip_ansi_escapes::strip_str(s)
+        .chars()
+        .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+        .collect()
 }
 
 pub(crate) fn warn_empty(url: &str, reason: &EmptyReason) {
