@@ -13,7 +13,9 @@ description: >-
   this URL", "deep research", "list cached docs", "retrieve from cache", "what have I
   scraped", "search my stored pages", "check crawl status", "set up noxa". Use this skill
   before running noxa — it covers the correct flag combinations for every workflow and
-  prevents common mistakes.
+  prevents common mistakes. Also use for: "start RAG daemon", "stop RAG daemon", "watch
+  crawls", "watch RAG services", "monitor store disk usage", "noxa rag start", "noxa rag
+  stop", "watch-crawls", "watch-rag", "watch-store".
 ---
 
 # Noxa — Web Content Extraction for AI
@@ -46,6 +48,8 @@ To choose the right mode, identify what the user wants from this URL:
 | Get brand colors/fonts/logos | Brand |
 | List / search / retrieve cached docs | Local doc store |
 | Debug a 403 or bad output | Raw HTML |
+| Monitor crawl / RAG / store health | `--watch-crawls` / `--watch-rag` / `--watch-store` |
+| Control RAG daemon lifecycle | `noxa rag start` / `noxa rag stop` |
 | First-time setup / MCP registration | `noxa setup` |
 
 ---
@@ -261,6 +265,23 @@ export NOXA_WEBHOOK_URL=https://hooks.discord.com/...   # or via env var
 
 Webhook auto-detects Discord and Slack URLs and wraps the payload accordingly.
 
+### Background process monitors
+
+These flags stream live notifications to stdout — each line is delivered to Claude via the plugin monitor.
+
+```bash
+# Stream crawl progress and completion notifications
+noxa --watch-crawls
+
+# Monitor RAG pipeline services (TEI + Qdrant availability)
+# Respects NOXA_RAG_TEI_URL, NOXA_RAG_QDRANT_URL, NOXA_RAG_COLLECTION env vars
+noxa --watch-rag
+
+# Monitor content store disk usage (alerts at 1GB / 5GB / 10GB thresholds
+# and on growth spikes >500MB in one poll window)
+noxa --watch-store
+```
+
 ---
 
 ## Deep research (cloud)
@@ -372,6 +393,27 @@ noxa --status docs.rust-lang.org
 # Re-fetch all cached docs for a domain (refresh stale content)
 noxa --refresh docs.rust-lang.org
 ```
+
+---
+
+## RAG daemon
+
+The RAG daemon (`noxa-rag-daemon`) indexes content into Qdrant for vector search. Control it via subcommands:
+
+```bash
+noxa rag start   # start the daemon in the background
+noxa rag stop    # stop the running daemon
+```
+
+The daemon's config lives in `~/.noxa/noxa.toml` under `[rag]`. It supports watching multiple directories:
+
+```toml
+[rag]
+watch_dirs = ["/path/to/docs", "/path/to/notes"]   # multiple dirs (preferred)
+# watch_dir = "/path/to/docs"                       # legacy single-dir form still works
+```
+
+Use `--watch-rag` to monitor TEI and Qdrant service availability while the daemon is running.
 
 ---
 

@@ -91,7 +91,7 @@ Three binaries: `noxa` (CLI), `noxa-mcp` (MCP server), `noxa-rag-daemon` (RAG pi
 | Variable | Purpose |
 |----------|---------|
 | `NOXA_API_KEY` | Noxa Cloud API key (required for `--research`, `--cloud`) |
-| `SEARXNG_URL` | SearXNG instance URL (enables `--search` without cloud) |
+| `SEARXNG_URL` | SearXNG instance URL (enables `--search` without cloud); `--search` is disabled without this or `NOXA_API_KEY` |
 | `NOXA_CONFIG` | Path to `noxa.toml` override (default: `~/.noxa/noxa.toml` or binary dir) |
 | `NOXA_NO_STORE` | Disable automatic content store persistence |
 | `GEMINI_MODEL` | Gemini model override (default: `gemini-2.5-pro`) |
@@ -116,7 +116,21 @@ cargo build --release           # All three binaries
 cargo test --workspace          # All tests
 cargo test -p noxa-core      # Core only
 cargo test -p noxa-llm       # LLM only
+cargo clippy --workspace        # Lint all crates
 ```
+
+## Development
+
+```bash
+# Run MCP server locally (connect via stdio)
+cargo run -p noxa-mcp
+
+# noxa-rag-daemon — requires Qdrant (default: http://localhost:6334) + TEI (default: http://localhost:8080)
+# Config: ~/.noxa/noxa.toml (see crates/noxa-rag/config.rs for schema)
+cargo run -p noxa-rag -- --config ~/.noxa/noxa.toml
+```
+
+`noxa setup` — interactive first-run wizard: checks prerequisites (rustc ≥1.85, cargo, git, Ollama), writes `.env` beside the binary (LLM API keys, Ollama model, REST port + auth key), optionally installs/starts Ollama and pulls the model, then merges `noxa-mcp` into Claude Desktop's `claude_desktop_config.json`.
 
 ## CLI
 
@@ -165,7 +179,7 @@ noxa https://example.com --browser firefox
 noxa --file page.html
 cat page.html | noxa --stdin
 
-# Interactive first-run setup (config, API keys, MCP registration)
+# Interactive first-run setup (writes ~/.noxa/noxa.toml, API keys, MCP registration)
 noxa setup
 
 # Web search via SearXNG or Noxa Cloud

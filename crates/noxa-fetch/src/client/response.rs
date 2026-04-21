@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use crate::client::Response;
 use crate::error::FetchError;
 
-const MAX_HTML_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_JSON_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_HTML_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_DOCUMENT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PDF_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 

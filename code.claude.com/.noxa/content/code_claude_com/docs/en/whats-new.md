@@ -1,0 +1,11 @@
+# What's new
+
+A weekly digest of notable Claude Code features, with code snippets, demos, and context on why they matter.
+
+The weekly dev digest highlights the features most likely to change how you work. Each entry includes runnable code, a short demo, and a link to the full docs. For every bug fix and minor improvement, see the [changelog](https://code.claude.com/docs/en/changelog).
+[​](https://code.claude.com/docs/en/whats-new#week-15) Week 15 v2.1.92–v2.1.101 April 6–10, 2026 **Ultraplan** enters early preview: draft a plan in the cloud from your CLI, review and comment on it in a web editor, then run it remotely or pull it back local. The first run now auto-creates a cloud environment for you. Also this week: the **Monitor** tool streams background events into the conversation so Claude can tail logs and react live, `/loop` self-paces when you omit the interval, `/team-onboarding` packages your setup into a replayable guide, and `/autofix-pr` turns on PR auto-fix from your terminal. [Read the Week 15 digest →](https://code.claude.com/docs/en/whats-new/2026-w15)
+[​](https://code.claude.com/docs/en/whats-new#week-14) Week 14 v2.1.86–v2.1.91 March 30 – April 3, 2026 **Computer use** comes to the CLI in research preview: Claude can open native apps, click through UI, and verify changes from your terminal. Best for closing the loop on things only a GUI can verify. Also this week: `/powerup` interactive lessons, flicker-free alt-screen rendering, a per-tool MCP result-size override up to 500K, and plugin executables on the Bash tool’s `PATH`. [Read the Week 14 digest →](https://code.claude.com/docs/en/whats-new/2026-w14)
+[​](https://code.claude.com/docs/en/whats-new#week-13) Week 13 v2.1.83–v2.1.85 March 23–27, 2026 **Auto mode** lands in research preview: a classifier handles your permission prompts so safe actions run without interruption and risky ones get blocked. The middle ground between approving everything and `--dangerously-skip-permissions`. Also this week: computer use in the Desktop app, PR auto-fix on Web, transcript search with `/`, a native PowerShell tool for Windows, and conditional `if` hooks. [Read the Week 13 digest →](https://code.claude.com/docs/en/whats-new/2026-w13)[Claude Code Docs home page](https://code.claude.com/docs/en/overview)
+
+[Privacy choices](https://code.claude.com/docs/en/whats-new#)
+

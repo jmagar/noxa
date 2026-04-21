@@ -186,6 +186,7 @@ Read back from the auto-persisted content at `~/.noxa/content/`.
 | `--status <DOMAIN>` | Show the status of a background crawl for the given domain or URL. |
 | `--refresh <DOMAIN>` | Re-fetch all cached docs for a stored domain. |
 | `--watch-crawls` | Stream crawl progress and completion notifications to stdout. Each line is a notification. |
+| `--watch-rag` | Monitor TEI and Qdrant availability for the RAG pipeline. Emits a notification when either service goes offline or comes back up. Respects `NOXA_RAG_TEI_URL`, `NOXA_RAG_QDRANT_URL`, `NOXA_RAG_COLLECTION`. |
 | `--watch-store` | Monitor content store disk usage; notifies on threshold crossings (1/5/10 GB) and growth spikes (>500 MB per poll). |
 
 ---

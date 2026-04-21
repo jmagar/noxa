@@ -1,6 +1,6 @@
 {
   "name": "noxa",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "noxa CLI, MCP server, and skills for AI-assisted web extraction",
   "mcpServers": {
     "noxa": {
