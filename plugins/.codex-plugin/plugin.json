@@ -1,0 +1,57 @@
+{
+    "name": "noxa",
+    "version": "0.7.0",
+    "description": "Noxa plugin for web scraping, extraction, crawling, search, and research workflows.",
+    "author": {
+        "name": "Jacob Magar",
+        "email": "jmagar@tootie.tv",
+        "url": "https://github.com/jmagar/noxa"
+    },
+    "homepage": "https://github.com/jmagar/noxa",
+    "repository": "https://github.com/jmagar/noxa",
+    "keywords": [
+        "noxa",
+        "web",
+        "extraction",
+        "mcp",
+        "ai",
+        "cli",
+        "crawl",
+        "scrape",
+        "search",
+        "research",
+        "crawler",
+        "web-crawler",
+        "web-extraction",
+        "codex-plugin"
+    ],
+    "skills": "./skills/",
+    "mcpServers": "./.mcp.json",
+    "interface": {
+        "displayName": "Noxa",
+        "shortDescription": "Web scraping, extraction, crawling, search, and research tools for Codex.",
+        "longDescription": "Noxa gives Codex a focused workflow for extracting clean page content, crawling documentation sites, running web search, tracking changes, and performing deeper research tasks through the local plugin.",
+        "developerName": "Jacob Magar",
+        "category": "Productivity",
+        "capabilities": [
+            "Interactive",
+            "Read",
+            "Write"
+        ],
+        "websiteURL": "https://github.com/jmagar/noxa",
+        "defaultPrompt": [
+            "scrape this page and extract the main content.",
+            "Crawl this site and summarize the results.",
+            "Use the attached schema to extract structured data from this page.",
+            "Search the web for sources on this topic and summarize the findings.",
+            "Diff this page against its previous version and tell me what changed.",
+            "Map this documentation site and scrape the relevant pages for my query."
+        ],
+        "brandColor": "#4FC3F7",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png",
+        "screenshots": [
+            "./assets/screenshot-1.png"
+        ]
+    }
+}

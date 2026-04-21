@@ -1,0 +1,26 @@
+{
+    "name": "noxa",
+    "interface": {
+        "displayName": "Noxa Crawler",
+        "shortDescription": "Codex plugin for web extraction, crawling, and research workflows.",
+        "developerName": "Noxa",
+        "category": "Productivity"
+    },
+    "plugins": [
+        {
+            "name": "noxa",
+            "source": {
+                "source": "git-subdir",
+                "url": "https://github.com/jmagar/noxa.git",
+                "path": "./plugins",
+                "ref": "main"
+            },
+            "policy": {
+                "installation": "AVAILABLE",
+                "authentication": "ON_INSTALL"
+            },
+            "category": "Productivity",
+            "description": "Extract web content, crawl sites, search the web, and run research workflows through the local Noxa plugin."
+        }
+    ]
+}

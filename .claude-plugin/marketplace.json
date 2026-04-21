@@ -1,21 +1,66 @@
 {
   "name": "noxa-marketplace",
   "owner": {
-    "name": "jmagar"
+    "name": "Jacob Magar",
+    "email": "jmagar@tootie.tv"
   },
   "metadata": {
-    "description": "Marketplace for the noxa plugin",
-    "version": "0.5.1",
+    "description": "Marketplace for the Noxa plugin and related web extraction tooling.",
+    "version": "0.7.0",
     "pluginRoot": "./"
   },
+  "allowCrossMarketplaceDependenciesOn": [],
   "plugins": [
     {
       "name": "noxa",
-      "source": "./",
-      "description": "noxa CLI, MCP server, and skills for AI-assisted web extraction",
-      "version": "0.5.1",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/jmagar/noxa.git",
+        "path": "./plugins",
+        "ref": "main"
+      },
+      "description": "Noxa CLI, MCP server, and plugin metadata for web scraping, extraction, crawling, search, and research workflows.",
+      "version": "0.7.0",
+      "author": {
+        "name": "Jacob Magar",
+        "email": "jmagar@tootie.tv"
+      },
+      "homepage": "https://github.com/jmagar/noxa",
+      "repository": "https://github.com/jmagar/noxa",
+      "license": "MIT",
+      "keywords": [
+        "noxa",
+        "web",
+        "extraction",
+        "mcp",
+        "ai",
+        "cli",
+        "crawl",
+        "scrape",
+        "search",
+        "research",
+        "crawler",
+        "web-crawler",
+        "web-extraction"
+      ],
       "category": "Productivity",
-      "tags": ["web", "extraction", "mcp", "skills"]
+      "tags": [
+        "web",
+        "extraction",
+        "mcp",
+        "cli",
+        "crawl",
+        "search",
+        "research",
+        "skills"
+      ],
+      "strict": true,
+      "skills": "./skills/",
+      "commands": "./commands/",
+      "agents": "./agents/",
+      "hooks": {},
+      "mcpServers": "./.mcp.json",
+      "lspServers": {}
     }
   ]
 }

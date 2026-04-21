@@ -1,0 +1,39 @@
+{
+    "name": "noxa",
+    "version": "0.7.0",
+    "description": "Noxa CLI, MCP server, and plugin metadata for web scraping, extraction, crawling, search, and research workflows.",
+    "author": {
+        "name": "Jacob Magar",
+        "email": "jmagar@tootie.tv",
+        "url": "https://github.com/jmagar/noxa"
+    },
+    "homepage": "https://github.com/jmagar/noxa",
+    "repository": "https://github.com/jmagar/noxa",
+    "license": "MIT",
+    "keywords": [
+        "noxa",
+        "web",
+        "extraction",
+        "mcp",
+        "ai",
+        "cli",
+        "crawl",
+        "scrape",
+        "search",
+        "research",
+        "crawler",
+        "web-crawler",
+        "web-extraction"
+    ],
+    "skills": "./skills/",
+    "commands": "./commands/",
+    "agents": "./agents/",
+    "hooks": {},
+    "mcpServers": "./.mcp.json",
+    "outputStyles": "./output-styles/",
+    "lspServers": {},
+    "monitors": "./monitors/monitors.json",
+    "userConfig": {},
+    "channels": [],
+    "dependencies": []
+}
