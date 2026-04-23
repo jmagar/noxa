@@ -3,9 +3,12 @@
 use crate::embed::EmbedProvider;
 use crate::error::RagError;
 use async_trait::async_trait;
+use futures::StreamExt;
 
 /// Batch size tuned for RTX 4070 (~3x throughput vs default 32).
 const BATCH_SIZE: usize = 96;
+/// Concurrent in-flight embed batches — overlaps HTTP latency with GPU compute.
+const EMBED_PIPELINE_DEPTH: usize = 3;
 /// Default embedding dimensions for Qwen3-0.6B.
 const DEFAULT_DIMENSIONS: usize = 1024;
 /// Per-batch request timeout.
@@ -243,16 +246,28 @@ impl EmbedProvider for TeiProvider {
         }
 
         let total_batches = texts.len().div_ceil(BATCH_SIZE);
-        let mut results: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
-        for (batch_idx, chunk) in texts.chunks(BATCH_SIZE).enumerate() {
-            results.extend(
-                self.embed_batch_adaptive(chunk, batch_idx, total_batches)
-                    .await?,
-            );
-        }
+        // Keep EMBED_PIPELINE_DEPTH batches in-flight concurrently so HTTP
+        // round-trip latency overlaps with GPU compute on the TEI server.
+        // buffered() preserves batch ordering.
+        let batches: Vec<(usize, Vec<String>)> = texts
+            .chunks(BATCH_SIZE)
+            .enumerate()
+            .map(|(i, chunk)| (i, chunk.to_vec()))
+            .collect();
 
-        Ok(results)
+        let results: Vec<Vec<Vec<f32>>> = futures::stream::iter(batches)
+            .map(|(batch_idx, batch)| async move {
+                self.embed_batch_adaptive(&batch, batch_idx, total_batches)
+                    .await
+            })
+            .buffered(EMBED_PIPELINE_DEPTH)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        Ok(results.into_iter().flatten().collect())
     }
 }
 
