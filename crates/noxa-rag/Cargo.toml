@@ -65,6 +65,10 @@ notify-debouncer-full = "0.3"
 # Concurrent data structures
 dashmap = "6"
 
+# MPMC async channel — replaces Arc<Mutex<mpsc::Receiver>> so workers dequeue
+# jobs in parallel instead of serialising on a shared mutex.
+async-channel = "2"
+
 # URL parsing
 url = "2"
 

@@ -23,6 +23,8 @@ struct SessionCounters {
     /// broader process errors so the heartbeat can report them independently.
     parse_failures: std::sync::atomic::AtomicUsize,
     total_chunks: std::sync::atomic::AtomicUsize,
+    total_parse_ms: std::sync::atomic::AtomicU64,
+    total_chunk_ms: std::sync::atomic::AtomicU64,
     total_embed_ms: std::sync::atomic::AtomicU64,
     total_upsert_ms: std::sync::atomic::AtomicU64,
 }
@@ -53,8 +55,11 @@ enum PipelineJob {
     Delete(DeleteJob),
 }
 
+#[derive(Default)]
 struct JobStats {
     chunks: usize,
+    parse_ms: u64,
+    chunk_ms: u64,
     embed_ms: u64,
     upsert_ms: u64,
 }

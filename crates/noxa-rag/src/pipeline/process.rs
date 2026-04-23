@@ -139,26 +139,39 @@ pub(crate) async fn process_job(
     watch_roots: &[PathBuf],
     counters: &Arc<SessionCounters>,
     failed_jobs_log_lock: &Arc<tokio::sync::Mutex<()>>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<JobStats, RagError> {
     let job_start = std::time::Instant::now();
 
     let t0 = std::time::Instant::now();
-    let canonical = tokio::fs::canonicalize(&job.path).await.map_err(|e| {
-        RagError::Generic(format!(
-            "canonicalize failed for {}: {e}",
-            job.path.display()
-        ))
-    })?;
+    // Canonicalize can fail for benign reasons — most commonly ENOENT when the
+    // file was deleted between the watcher event and job execution. That's a
+    // race, not a backend failure, so we must NOT return `Err` (which would
+    // wrongly bump `files_failed`). Return Ok with empty stats instead.
+    let canonical = match tokio::fs::canonicalize(&job.path).await {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                path = %job.path.display(),
+                "file vanished before processing"
+            );
+            return Ok(JobStats::default());
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %job.path.display(),
+                error = %e,
+                "canonicalize failed — skipping job"
+            );
+            return Ok(JobStats::default());
+        }
+    };
     if !scan::path_is_within_any_watch_root(&canonical, watch_roots) {
         tracing::warn!(
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"
         );
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
     let mut file = tokio::fs::File::open(&canonical).await?;
     let file_meta = file.metadata().await?;
@@ -167,11 +180,7 @@ pub(crate) async fn process_job(
     const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
     if size > MAX_FILE_SIZE_BYTES {
         tracing::warn!(path = ?job.path, size, "file too large (>50MB), skipping");
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
 
     let mut file_bytes: Vec<u8> = Vec::with_capacity(size as usize);
@@ -186,11 +195,7 @@ pub(crate) async fn process_job(
         Err(e) => {
             tracing::warn!(path = ?job.path, error = %e, "parse failed, skipping");
             append_failed_job(&job.path, &e, config, counters, failed_jobs_log_lock).await;
-            return Ok(JobStats {
-                chunks: 0,
-                embed_ms: 0,
-                upsert_ms: 0,
-            });
+            return Ok(JobStats::default());
         }
     };
     let mut result = parsed.extraction;
@@ -230,11 +235,7 @@ pub(crate) async fn process_job(
     });
     if let Err(e) = validate_url_scheme(&raw_url).await {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
     let url = crate::url_util::normalize_url(&raw_url);
 
@@ -254,18 +255,22 @@ pub(crate) async fn process_job(
     };
     if chunks.is_empty() {
         tracing::info!(url = %url, "no indexable content after chunking");
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
     let chunk_ms = t1.elapsed().as_millis() as u64;
 
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
     let total_tokens: u64 = chunks.iter().map(|c| c.token_estimate as u64).sum();
     let t2 = std::time::Instant::now();
-    let vectors = embed.embed(&texts).await?;
+    // Cooperative cancellation: if shutdown fires mid-HTTP we return cleanly
+    // rather than being force-aborted by the 10s drain timeout.
+    let vectors = tokio::select! {
+        r = embed.embed(&texts) => r?,
+        _ = shutdown.cancelled() => {
+            tracing::debug!(url = %url, "embed cancelled by shutdown");
+            return Ok(JobStats::default());
+        }
+    };
     let embed_ms = t2.elapsed().as_millis() as u64;
     let embed_tokens_per_sec = if embed_ms > 0 {
         total_tokens * 1_000 / embed_ms
@@ -317,7 +322,7 @@ pub(crate) async fn process_job(
 
     let new_ids: Vec<uuid::Uuid> = points.iter().map(|p| p.id).collect();
     let t3 = std::time::Instant::now();
-    let store_result: Result<u64, RagError> = async {
+    let store_fut = async {
         let t4 = std::time::Instant::now();
         let upserted = store.upsert(points).await.map_err(|e| {
             tracing::error!(url = %url, error = %e, "upsert failed");
@@ -352,9 +357,21 @@ pub(crate) async fn process_job(
             "indexed"
         );
 
-        Ok(upsert_ms)
-    }
-    .await;
+        Ok::<u64, RagError>(upsert_ms)
+    };
+
+    // Cooperative cancellation around upsert+delete so shutdown does not strand
+    // in-flight HTTP calls past the drain timeout.
+    let store_result: Result<u64, RagError> = tokio::select! {
+        r = store_fut => r,
+        _ = shutdown.cancelled() => {
+            tracing::debug!(url = %url, "upsert cancelled by shutdown");
+            drop(_guard);
+            drop(url_lock);
+            url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
+            return Ok(JobStats::default());
+        }
+    };
 
     drop(_guard);
     drop(url_lock);
@@ -364,6 +381,8 @@ pub(crate) async fn process_job(
 
     Ok(JobStats {
         chunks: n_chunks,
+        parse_ms,
+        chunk_ms,
         embed_ms,
         upsert_ms,
     })

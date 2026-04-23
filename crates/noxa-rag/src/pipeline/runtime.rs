@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use futures::stream::{self, StreamExt};
 use notify::{RecursiveMode, Watcher};
 use notify::event::{ModifyKind, RenameMode};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
-use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
@@ -21,6 +21,9 @@ use super::{DeleteJob, IndexJob, Pipeline, PipelineJob};
 
 /// Maximum concurrent Qdrant existence probes during startup delta scan.
 const STARTUP_SCAN_CONCURRENCY: usize = 16;
+
+/// Job-queue capacity — MPMC channel shared between watcher bridge and workers.
+const JOB_QUEUE_CAPACITY: usize = 256;
 
 // ---------------------------------------------------------------------------
 // BoundedSender — sync bridge for notify_debouncer_full events into a bounded
@@ -41,12 +44,15 @@ impl notify_debouncer_full::DebounceEventHandler for BoundedSender {
 
 fn spawn_workers(
     pipeline: &Pipeline,
-    rx: Arc<Mutex<mpsc::Receiver<PipelineJob>>>,
+    rx: async_channel::Receiver<PipelineJob>,
     watch_roots: Arc<Vec<PathBuf>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::with_capacity(pipeline.config.pipeline.embed_concurrency);
 
     for worker_id in 0..pipeline.config.pipeline.embed_concurrency {
+        // async_channel is MPMC — every clone dequeues from the same shared
+        // queue in parallel, eliminating the Arc<Mutex<Receiver>> serialisation
+        // bottleneck of tokio::sync::mpsc.
         let rx = rx.clone();
         let embed = pipeline.embed.clone();
         let store = pipeline.store.clone();
@@ -57,16 +63,14 @@ fn spawn_workers(
         let counters = pipeline.counters.clone();
         let failed_jobs_log_lock = pipeline.failed_jobs_log_lock.clone();
         let watch_roots = watch_roots.clone();
+        let shutdown = pipeline.shutdown.clone();
 
         let handle = tokio::spawn(async move {
             tracing::debug!(worker_id, "index worker started");
             loop {
-                let job = {
-                    let mut guard = rx.lock().await;
-                    guard.recv().await
-                };
+                let job = rx.recv().await;
                 match job {
-                    Some(PipelineJob::Index(job)) => {
+                    Ok(PipelineJob::Index(job)) => {
                         let span = job.span.clone();
                         async {
                             match process::process_job(
@@ -80,6 +84,7 @@ fn spawn_workers(
                                 &watch_roots,
                                 &counters,
                                 &failed_jobs_log_lock,
+                                shutdown.clone(),
                             )
                             .await
                             {
@@ -91,6 +96,14 @@ fn spawn_workers(
                                     }
                                     counters.total_chunks.fetch_add(
                                         stats.chunks,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    counters.total_parse_ms.fetch_add(
+                                        stats.parse_ms,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    counters.total_chunk_ms.fetch_add(
+                                        stats.chunk_ms,
                                         std::sync::atomic::Ordering::Relaxed,
                                     );
                                     counters.total_embed_ms.fetch_add(
@@ -113,7 +126,7 @@ fn spawn_workers(
                         .instrument(span)
                         .await;
                     }
-                    Some(PipelineJob::Delete(job)) => {
+                    Ok(PipelineJob::Delete(job)) => {
                         // Derive the file:// URL from the raw (non-canonicalized) path.
                         // canonicalize() would fail because the file no longer exists.
                         let span = job.span.clone();
@@ -123,7 +136,7 @@ fn spawn_workers(
                         .instrument(span)
                         .await;
                     }
-                    None => {
+                    Err(async_channel::RecvError) => {
                         tracing::debug!(worker_id, "index worker shutting down");
                         break;
                     }
@@ -147,7 +160,7 @@ fn spawn_workers(
 /// channel drains or shutdown is requested.
 fn send_job(
     job: PipelineJob,
-    tx: &mpsc::Sender<PipelineJob>,
+    tx: &async_channel::Sender<PipelineJob>,
     shutdown: &tokio_util::sync::CancellationToken,
 ) {
     let mut pending = job;
@@ -155,7 +168,7 @@ fn send_job(
     loop {
         match tx.try_send(pending) {
             Ok(()) => return,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(j)) => {
+            Err(async_channel::TrySendError::Full(j)) => {
                 if shutdown.is_cancelled() {
                     return;
                 }
@@ -168,7 +181,7 @@ fn send_job(
                 pending = j;
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+            Err(async_channel::TrySendError::Closed(_)) => return,
         }
     }
 }
@@ -182,7 +195,7 @@ fn send_job(
 fn setup_watcher(
     watch_dirs: &[PathBuf],
     debounce_ms: u64,
-    tx: mpsc::Sender<PipelineJob>,
+    tx: async_channel::Sender<PipelineJob>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<JoinHandle<()>, RagError> {
     let (notify_tx, notify_rx) = std::sync::mpsc::sync_channel::<DebounceEventResult>(256);
@@ -308,7 +321,7 @@ fn setup_watcher(
 // ---------------------------------------------------------------------------
 
 fn spawn_startup_scan(
-    tx: mpsc::Sender<PipelineJob>,
+    tx: async_channel::Sender<PipelineJob>,
     store: DynVectorStore,
     shutdown: tokio_util::sync::CancellationToken,
     watch_dirs: Vec<PathBuf>,
@@ -439,6 +452,7 @@ fn spawn_startup_scan(
 
 fn spawn_heartbeat(
     counters: Arc<super::SessionCounters>,
+    url_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     shutdown: tokio_util::sync::CancellationToken,
     session_start: Instant,
 ) -> JoinHandle<()> {
@@ -449,10 +463,32 @@ fn spawn_heartbeat(
             tokio::select! {
                 _ = interval.tick() => {
                     let uptime_m = session_start.elapsed().as_secs() / 60;
+                    // Periodic sweep: drop per-URL locks nobody is actively
+                    // holding. `strong_count == 1` means only the DashMap owns
+                    // the Arc; strong_count > 1 means a worker has cloned it
+                    // and is (or is about to be) holding the mutex.  This
+                    // prevents unbounded growth under file churn because the
+                    // inline cleanup after each job only fires if that worker
+                    // is the last clone alive.
+                    let before = url_locks.len();
+                    url_locks.retain(|_, v| Arc::strong_count(v) > 1);
+                    let after = url_locks.len();
+                    if before != after {
+                        tracing::debug!(
+                            swept = before - after,
+                            remaining = after,
+                            "url_locks heartbeat sweep"
+                        );
+                    }
                     tracing::info!(
                         indexed       = counters.files_indexed.load(std::sync::atomic::Ordering::Relaxed),
                         failed        = counters.files_failed.load(std::sync::atomic::Ordering::Relaxed),
                         parse_failures = counters.parse_failures.load(std::sync::atomic::Ordering::Relaxed),
+                        parse_ms      = counters.total_parse_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        chunk_ms      = counters.total_chunk_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        embed_ms      = counters.total_embed_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        upsert_ms     = counters.total_upsert_ms.load(std::sync::atomic::Ordering::Relaxed),
+                        url_locks     = after,
                         uptime_m,
                         "pipeline alive"
                     );
@@ -565,9 +601,8 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     let session_start = Instant::now();
     let watch_roots = Arc::new(scan::canonical_watch_roots(&watch_dirs).await?);
 
-    // --- channel ---
-    let (tx, rx) = mpsc::channel::<PipelineJob>(256);
-    let rx = Arc::new(Mutex::new(rx));
+    // --- channel (MPMC: every worker gets its own Receiver clone) ---
+    let (tx, rx) = async_channel::bounded::<PipelineJob>(JOB_QUEUE_CAPACITY);
 
     // --- spawn workers ---
     let worker_handles = spawn_workers(pipeline, rx, watch_roots);
@@ -588,9 +623,10 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         watch_dirs,
     );
 
-    // --- heartbeat ---
+    // --- heartbeat (also sweeps stale url_locks every 60s) ---
     let heartbeat_handle = spawn_heartbeat(
         pipeline.counters.clone(),
+        pipeline.url_locks.clone(),
         pipeline.shutdown.clone(),
         session_start,
     );
@@ -623,7 +659,6 @@ mod tests {
 
     use async_trait::async_trait;
     use tempfile::tempdir;
-    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use crate::error::RagError;
@@ -715,7 +750,7 @@ mod tests {
 
     async fn run_scan_and_collect(store: DynVectorStore, watch_dir: PathBuf) -> HashSet<PathBuf> {
         let shutdown = CancellationToken::new();
-        let (tx, mut rx) = mpsc::channel::<super::super::PipelineJob>(256);
+        let (tx, rx) = async_channel::bounded::<super::super::PipelineJob>(256);
 
         let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), vec![watch_dir]);
 
