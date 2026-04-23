@@ -101,9 +101,10 @@ fn check_service_alert(
 }
 
 pub(crate) async fn run_rag_watch() {
-    if !super::watch_singleton::acquire(super::watch_singleton::RAG_WATCH) {
+    let Some(_singleton) = super::watch_singleton::acquire(super::watch_singleton::RAG_WATCH)
+    else {
         return;
-    }
+    };
 
     let tei_url = std::env::var("TEI_URL").unwrap_or_else(|_| DEFAULT_TEI_URL.into());
     let qdrant_url = std::env::var("QDRANT_URL").unwrap_or_else(|_| DEFAULT_QDRANT_URL.into());
@@ -171,7 +172,6 @@ pub(crate) async fn run_rag_watch() {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                super::watch_singleton::release(super::watch_singleton::RAG_WATCH);
                 return;
             }
             _ = sleep(Duration::from_secs(10)) => {}

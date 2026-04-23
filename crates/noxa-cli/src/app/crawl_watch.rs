@@ -9,9 +9,10 @@ const ERROR_RATE_THRESHOLD: f64 = 0.20;
 const ALERT_COOLDOWN: Duration = Duration::from_secs(300);
 
 pub(crate) async fn run_crawl_watch() {
-    if !super::watch_singleton::acquire(super::watch_singleton::CRAWL_WATCH) {
+    let Some(_singleton) = super::watch_singleton::acquire(super::watch_singleton::CRAWL_WATCH)
+    else {
         return;
-    }
+    };
 
     let crawls_dir = crawl_status_dir();
 
@@ -43,7 +44,6 @@ pub(crate) async fn run_crawl_watch() {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                super::watch_singleton::release(super::watch_singleton::CRAWL_WATCH);
                 return;
             }
             _ = sleep(Duration::from_secs(5)) => {}
