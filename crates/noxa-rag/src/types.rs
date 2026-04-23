@@ -112,6 +112,10 @@ pub struct PointPayload {
     /// Nearest preceding markdown h1–h3 heading for this chunk, if detected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_header: Option<String>,
+    /// xxHash3 hex digest of raw file bytes — used by the startup delta scan to
+    /// skip files whose on-disk contents have not changed since last index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_hash: Option<String>,
 }
 
 impl PointPayload {
