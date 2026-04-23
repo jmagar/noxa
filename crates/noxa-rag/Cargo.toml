@@ -60,7 +60,7 @@ sha2 = "0.10"
 
 # Filesystem watcher
 notify = "6"
-notify-debouncer-mini = "0.4"
+notify-debouncer-full = "0.3"
 
 # Concurrent data structures
 dashmap = "6"

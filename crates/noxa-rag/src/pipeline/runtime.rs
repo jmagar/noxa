@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
-use notify::RecursiveMode;
-use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
+use notify::{RecursiveMode, Watcher};
+use notify::event::{ModifyKind, RenameMode};
+use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
@@ -22,13 +23,13 @@ use super::{DeleteJob, IndexJob, Pipeline, PipelineJob};
 const STARTUP_SCAN_CONCURRENCY: usize = 16;
 
 // ---------------------------------------------------------------------------
-// BoundedSender — sync bridge for notify_debouncer_mini events into a bounded
+// BoundedSender — sync bridge for notify_debouncer_full events into a bounded
 // std::sync::mpsc channel.  Must NOT be pub.
 // ---------------------------------------------------------------------------
 
 struct BoundedSender(std::sync::mpsc::SyncSender<DebounceEventResult>);
 
-impl notify_debouncer_mini::DebounceEventHandler for BoundedSender {
+impl notify_debouncer_full::DebounceEventHandler for BoundedSender {
     fn handle_event(&mut self, event: DebounceEventResult) {
         let _ = self.0.send(event);
     }
@@ -140,6 +141,38 @@ fn spawn_workers(
 // Component: fs watcher + blocking bridge
 // ---------------------------------------------------------------------------
 
+/// Send one job to the worker channel, backing off when the channel is full.
+///
+/// Called from the blocking bridge thread; spins with 10ms sleeps until the
+/// channel drains or shutdown is requested.
+fn send_job(
+    job: PipelineJob,
+    tx: &mpsc::Sender<PipelineJob>,
+    shutdown: &tokio_util::sync::CancellationToken,
+) {
+    let mut pending = job;
+    let mut saturated_logged = false;
+    loop {
+        match tx.try_send(pending) {
+            Ok(()) => return,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(j)) => {
+                if shutdown.is_cancelled() {
+                    return;
+                }
+                if !saturated_logged {
+                    tracing::warn!(
+                        "job queue saturated (256/256), backing off — embed/upsert catching up"
+                    );
+                    saturated_logged = true;
+                }
+                pending = j;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
+}
+
 /// Creates the fs debouncer, registers the watch directory, and spawns the
 /// blocking bridge task that forwards events into `tx`.  Returns the bridge
 /// `JoinHandle` so the caller can await it during shutdown.
@@ -154,8 +187,9 @@ fn setup_watcher(
 ) -> Result<JoinHandle<()>, RagError> {
     let (notify_tx, notify_rx) = std::sync::mpsc::sync_channel::<DebounceEventResult>(256);
 
-    let mut debouncer = new_debouncer(Duration::from_millis(debounce_ms), BoundedSender(notify_tx))
-        .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
+    let mut debouncer =
+        new_debouncer(Duration::from_millis(debounce_ms), None, BoundedSender(notify_tx))
+            .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
 
     for watch_dir in watch_dirs {
         debouncer
@@ -180,85 +214,72 @@ fn setup_watcher(
                     if shutdown.is_cancelled() {
                         break;
                     }
-                    for event in events {
-                        // notify_debouncer_mini coalesces all event kinds into
-                        // DebouncedEventKind::Any / AnyContinuous — we cannot
-                        // match on Remove directly.  Instead, we detect a deletion
-                        // by checking whether the path still exists on disk.
-                        //
-                        // If the path is gone AND has a supported extension, emit a
-                        // Delete job so workers can purge stale Qdrant chunks.
-                        // If the path exists, fall through to the normal index path.
-                        let path = &event.path;
+                    for debounced in events {
+                        let event = &debounced.event;
+                        let kind = &event.kind;
 
-                        if !path.exists() {
-                            // Deletion detected.  Only act on supported extensions;
-                            // ignore temporary / unsupported files (e.g. editor swap files).
-                            if scan::has_indexable_extension(path) {
+                        // Rename — debouncer-full coalesces OS rename pairs into a single
+                        // RenameMode::Both event: paths[0]=old, paths[1]=new.
+                        // Emit DeleteJob(old) so stale chunks are removed, then index new path.
+                        if matches!(
+                            kind,
+                            notify::EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+                        ) && event.paths.len() == 2
+                        {
+                            let old_path = &event.paths[0];
+                            let new_path = event.paths[1].clone();
+                            if scan::has_indexable_extension(old_path) {
                                 let span = tracing::info_span!(
                                     "delete_job",
-                                    path = %path.display()
+                                    path = %old_path.display()
                                 );
-                                let job = PipelineJob::Delete(DeleteJob {
-                                    path: path.clone(),
-                                    span,
-                                });
-                                let mut pending_job = job;
-                                let mut saturated_logged = false;
-                                loop {
-                                    match tx.try_send(pending_job) {
-                                        Ok(()) => break,
-                                        Err(tokio::sync::mpsc::error::TrySendError::Full(j)) => {
-                                            if shutdown.is_cancelled() {
-                                                break;
-                                            }
-                                            if !saturated_logged {
-                                                tracing::warn!(
-                                                    "job queue saturated (256/256), backing off — embed/upsert catching up"
-                                                );
-                                                saturated_logged = true;
-                                            }
-                                            pending_job = j;
-                                            std::thread::sleep(Duration::from_millis(10));
-                                        }
-                                        Err(
-                                            tokio::sync::mpsc::error::TrySendError::Closed(_),
-                                        ) => {
-                                            return;
-                                        }
-                                    }
-                                }
+                                send_job(
+                                    PipelineJob::Delete(DeleteJob {
+                                        path: old_path.clone(),
+                                        span,
+                                    }),
+                                    &tx,
+                                    &shutdown,
+                                );
                             }
-                            // Skip the index path — file is gone.
+                            for path in scan::collect_indexable_paths(&new_path) {
+                                let span =
+                                    tracing::info_span!("index_job", path = %path.display());
+                                send_job(
+                                    PipelineJob::Index(IndexJob { path, span }),
+                                    &tx,
+                                    &shutdown,
+                                );
+                            }
                             continue;
                         }
 
-                        for path in scan::collect_indexable_paths(path) {
-                            let span = tracing::info_span!("index_job", path = %path.display());
-                            let job = PipelineJob::Index(IndexJob { path, span });
-                            let mut pending_job = job;
-                            let mut saturated_logged = false;
-                            loop {
-                                match tx.try_send(pending_job) {
-                                    Ok(()) => break,
-                                    Err(tokio::sync::mpsc::error::TrySendError::Full(job)) => {
-                                        if shutdown.is_cancelled() {
-                                            break;
-                                        }
-                                        if !saturated_logged {
-                                            tracing::warn!(
-                                                "job queue saturated (256/256), backing off — embed/upsert catching up"
-                                            );
-                                            saturated_logged = true;
-                                        }
-                                        pending_job = job;
-                                        std::thread::sleep(Duration::from_millis(10));
-                                    }
-                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                        return;
-                                    }
+                        // Explicit remove event — debouncer-full exposes EventKind::Remove
+                        // directly (unlike debouncer-mini which coalesced everything into Any).
+                        if matches!(kind, notify::EventKind::Remove(_)) {
+                            for path in &event.paths {
+                                if scan::has_indexable_extension(path) {
+                                    let span = tracing::info_span!(
+                                        "delete_job",
+                                        path = %path.display()
+                                    );
+                                    send_job(
+                                        PipelineJob::Delete(DeleteJob {
+                                            path: path.clone(),
+                                            span,
+                                        }),
+                                        &tx,
+                                        &shutdown,
+                                    );
                                 }
                             }
+                            continue;
+                        }
+
+                        // Create / Modify / Any — index all indexable paths.
+                        for path in event.paths.iter().flat_map(|p| scan::collect_indexable_paths(p)) {
+                            let span = tracing::info_span!("index_job", path = %path.display());
+                            send_job(PipelineJob::Index(IndexJob { path, span }), &tx, &shutdown);
                         }
                     }
                 }
