@@ -17,7 +17,11 @@ pub async fn build_embed_provider(
     config: &RagConfig,
 ) -> Result<(DynEmbedProvider, usize), RagError> {
     match &config.embed_provider {
-        EmbedProviderConfig::Tei { url, model: _, .. } => {
+        EmbedProviderConfig::Tei {
+            url,
+            dimensions: config_dims,
+            ..
+        } => {
             let client = reqwest::Client::new();
             let provider = TeiProvider::new_with_probe(url.clone(), client)
                 .await
@@ -31,21 +35,40 @@ pub async fn build_embed_provider(
                 )));
             }
 
-            let dims = provider.dimensions();
-            if dims == 0 {
+            let probed_dims = provider.dimensions();
+            if probed_dims == 0 {
                 return Err(RagError::Config(
                     "TEI provider returned 0 dimensions — probe failed silently".to_string(),
                 ));
             }
 
+            // MRL dimension override validation.
+            if let Some(target) = config_dims {
+                if *target == 0 {
+                    return Err(RagError::Config(
+                        "configured dimensions must be > 0".to_string(),
+                    ));
+                }
+                if *target > probed_dims {
+                    return Err(RagError::Config(format!(
+                        "configured dimensions {target} exceeds model output {probed_dims} — \
+                         set dimensions ≤ {probed_dims} or remove the override"
+                    )));
+                }
+            }
+
+            let effective_dims = config_dims.unwrap_or(probed_dims);
+            let provider = provider.with_configured_dimensions(*config_dims);
+
             tracing::info!(
                 provider = provider.name(),
-                dims,
+                probed_dims,
+                effective_dims,
                 url = %url,
                 "embed provider ready"
             );
 
-            Ok((Arc::new(provider), dims))
+            Ok((Arc::new(provider), effective_dims))
         }
         EmbedProviderConfig::OpenAi { .. } => Err(RagError::Config(
             "OpenAI embed provider reached factory unexpectedly after config validation"

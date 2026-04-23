@@ -35,6 +35,8 @@ pub struct TeiProvider {
     pub(crate) client: reqwest::Client,
     pub(crate) url: String,
     pub(crate) dimensions: usize,
+    /// If set, truncate all returned vectors to this many dimensions (MRL).
+    pub(crate) configured_dimensions: Option<usize>,
 }
 
 impl TeiProvider {
@@ -44,6 +46,7 @@ impl TeiProvider {
             client: reqwest::Client::new(),
             url,
             dimensions: DEFAULT_DIMENSIONS,
+            configured_dimensions: None,
         }
     }
 
@@ -84,7 +87,14 @@ impl TeiProvider {
             client,
             url,
             dimensions,
+            configured_dimensions: None,
         })
+    }
+
+    /// Apply the configured MRL dimension truncation if set.
+    pub fn with_configured_dimensions(mut self, dims: Option<usize>) -> Self {
+        self.configured_dimensions = dims;
+        self
     }
 
     /// GET /health — must return 200 within 2 s.
@@ -267,7 +277,16 @@ impl EmbedProvider for TeiProvider {
             .into_iter()
             .collect::<Result<_, _>>()?;
 
-        Ok(results.into_iter().flatten().collect())
+        let mut flat: Vec<Vec<f32>> = results.into_iter().flatten().collect();
+
+        // MRL truncation: if a dimension override is configured, truncate client-side.
+        if let Some(target) = self.configured_dimensions {
+            for vec in &mut flat {
+                vec.truncate(target);
+            }
+        }
+
+        Ok(flat)
     }
 }
 
@@ -397,6 +416,7 @@ mod tests {
             client: reqwest::Client::new(),
             url: base_url,
             dimensions: DEFAULT_DIMENSIONS,
+            configured_dimensions: None,
         };
         let texts: Vec<String> = (0..20).map(|index| format!("chunk {index}")).collect();
 

@@ -121,6 +121,19 @@ pub enum EmbedProviderConfig {
         /// Default: "Given a web search query, retrieve relevant passages that answer the query"
         #[serde(default = "default_query_instruction")]
         query_instruction: Option<String>,
+        /// MRL dimension override — truncate vectors client-side after embedding.
+        ///
+        /// Qwen3-Embedding-0.6B supports Matryoshka Representation Learning: any prefix
+        /// of the 1024-dim vector is meaningful. Set to 512 or 256 to reduce Qdrant
+        /// storage at a small quality cost (~3% and ~7% respectively).
+        ///
+        /// Must be ≤ the model's probed output dimensions. Changing this on an existing
+        /// collection requires deleting and recreating it (dimension mismatch at startup
+        /// will produce a clear error).
+        ///
+        /// Defaults to None (use probed dimensions, typically 1024 for Qwen3-0.6B).
+        #[serde(default)]
+        dimensions: Option<usize>,
     },
     OpenAi {
         api_key: String,
@@ -397,6 +410,7 @@ watch_dirs = []
                 "Given a web search query, retrieve relevant passages that answer the query"
                     .to_string(),
             ),
+            dimensions: None,
         };
         let result = config.format_query("rust async runtime comparison");
         assert_eq!(
@@ -412,6 +426,7 @@ watch_dirs = []
             model: "some-model".to_string(),
             local_path: None,
             query_instruction: None,
+            dimensions: None,
         };
         let result = config.format_query("my query");
         assert_eq!(result.as_ref(), "my query");
