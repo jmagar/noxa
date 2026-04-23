@@ -304,6 +304,7 @@ async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metada
             url: "http://tei.invalid".to_string(),
             model: "dummy".to_string(),
             local_path: Some(PathBuf::from("/tmp/tokenizer")),
+            auth_token: None,
         },
         vector_store: VectorStoreConfig::Qdrant {
             url: base_url.clone(),
