@@ -170,36 +170,6 @@ pub(crate) fn extract_ingestion_provenance(value: &serde_json::Value) -> Ingesti
     }
 }
 
-fn merge_provenance(
-    metadata: &noxa_core::Metadata,
-    provenance: &IngestionProvenance,
-) -> IngestionProvenance {
-    IngestionProvenance {
-        external_id: provenance.external_id.clone(),
-        platform_url: provenance.platform_url.clone(),
-        seed_url: provenance
-            .seed_url
-            .clone()
-            .or_else(|| metadata.seed_url.clone()),
-        search_query: provenance
-            .search_query
-            .clone()
-            .or_else(|| metadata.search_query.clone()),
-        crawl_depth: provenance.crawl_depth.or(metadata.crawl_depth),
-        email_to: provenance.email_to.clone(),
-        email_message_id: provenance.email_message_id.clone(),
-        email_thread_id: provenance.email_thread_id.clone(),
-        email_has_attachments: provenance.email_has_attachments,
-        feed_url: provenance.feed_url.clone(),
-        feed_item_id: provenance.feed_item_id.clone(),
-        pptx_slide_count: provenance.pptx_slide_count,
-        pptx_has_notes: provenance.pptx_has_notes,
-        subtitle_start_s: provenance.subtitle_start_s,
-        subtitle_end_s: provenance.subtitle_end_s,
-        subtitle_source_file: provenance.subtitle_source_file.clone(),
-    }
-}
-
 pub(crate) fn build_point_payload(
     chunk: &crate::types::Chunk,
     result: &ExtractionResult,
@@ -207,8 +177,6 @@ pub(crate) fn build_point_payload(
     provenance: &IngestionProvenance,
     url: &str,
 ) -> PointPayload {
-    let provenance = merge_provenance(&result.metadata, provenance);
-
     PointPayload {
         text: chunk.text.clone(),
         url: url.to_string(),
@@ -227,22 +195,28 @@ pub(crate) fn build_point_payload(
         file_path: result.metadata.file_path.clone(),
         last_modified: result.metadata.last_modified.clone(),
         git_branch,
-        external_id: provenance.external_id,
-        platform_url: provenance.platform_url,
-        seed_url: provenance.seed_url,
-        search_query: provenance.search_query,
-        crawl_depth: provenance.crawl_depth,
-        email_to: provenance.email_to,
-        email_message_id: provenance.email_message_id,
-        email_thread_id: provenance.email_thread_id,
+        external_id: provenance.external_id.clone(),
+        platform_url: provenance.platform_url.clone(),
+        seed_url: provenance
+            .seed_url
+            .clone()
+            .or_else(|| result.metadata.seed_url.clone()),
+        search_query: provenance
+            .search_query
+            .clone()
+            .or_else(|| result.metadata.search_query.clone()),
+        crawl_depth: provenance.crawl_depth.or(result.metadata.crawl_depth),
+        email_to: provenance.email_to.clone(),
+        email_message_id: provenance.email_message_id.clone(),
+        email_thread_id: provenance.email_thread_id.clone(),
         email_has_attachments: provenance.email_has_attachments,
-        feed_url: provenance.feed_url,
-        feed_item_id: provenance.feed_item_id,
+        feed_url: provenance.feed_url.clone(),
+        feed_item_id: provenance.feed_item_id.clone(),
         pptx_slide_count: provenance.pptx_slide_count,
         pptx_has_notes: provenance.pptx_has_notes,
         subtitle_start_s: provenance.subtitle_start_s,
         subtitle_end_s: provenance.subtitle_end_s,
-        subtitle_source_file: provenance.subtitle_source_file,
+        subtitle_source_file: provenance.subtitle_source_file.clone(),
     }
 }
 
