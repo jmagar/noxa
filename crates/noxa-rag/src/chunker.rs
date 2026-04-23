@@ -26,42 +26,11 @@ fn token_estimate(text: &str, tokenizer: &Tokenizer) -> usize {
         .unwrap_or_else(|_| text.split_whitespace().count())
 }
 
-/// Build an overlap prefix from the end of `prev_text`, capped at `overlap_tokens` tokens.
-///
-/// Scans backwards through whitespace-separated words, checking the budget before
-/// adding each word (so we never exceed `overlap_tokens`). O(n) via a reversed
-/// accumulator that is flipped at the end.
-fn overlap_prefix(prev_text: &str, overlap_tokens: usize, tokenizer: &Tokenizer) -> String {
-    if overlap_tokens == 0 || prev_text.is_empty() {
-        return String::new();
-    }
-
-    let words: Vec<&str> = prev_text.split_whitespace().collect();
-    if words.is_empty() {
-        return String::new();
-    }
-
-    let mut selected_rev: Vec<&str> = Vec::new();
-    let mut token_count = 0usize;
-
-    for &word in words.iter().rev() {
-        let word_tokens = token_estimate(word, tokenizer);
-        if token_count + word_tokens > overlap_tokens {
-            break;
-        }
-        token_count += word_tokens;
-        selected_rev.push(word);
-    }
-
-    selected_rev.reverse();
-    selected_rev.join(" ")
-}
-
 /// Chunk an `ExtractionResult` into a `Vec<Chunk>`.
 ///
 /// - Uses `content.markdown` if non-empty, otherwise `content.plain_text`.
 /// - Empty content (both empty) → `Vec::new()`.
-/// - Implements manual sliding-window overlap (text-splitter has no built-in overlap).
+/// - Uses `ChunkConfig::with_overlap()` for sliding-window overlap (built into text-splitter ≥0.25).
 /// - Filters chunks below `config.min_words`.
 /// - Caps output at `config.max_chunks_per_page`.
 pub fn chunk(
@@ -89,40 +58,19 @@ pub fn chunk(
     // Ensure lower < upper so the range is valid.
     let lower = lower.min(upper - 1);
 
-    let splitter = MarkdownSplitter::new(ChunkConfig::new(lower..upper).with_sizer(tokenizer));
+    // `with_overlap(n)` passes n tokens of the previous chunk as a prefix to the next.
+    // Returns Err only if overlap >= capacity, which cannot happen here (overlap_tokens < lower).
+    let chunk_config = ChunkConfig::new(lower..upper)
+        .with_sizer(tokenizer)
+        .with_overlap(config.overlap_tokens)
+        .unwrap_or_else(|_| ChunkConfig::new(lower..upper).with_sizer(tokenizer));
 
-    // Split and collect (char_offset, chunk_text) pairs via chunk_char_indices.
-    let raw_chunks: Vec<(usize, String)> = splitter
-        .chunk_char_indices(text)
-        .map(|ci| (ci.char_offset, ci.chunk.to_string()))
-        .collect();
-
-    if raw_chunks.is_empty() {
-        return Vec::new();
-    }
-
-    // Apply sliding-window overlap: each chunk (except the first) gets a prefix
-    // consisting of the last `overlap_tokens` tokens of the previous raw chunk text.
-    let mut chunks_with_overlap: Vec<(usize, String)> = Vec::with_capacity(raw_chunks.len());
-
-    for (i, (offset, chunk_text)) in raw_chunks.iter().enumerate() {
-        let text_with_overlap: String = if i == 0 || config.overlap_tokens == 0 {
-            chunk_text.clone()
-        } else {
-            let prev_text = &raw_chunks[i - 1].1;
-            let prefix = overlap_prefix(prev_text, config.overlap_tokens, tokenizer);
-            if prefix.is_empty() {
-                chunk_text.clone()
-            } else {
-                format!("{}\n\n{}", prefix, chunk_text)
-            }
-        };
-        chunks_with_overlap.push((*offset, text_with_overlap));
-    }
+    let splitter = MarkdownSplitter::new(chunk_config);
 
     // Filter by min_words, then cap at max_chunks_per_page.
-    let filtered: Vec<(usize, String)> = chunks_with_overlap
-        .into_iter()
+    let filtered: Vec<(usize, String)> = splitter
+        .chunk_char_indices(text)
+        .map(|ci| (ci.char_offset, ci.chunk.to_string()))
         .filter(|(_, t)| word_count(t) >= config.min_words)
         .take(config.max_chunks_per_page)
         .collect();
