@@ -143,7 +143,7 @@ pub(crate) fn detect_empty(result: &ExtractionResult) -> EmptyReason {
 pub(crate) fn sanitize_display(s: &str) -> String {
     strip_ansi_escapes::strip_str(s)
         .chars()
-        .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+        .filter(|&c| !c.is_control() || c == '\t')
         .collect()
 }
 
