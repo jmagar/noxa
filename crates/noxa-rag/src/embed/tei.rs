@@ -31,27 +31,21 @@ struct EmbedRequest<'a> {
 pub struct TeiProvider {
     pub(crate) client: reqwest::Client,
     pub(crate) url: String,
-    pub(crate) _model: String,
     pub(crate) dimensions: usize,
 }
 
 impl TeiProvider {
     /// Construct with hardcoded dimensions (1024 for Qwen3-0.6B).
-    pub fn new(url: String, model: String) -> Self {
+    pub fn new(url: String) -> Self {
         Self {
             client: reqwest::Client::new(),
             url,
-            _model: model,
             dimensions: DEFAULT_DIMENSIONS,
         }
     }
 
     /// Construct by probing /embed with a single dummy text to discover dimensions.
-    pub async fn new_with_probe(
-        url: String,
-        model: String,
-        client: reqwest::Client,
-    ) -> Result<Self, RagError> {
+    pub async fn new_with_probe(url: String, client: reqwest::Client) -> Result<Self, RagError> {
         let dummy = vec!["probe".to_string()];
         let req = EmbedRequest {
             inputs: &dummy,
@@ -86,7 +80,6 @@ impl TeiProvider {
         Ok(Self {
             client,
             url,
-            _model: model,
             dimensions,
         })
     }
@@ -388,7 +381,6 @@ mod tests {
         let provider = TeiProvider {
             client: reqwest::Client::new(),
             url: base_url,
-            _model: "test-model".to_string(),
             dimensions: DEFAULT_DIMENSIONS,
         };
         let texts: Vec<String> = (0..20).map(|index| format!("chunk {index}")).collect();

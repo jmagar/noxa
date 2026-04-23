@@ -89,8 +89,7 @@ pub fn chunk(
     // Ensure lower < upper so the range is valid.
     let lower = lower.min(upper - 1);
 
-    let splitter =
-        MarkdownSplitter::new(ChunkConfig::new(lower..upper).with_sizer(tokenizer.clone()));
+    let splitter = MarkdownSplitter::new(ChunkConfig::new(lower..upper).with_sizer(tokenizer));
 
     // Split and collect (char_offset, chunk_text) pairs via chunk_char_indices.
     let raw_chunks: Vec<(usize, String)> = splitter

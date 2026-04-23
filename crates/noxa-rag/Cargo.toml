@@ -14,6 +14,8 @@ noxa-core = { workspace = true }
 noxa-pdf = { path = "../noxa-pdf" }
 # noxa-fetch provides extract_document() for DOCX/XLSX/CSV — reused rather than re-implemented.
 noxa-fetch = { workspace = true }
+# URL validation: validate_public_http_url_with_resolver for SSRF prevention (noxa-xv7.19/20)
+noxa-store = { path = "../noxa-store" }
 
 # Multi-format ingestion
 zip = "2"                         # DOCX, ODT, PPTX (ZIP archives) — matches noxa-fetch version

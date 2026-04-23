@@ -173,13 +173,6 @@ pub(crate) fn detect_git_root_and_branch(file_path: &Path) -> Option<(PathBuf, S
     }
 }
 
-/// Walk up the directory tree from `file_path` to find a `.git/HEAD` file.
-///
-/// Reads the HEAD ref to extract the branch name: `ref: refs/heads/<branch>`.
-/// Returns `None` when not in a git repo, on detached HEAD, or on any I/O error.
-pub(crate) fn detect_git_branch(file_path: &Path) -> Option<String> {
-    detect_git_root_and_branch(file_path).map(|(_, branch)| branch)
-}
 
 fn git_head_path(git_entry: &Path) -> Option<PathBuf> {
     let metadata = std::fs::symlink_metadata(git_entry).ok()?;
@@ -201,7 +194,7 @@ fn git_head_path(git_entry: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_watch_roots, collect_indexable_paths, detect_git_branch, is_indexable,
+        canonical_watch_roots, collect_indexable_paths, detect_git_root_and_branch, is_indexable,
         path_is_within_any_watch_root,
     };
     use std::fs;
@@ -375,7 +368,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("foo.txt");
         fs::write(&file, "x").expect("write file");
-        assert_eq!(detect_git_branch(&file), None);
+        assert_eq!(
+            detect_git_root_and_branch(&file).map(|(_, b)| b),
+            None
+        );
     }
 
     #[test]
@@ -387,10 +383,8 @@ mod tests {
         let nested = tmp.path().join("src/foo.rs");
         fs::create_dir_all(nested.parent().unwrap()).expect("create src");
         fs::write(&nested, "x").expect("write file");
-        assert_eq!(
-            detect_git_branch(&nested),
-            Some("feature/noxa-rag".to_string())
-        );
+        let (_, branch) = detect_git_root_and_branch(&nested).expect("should detect branch");
+        assert_eq!(branch, "feature/noxa-rag");
     }
 
     #[test]
@@ -401,6 +395,9 @@ mod tests {
         fs::write(git_dir.join("HEAD"), "abc123def456\n").expect("write HEAD");
         let file = tmp.path().join("foo.txt");
         fs::write(&file, "x").expect("write file");
-        assert_eq!(detect_git_branch(&file), None);
+        assert_eq!(
+            detect_git_root_and_branch(&file).map(|(_, b)| b),
+            None
+        );
     }
 }

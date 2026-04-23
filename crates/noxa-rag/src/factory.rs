@@ -17,9 +17,9 @@ pub async fn build_embed_provider(
     config: &RagConfig,
 ) -> Result<(DynEmbedProvider, usize), RagError> {
     match &config.embed_provider {
-        EmbedProviderConfig::Tei { url, model, .. } => {
+        EmbedProviderConfig::Tei { url, model: _, .. } => {
             let client = reqwest::Client::new();
-            let provider = TeiProvider::new_with_probe(url.clone(), model.clone(), client)
+            let provider = TeiProvider::new_with_probe(url.clone(), client)
                 .await
                 .map_err(|e| RagError::Config(format!("TEI startup probe failed: {e}")))?;
 
@@ -48,10 +48,12 @@ pub async fn build_embed_provider(
             Ok((Arc::new(provider), dims))
         }
         EmbedProviderConfig::OpenAi { .. } => Err(RagError::Config(
-            "OpenAI embed provider not implemented — use tei for phase 1".to_string(),
+            "OpenAI embed provider reached factory unexpectedly after config validation"
+                .to_string(),
         )),
         EmbedProviderConfig::VoyageAi { .. } => Err(RagError::Config(
-            "VoyageAI embed provider not implemented — use tei for phase 1".to_string(),
+            "VoyageAI embed provider reached factory unexpectedly after config validation"
+                .to_string(),
         )),
     }
 }
@@ -121,7 +123,8 @@ pub async fn build_vector_store(
             Ok(Arc::new(store))
         }
         VectorStoreConfig::InMemory => Err(RagError::Config(
-            "InMemory vector store not implemented — use testcontainers-rs for tests".to_string(),
+            "InMemory vector store reached factory unexpectedly after config validation"
+                .to_string(),
         )),
     }
 }
