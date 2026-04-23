@@ -60,10 +60,12 @@ async fn check_failed_jobs(path: &std::path::Path, prev_size: &mut u64) -> Vec<S
         return vec![];
     }
     let mut buf = String::new();
-    if file.read_to_string(&mut buf).await.is_err() {
+    // Cap the read at 1 MiB so a runaway log file cannot balloon memory.
+    if AsyncReadExt::take(&mut file, 1 << 20).read_to_string(&mut buf).await.is_err() {
         return vec![];
     }
-    *prev_size = current_size;
+    // Advance by bytes actually consumed (may be < current_size when truncated).
+    *prev_size = (*prev_size + buf.len() as u64).min(current_size);
 
     buf.lines()
         .filter_map(|line| {
@@ -129,7 +131,9 @@ pub(crate) async fn run_rag_watch() {
         }
     };
 
-    let mut daemon_running = is_rag_daemon_running();
+    let mut daemon_running = tokio::task::spawn_blocking(is_rag_daemon_running)
+        .await
+        .unwrap_or(false);
     if !daemon_running {
         match spawn_rag_daemon() {
             Ok(pid) => {
@@ -177,7 +181,9 @@ pub(crate) async fn run_rag_watch() {
             _ = sleep(Duration::from_secs(10)) => {}
         }
 
-        let daemon_now = is_rag_daemon_running();
+        let daemon_now = tokio::task::spawn_blocking(is_rag_daemon_running)
+            .await
+            .unwrap_or(false);
         if !daemon_now && daemon_running {
             println!("RAG daemon stopped unexpectedly — attempting restart");
             match spawn_rag_daemon() {
