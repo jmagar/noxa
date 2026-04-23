@@ -5,14 +5,19 @@ use crate::error::RagError;
 use super::QdrantStore;
 use super::http::{CollectionInfoResponse, parse_collection_vector_size};
 
+// KNOWLEDGE: last_modified is stored as RFC 3339 / ISO 8601 string (via chrono::to_rfc3339()).
+// A "keyword" index only supports exact-match; range queries (gte/lte) on timestamps require
+// "datetime". See pipeline/process.rs ~L236 and noxa-core/types.rs (Option<String>).
+// content_hash is a hex digest string — "keyword" is correct (exact-match dedup / filter).
 const BASE_COLLECTION_INDEXES: &[(&str, &str)] = &[
     ("url", "keyword"),
     ("domain", "keyword"),
     ("source_type", "keyword"),
     ("language", "keyword"),
     ("file_path", "keyword"),
-    ("last_modified", "keyword"),
+    ("last_modified", "datetime"), // was "keyword"; datetime enables range (gte/lte) queries
     ("git_branch", "keyword"),
+    ("content_hash", "keyword"), // needed for dedup / content-hash filter queries (noxa-3fi.5)
 ];
 
 impl QdrantStore {
@@ -72,7 +77,7 @@ impl QdrantStore {
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
         for (field, schema_type) in BASE_COLLECTION_INDEXES
             .iter()
-            .filter(|(field, _)| matches!(*field, "file_path" | "last_modified" | "git_branch"))
+            .filter(|(field, _)| matches!(*field, "file_path" | "last_modified" | "git_branch" | "content_hash"))
         {
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
