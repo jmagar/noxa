@@ -21,6 +21,10 @@ fn should_retry(status: u16, attempt: u32) -> bool {
 struct EmbedRequest<'a> {
     inputs: &'a [String],
     truncate: bool,
+    // "Right" drops from the tail of the user content, preserving the beginning of the
+    // document AND ensuring EOS remains the final token — required for Qwen3 last-token
+    // (pooling_mode_lasttoken = true) pooling.
+    truncation_direction: &'static str,
     normalize: bool,
 }
 
@@ -52,6 +56,7 @@ impl TeiProvider {
         let req = EmbedRequest {
             inputs: &dummy,
             truncate: true,
+            truncation_direction: "Right",
             normalize: true,
         };
         let resp = client
@@ -119,6 +124,7 @@ impl TeiProvider {
         let req_body = EmbedRequest {
             inputs: batch,
             truncate: true,
+            truncation_direction: "Right",
             normalize: true,
         };
 
