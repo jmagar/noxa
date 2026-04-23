@@ -60,6 +60,11 @@ pub async fn build_embed_provider(
             let effective_dims = config_dims.unwrap_or(probed_dims);
             let provider = provider.with_configured_dimensions(*config_dims);
 
+            // Non-fatal: warn if TEI max_batch_tokens < BATCH_SIZE × target_tokens.
+            provider
+                .check_max_batch_tokens(config.chunker.target_tokens)
+                .await;
+
             tracing::info!(
                 provider = provider.name(),
                 probed_dims,

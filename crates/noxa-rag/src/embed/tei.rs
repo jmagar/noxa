@@ -97,6 +97,61 @@ impl TeiProvider {
         self
     }
 
+    /// GET /info and warn if TEI's max_batch_tokens is too small for the client batch size.
+    ///
+    /// If max_batch_tokens < BATCH_SIZE * target_tokens, TEI will internally re-split every
+    /// client batch, defeating client-side batching and adding tokenization overhead.
+    /// Correct value for BATCH_SIZE=96, target_tokens=512: at least 49152 (recommend 65536).
+    pub async fn check_max_batch_tokens(&self, target_tokens: usize) {
+        let url = format!("{}/info", self.url);
+        let resp = match self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                tracing::debug!(status = %r.status(), "TEI /info returned non-200; skipping batch-token check");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "TEI /info not reachable; skipping batch-token check");
+                return;
+            }
+        };
+
+        let json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "TEI /info JSON parse failed; skipping batch-token check");
+                return;
+            }
+        };
+
+        if let Some(max_batch_tokens) = json.get("max_batch_tokens").and_then(|v| v.as_u64()) {
+            let needed = (BATCH_SIZE * target_tokens) as u64;
+            if max_batch_tokens < needed {
+                tracing::warn!(
+                    tei_max_batch_tokens = max_batch_tokens,
+                    client_batch_size = BATCH_SIZE,
+                    target_tokens,
+                    needed,
+                    "TEI max_batch_tokens too small — TEI will re-split client batches internally. \
+                     Restart TEI with --max-batch-tokens {} (recommend 65536 for RTX 4070)",
+                    needed,
+                );
+            } else {
+                tracing::debug!(
+                    tei_max_batch_tokens = max_batch_tokens,
+                    needed,
+                    "TEI max_batch_tokens OK"
+                );
+            }
+        }
+    }
+
     /// GET /health — must return 200 within 2 s.
     pub async fn is_available(&self) -> bool {
         self.client
