@@ -13,13 +13,37 @@ use super::http::{DeleteByFilterRequest, QuantizationSearchParams, SearchParams,
 use super::payload::{point_to_qdrant_payload, search_filter, search_result_from_payload};
 use crate::url_util::normalize_url;
 
+/// Error-check a Qdrant HTTP response: if the status is non-2xx, read the
+/// body preview and return `RagError::Store("<method> failed: <preview>")`.
+/// Otherwise return the response so the caller can continue reading its body.
+///
+/// `url_with_hash_exists_checked` and `url_with_file_hash_exists_checked`
+/// intentionally use their own bespoke error handling (returning
+/// `HashExistsResult::BackendError` instead of `RagError`) and do NOT go
+/// through this helper.
+async fn check_response(
+    resp: reqwest::Response,
+    method: &str,
+) -> Result<reqwest::Response, RagError> {
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let preview: String = text.chars().take(512).collect();
+        return Err(RagError::Store(format!("{method} failed: {preview}")));
+    }
+    Ok(resp)
+}
+
 #[async_trait]
 impl VectorStore for QdrantStore {
-    /// PUT /collections/{name}/points?wait=true. Returns the number of points written.
+    /// PUT /collections/{name}/points?wait=false — idempotent with deterministic
+    /// UUID v5 point IDs, so we do not block on WAL+index flush. This saves the
+    /// ~30ms RTT per upsert that `wait=true` imposes. Delete operations still
+    /// use `wait=true` because stale-chunk cleanup must observably complete
+    /// before the URL-lock is released.
     async fn upsert(&self, points: Vec<Point>) -> Result<usize, RagError> {
         let n = points.len();
         let url = format!(
-            "{}/collections/{}/points?wait=true",
+            "{}/collections/{}/points?wait=false",
             self.base_url, self.collection
         );
 
@@ -37,11 +61,7 @@ impl VectorStore for QdrantStore {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!("upsert failed: {preview}")));
-        }
+        check_response(resp, "upsert").await?;
 
         Ok(n)
     }
@@ -60,11 +80,7 @@ impl VectorStore for QdrantStore {
         };
 
         let resp = self.client.post(&endpoint).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!("delete_by_url failed: {preview}")));
-        }
+        check_response(resp, "delete_by_url").await?;
 
         Ok(())
     }
@@ -97,13 +113,7 @@ impl VectorStore for QdrantStore {
             .json(&DeleteByFilterRequest { filter })
             .send()
             .await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!(
-                "delete_stale_by_url failed: {preview}"
-            )));
-        }
+        check_response(resp, "delete_stale_by_url").await?;
 
         Ok(())
     }
@@ -141,11 +151,7 @@ impl VectorStore for QdrantStore {
         };
 
         let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!("search failed: {preview}")));
-        }
+        let resp = check_response(resp, "search").await?;
 
         let response: SearchResponse = resp.json().await?;
         let mut decode_failures: u64 = 0;
@@ -195,13 +201,7 @@ impl VectorStore for QdrantStore {
     async fn collection_point_count(&self) -> Result<u64, RagError> {
         let endpoint = format!("{}/collections/{}", self.base_url, self.collection);
         let resp = self.client.get(&endpoint).send().await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!(
-                "collection_point_count failed: {preview}"
-            )));
-        }
+        let resp = check_response(resp, "collection_point_count").await?;
         let body: serde_json::Value = resp
             .json()
             .await
