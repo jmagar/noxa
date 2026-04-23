@@ -34,13 +34,18 @@ impl QdrantStore {
         }
     }
 
-    /// PUT /collections/{name} — create with Cosine/HNSW + payload indexes.
+    /// PUT /collections/{name} — create with Dot/HNSW + payload indexes.
+    ///
+    /// Dot (inner product) is used because TEI always outputs L2-normalized vectors
+    /// (normalize=true). For unit vectors dot product == cosine similarity, skipping
+    /// the redundant normalization step Qdrant applies for "Cosine" distance.
+    /// Changing this on an existing collection requires deleting and recreating it.
     pub async fn create_collection(&self, dims: usize) -> Result<(), RagError> {
         let url = format!("{}/collections/{}", self.base_url, self.collection);
         let body = json!({
             "vectors": {
                 "size": dims,
-                "distance": "Cosine",
+                "distance": "Dot",
                 "on_disk": true,
                 "hnsw_config": { "m": 16, "ef_construct": 200 }
             },
