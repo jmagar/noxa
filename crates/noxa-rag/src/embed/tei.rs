@@ -29,16 +29,18 @@ pub struct TeiProvider {
     pub(crate) url: String,
     pub(crate) _model: String,
     pub(crate) dimensions: usize,
+    pub(crate) auth_token: Option<String>,
 }
 
 impl TeiProvider {
     /// Construct with hardcoded dimensions (1024 for Qwen3-0.6B).
-    pub fn new(url: String, model: String) -> Self {
+    pub fn new(url: String, model: String, auth_token: Option<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             url,
             _model: model,
             dimensions: DEFAULT_DIMENSIONS,
+            auth_token,
         }
     }
 
@@ -47,6 +49,7 @@ impl TeiProvider {
         url: String,
         model: String,
         client: reqwest::Client,
+        auth_token: Option<String>,
     ) -> Result<Self, RagError> {
         let dummy = vec!["probe".to_string()];
         let req = EmbedRequest {
@@ -54,12 +57,14 @@ impl TeiProvider {
             truncate: true,
             normalize: true,
         };
-        let resp = client
+        let mut probe_req = client
             .post(format!("{}/embed", url))
             .timeout(std::time::Duration::from_secs(10))
-            .json(&req)
-            .send()
-            .await?;
+            .json(&req);
+        if let Some(token) = auth_token.as_deref() {
+            probe_req = probe_req.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = probe_req.send().await?;
 
         if !resp.status().is_success() {
             return Err(RagError::Embed {
@@ -83,15 +88,20 @@ impl TeiProvider {
             url,
             _model: model,
             dimensions,
+            auth_token,
         })
     }
 
     /// GET /health — must return 200 within 2 s.
     pub async fn is_available(&self) -> bool {
-        self.client
+        let mut req = self
+            .client
             .get(format!("{}/health", self.url))
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
+            .timeout(std::time::Duration::from_secs(2));
+        if let Some(token) = self.auth_token.as_deref() {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        req.send()
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
@@ -132,13 +142,15 @@ impl TeiProvider {
                 "embedding batch"
             );
 
-            let resp = self
+            let mut builder = self
                 .client
                 .post(&url)
                 .timeout(std::time::Duration::from_secs(BATCH_TIMEOUT_SECS))
-                .json(&req_body)
-                .send()
-                .await?;
+                .json(&req_body);
+            if let Some(token) = self.auth_token.as_deref() {
+                builder = builder.header("Authorization", format!("Bearer {token}"));
+            }
+            let resp = builder.send().await?;
 
             let status = resp.status();
             let status_u16 = status.as_u16();
@@ -384,6 +396,7 @@ mod tests {
             url: base_url,
             _model: "test-model".to_string(),
             dimensions: DEFAULT_DIMENSIONS,
+            auth_token: None,
         };
         let texts: Vec<String> = (0..20).map(|index| format!("chunk {index}")).collect();
 

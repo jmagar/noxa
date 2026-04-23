@@ -17,11 +17,21 @@ pub async fn build_embed_provider(
     config: &RagConfig,
 ) -> Result<(DynEmbedProvider, usize), RagError> {
     match &config.embed_provider {
-        EmbedProviderConfig::Tei { url, model, .. } => {
+        EmbedProviderConfig::Tei {
+            url,
+            model,
+            auth_token,
+            ..
+        } => {
             let client = reqwest::Client::new();
-            let provider = TeiProvider::new_with_probe(url.clone(), model.clone(), client)
-                .await
-                .map_err(|e| RagError::Config(format!("TEI startup probe failed: {e}")))?;
+            let provider = TeiProvider::new_with_probe(
+                url.clone(),
+                model.clone(),
+                client,
+                auth_token.clone(),
+            )
+            .await
+            .map_err(|e| RagError::Config(format!("TEI startup probe failed: {e}")))?;
 
             if !provider.is_available().await {
                 return Err(RagError::Config(format!(

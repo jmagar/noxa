@@ -82,6 +82,10 @@ pub enum EmbedProviderConfig {
         model: String,
         /// Optional: load tokenizer from local path (avoids HF Hub at startup).
         local_path: Option<PathBuf>,
+        /// Optional Bearer token sent as `Authorization: Bearer <token>` on every
+        /// TEI request. When `None`, no auth header is sent (backward-compatible).
+        #[serde(default)]
+        auth_token: Option<String>,
     },
     OpenAi {
         api_key: String,
