@@ -254,7 +254,19 @@ pub(crate) async fn process_job(
     let url = crate::url_util::normalize_url(&raw_url);
 
     let t1 = std::time::Instant::now();
-    let chunks = crate::chunker::chunk(&result, &config.chunker, tokenizer);
+    // KNOWLEDGE: chunker tokenization is CPU-bound (HuggingFace BPE). Wrap in
+    // spawn_blocking to avoid blocking async Tokio worker threads — same pattern
+    // as parse/mod.rs for PDF/DOCX. See bead noxa-3fi.2.
+    let chunks = {
+        let result_clone = result.clone();
+        let config_chunker = config.chunker.clone();
+        let tokenizer = Arc::clone(tokenizer);
+        tokio::task::spawn_blocking(move || {
+            crate::chunker::chunk(&result_clone, &config_chunker, &tokenizer)
+        })
+        .await
+        .map_err(|e| RagError::Generic(format!("chunker panicked: {e}")))?
+    };
     if chunks.is_empty() {
         tracing::info!(url = %url, "no indexable content after chunking");
         return Ok(JobStats {
