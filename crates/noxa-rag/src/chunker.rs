@@ -10,6 +10,30 @@ fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
+/// Extract markdown h1–h3 headings with their byte offsets.
+fn extract_headings(text: &str) -> Vec<(usize, String)> {
+    let mut headings = Vec::new();
+    let mut byte_offset = 0usize;
+    for line in text.split('\n') {
+        let content = line.trim_end_matches('\r');
+        let hash_count = content.bytes().take_while(|&b| b == b'#').count();
+        if (1..=3).contains(&hash_count) && content.as_bytes().get(hash_count) == Some(&b' ') {
+            let header_text = content[hash_count + 1..].trim().to_string();
+            if !header_text.is_empty() {
+                headings.push((byte_offset, header_text));
+            }
+        }
+        byte_offset += line.len() + 1; // +1 for the '\n' split on
+    }
+    headings
+}
+
+/// Find the nearest heading at or before `chunk_offset`.
+fn nearest_heading(headings: &[(usize, String)], chunk_offset: usize) -> Option<&str> {
+    let pos = headings.partition_point(|(offset, _)| *offset <= chunk_offset);
+    pos.checked_sub(1).map(|i| headings[i].1.as_str())
+}
+
 /// Extract the domain/host from a URL string.
 fn extract_domain(url: &str) -> String {
     url::Url::parse(url)
@@ -51,6 +75,9 @@ pub fn chunk(
     let source_url: String = result.metadata.url.as_deref().unwrap_or("").to_string();
     let domain = extract_domain(&source_url);
 
+    // Extract heading positions for section_header assignment.
+    let headings = extract_headings(text);
+
     // Build the splitter with a token-range chunk config.
     // Use (target - 112)..target as the range; handle pathological configs safely.
     let upper = config.target_tokens.max(2);
@@ -86,6 +113,8 @@ pub fn chunk(
         .enumerate()
         .map(|(chunk_index, (char_offset, text))| {
             let t_est = token_estimate(&text, tokenizer);
+            let section_header =
+                nearest_heading(&headings, char_offset).map(|s| s.to_string());
             Chunk {
                 text,
                 source_url: source_url.clone(),
@@ -94,6 +123,7 @@ pub fn chunk(
                 total_chunks,
                 char_offset,
                 token_estimate: t_est,
+                section_header,
             }
         })
         .collect()

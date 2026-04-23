@@ -132,6 +132,7 @@ async fn parse_file_json_keeps_crawler_provenance_in_point_payload() {
         total_chunks: 1,
         char_offset: 0,
         token_estimate: 6,
+        section_header: None,
     };
 
     let payload = build_point_payload(&chunk, &parsed.extraction, None, &parsed.provenance, url);
@@ -158,6 +159,7 @@ fn build_point_payload_serializes_provenance_fields_when_present() {
         total_chunks: 1,
         char_offset: 0,
         token_estimate: 2,
+        section_header: None,
     };
     let extraction = noxa_core::ExtractionResult {
         metadata: noxa_core::Metadata {

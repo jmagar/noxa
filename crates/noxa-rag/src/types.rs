@@ -14,6 +14,8 @@ pub struct Chunk {
     pub total_chunks: usize,
     pub char_offset: usize,
     pub token_estimate: usize,
+    /// The nearest preceding markdown heading (h1–h3) for this chunk, if any.
+    pub section_header: Option<String>,
 }
 
 /// A point ready for upsert into the vector store.
@@ -106,6 +108,10 @@ pub struct PointPayload {
     pub subtitle_end_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle_source_file: Option<String>,
+    // ── Structural metadata ──────────────────────────────────────────────────
+    /// Nearest preceding markdown h1–h3 heading for this chunk, if detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_header: Option<String>,
 }
 
 impl PointPayload {

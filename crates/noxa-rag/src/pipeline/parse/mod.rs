@@ -243,6 +243,7 @@ pub(crate) fn build_point_payload(
         subtitle_start_s: provenance.subtitle_start_s,
         subtitle_end_s: provenance.subtitle_end_s,
         subtitle_source_file: provenance.subtitle_source_file,
+        section_header: chunk.section_header.clone(),
     }
 }
 

@@ -18,6 +18,7 @@ const BASE_COLLECTION_INDEXES: &[(&str, &str)] = &[
     ("last_modified", "datetime"), // was "keyword"; datetime enables range (gte/lte) queries
     ("git_branch", "keyword"),
     ("content_hash", "keyword"), // needed for dedup / content-hash filter queries (noxa-3fi.5)
+    ("section_header", "keyword"), // enables section-level filtered search
 ];
 
 impl QdrantStore {
@@ -89,7 +90,7 @@ impl QdrantStore {
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
         for (field, schema_type) in BASE_COLLECTION_INDEXES
             .iter()
-            .filter(|(field, _)| matches!(*field, "file_path" | "last_modified" | "git_branch" | "content_hash"))
+            .filter(|(field, _)| matches!(*field, "file_path" | "last_modified" | "git_branch" | "content_hash" | "section_header"))
         {
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
