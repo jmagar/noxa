@@ -206,6 +206,7 @@ pub(crate) fn build_point_payload(
     git_branch: Option<String>,
     provenance: &IngestionProvenance,
     url: &str,
+    file_hash: Option<&str>,
 ) -> PointPayload {
     let provenance = merge_provenance(&result.metadata, provenance);
 
@@ -244,6 +245,7 @@ pub(crate) fn build_point_payload(
         subtitle_end_s: provenance.subtitle_end_s,
         subtitle_source_file: provenance.subtitle_source_file,
         section_header: chunk.section_header.clone(),
+        file_hash: file_hash.map(str::to_owned),
     }
 }
 

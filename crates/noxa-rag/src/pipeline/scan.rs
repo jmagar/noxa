@@ -100,9 +100,8 @@ fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
 ///
 /// Must be called inside `spawn_blocking` — this function reads from disk synchronously.
 pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
-    use sha2::Digest;
-
     let bytes = std::fs::read(path).ok()?;
+    let file_hash = format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&bytes));
 
     if path.extension().and_then(|e| e.to_str()) == Some("json") {
         #[derive(serde::Deserialize)]
@@ -112,24 +111,18 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
         #[derive(serde::Deserialize)]
         struct QM {
             url: Option<String>,
-            content_hash: Option<String>,
         }
         if let Ok(q) = serde_json::from_slice::<Q>(&bytes) {
-            let hash = q
-                .metadata
-                .content_hash
-                .unwrap_or_else(|| format!("{:x}", sha2::Sha256::digest(&bytes)));
             if let Some(url) = q.metadata.url
                 && !url.is_empty()
             {
-                return Some((hash, url));
+                return Some((file_hash, url));
             }
         }
     }
 
-    let hash = format!("{:x}", sha2::Sha256::digest(&bytes));
     let url = url::Url::from_file_path(path).ok()?.to_string();
-    Some((hash, url))
+    Some((file_hash, url))
 }
 
 /// Canonicalizes each watch directory and returns the resulting list.

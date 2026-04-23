@@ -381,7 +381,7 @@ fn spawn_startup_scan(
                         }
                     };
 
-                    match store.url_with_hash_exists_checked(&url, &hash).await {
+                    match store.url_with_file_hash_exists_checked(&url, &hash).await {
                         HashExistsResult::Exists => {
                             skipped.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(
@@ -683,6 +683,14 @@ mod tests {
         }
 
         async fn url_with_hash_exists_checked(&self, url: &str, _hash: &str) -> HashExistsResult {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            self.results
+                .get(url)
+                .cloned()
+                .unwrap_or(HashExistsResult::NotIndexed)
+        }
+
+        async fn url_with_file_hash_exists_checked(&self, url: &str, _file_hash: &str) -> HashExistsResult {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             self.results
                 .get(url)

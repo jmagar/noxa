@@ -292,6 +292,90 @@ impl VectorStore for QdrantStore {
         }
     }
 
+    async fn url_with_file_hash_exists_checked(&self, url: &str, file_hash: &str) -> HashExistsResult {
+        if file_hash.is_empty() {
+            return HashExistsResult::NotIndexed;
+        }
+        let normalized = normalize_url(url);
+        let endpoint = format!(
+            "{}/collections/{}/points/count",
+            self.base_url, self.collection
+        );
+        let body = serde_json::json!({
+            "filter": {
+                "must": [
+                    { "key": "url", "match": { "value": normalized } },
+                    { "key": "file_hash", "match": { "value": file_hash } }
+                ]
+            }
+        });
+
+        let resp = match self
+            .client
+            .post(&endpoint)
+            .timeout(std::time::Duration::from_secs(5))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    url = %normalized,
+                    error = %e,
+                    "url_with_file_hash_exists_checked: network error — treating as backend error"
+                );
+                return HashExistsResult::BackendError(format!("network error: {e}"));
+            }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let preview: String = text.chars().take(512).collect();
+            tracing::warn!(
+                status,
+                url = %normalized,
+                body = %preview,
+                "url_with_file_hash_exists_checked: non-success HTTP — treating as backend error"
+            );
+            return HashExistsResult::BackendError(format!("HTTP {status}: {preview}"));
+        }
+
+        let json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    url = %normalized,
+                    error = %e,
+                    "url_with_file_hash_exists_checked: JSON parse error — treating as backend error"
+                );
+                return HashExistsResult::BackendError(format!("JSON parse error: {e}"));
+            }
+        };
+
+        let Some(count) = json
+            .get("result")
+            .and_then(|r| r.get("count"))
+            .and_then(|c| c.as_u64())
+        else {
+            tracing::warn!(
+                url = %normalized,
+                body = %json,
+                "url_with_file_hash_exists_checked: missing result.count — treating as backend error"
+            );
+            return HashExistsResult::BackendError(
+                "missing or non-integer result.count in Qdrant response".to_string(),
+            );
+        };
+
+        if count > 0 {
+            HashExistsResult::Exists
+        } else {
+            HashExistsResult::NotIndexed
+        }
+    }
+
     fn name(&self) -> &str {
         "qdrant"
     }

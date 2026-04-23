@@ -55,8 +55,8 @@ tokenizers = "0.21"
 # UUID v5 for deterministic point IDs
 uuid = { version = "1", features = ["v5", "serde"] }
 
-# SHA-256 for startup scan delta detection (file content hashing)
-sha2 = "0.10"
+# xxHash3 for fast raw-bytes file_hash (startup scan skip unchanged files)
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Filesystem watcher
 notify = "6"

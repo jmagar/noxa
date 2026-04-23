@@ -178,6 +178,9 @@ pub(crate) async fn process_job(
     file.read_to_end(&mut file_bytes).await?;
     let parse_ms = t0.elapsed().as_millis() as u64;
 
+    // Compute xxHash3 of raw bytes before file_bytes is moved into parse_file.
+    let file_hash = format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&file_bytes));
+
     let parsed = match parse::parse_file(&job.path, file_bytes).await {
         Ok(r) => r,
         Err(e) => {
@@ -300,6 +303,7 @@ pub(crate) async fn process_job(
                     git_branch.clone(),
                     &parsed.provenance,
                     &url,
+                    Some(&file_hash),
                 ),
             }
         })
