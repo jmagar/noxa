@@ -65,6 +65,10 @@ pub(crate) fn parse_office_zip_file(
     const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
     const MAX_ENTRIES: usize = 1_000;
     const MAX_TOTAL_UNCOMPRESSED_SIZE: u64 = 250 * 1024 * 1024;
+    // Hard cap on total decompressed bytes, measured from the actual decompression
+    // stream (NOT the attacker-controlled central directory size field). This defends
+    // against zip bombs that lie about entry.size() in the central directory.
+    const MAX_DOCX_EXTRACTED_BYTES: u64 = 50 * 1024 * 1024;
 
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)
@@ -80,6 +84,9 @@ pub(crate) fn parse_office_zip_file(
     let mut total_uncompressed_size = 0u64;
 
     if ext == "docx" {
+        // Fast-path pre-scan using declared sizes. This is advisory only — the
+        // central directory is attacker-controlled, so we additionally bound
+        // decompression by measured bytes below.
         for i in 0..archive.len() {
             if let Ok(entry) = archive.by_index(i) {
                 total_uncompressed_size = total_uncompressed_size.saturating_add(entry.size());
@@ -98,6 +105,32 @@ pub(crate) fn parse_office_zip_file(
                 }
             }
         }
+
+        // Authoritative guard: actually decompress each entry with a hard byte
+        // cap enforced on the measured stream. This catches zip bombs that
+        // under-report size() in the central directory.
+        let mut measured_total: u64 = 0;
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| RagError::Parse(format!("docx entry {i}: {e}")))?;
+            let entry_name = entry.name().to_string();
+            let remaining = MAX_DOCX_EXTRACTED_BYTES.saturating_sub(measured_total);
+            // Read at most `remaining + 1` bytes so we can distinguish "exactly at
+            // the budget" from "overran the budget".
+            let read_cap = remaining.saturating_add(1);
+            let mut sink = std::io::sink();
+            let copied = std::io::copy(&mut (&mut entry).take(read_cap), &mut sink)
+                .map_err(|e| RagError::Parse(format!("docx decompress '{entry_name}': {e}")))?;
+            if copied > remaining {
+                return Err(RagError::Parse(
+                    "DOCX entry exceeds 50MB decompressed limit — possible zip bomb"
+                        .to_string(),
+                ));
+            }
+            measured_total = measured_total.saturating_add(copied);
+        }
+
         let result =
             noxa_fetch::document::extract_document(bytes, noxa_fetch::document::DocType::Docx)
                 .map_err(|e| RagError::Parse(format!("DOCX extract: {e}")))?;
