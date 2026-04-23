@@ -83,17 +83,26 @@ fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
 ///
 /// For `.json` ExtractionResult files: peeks at `metadata.url` and `metadata.content_hash`
 /// from inside the JSON (fast, avoids full deserialisation of large markdown content).
-/// Falls back to file:// URL + SHA-256 of file bytes if the JSON lacks a URL.
+/// Falls back to file:// URL + `mtime:<secs>:<size>` if the JSON lacks a URL.
 ///
-/// For all other formats: returns file:// URL + SHA-256 of file bytes.
+/// For all other formats: returns file:// URL + `mtime:<secs>:<size>` as a lightweight
+/// O(stat) dedup key. Collisions cause re-indexing (not data loss), which is acceptable
+/// versus re-reading and hashing every file on startup.
 ///
-/// Returns `None` when the file cannot be read or a file:// URL cannot be constructed.
+/// Returns `None` when the path is a symlink (confinement-safety: avoid following symlinks
+/// out of the watch roots before `process_job` validates confinement), or when the file
+/// metadata cannot be read, or when a file:// URL cannot be constructed.
 ///
 /// Must be called inside `spawn_blocking` — this function reads from disk synchronously.
 pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
-    use sha2::Digest;
-
-    let bytes = std::fs::read(path).ok()?;
+    // Security: skip symlinks to avoid following links out of watch roots before
+    // confinement validation runs in process_job. Mirrors the symlink skip in
+    // collect_indexable_paths_recursive.
+    let sym_meta = std::fs::symlink_metadata(path).ok()?;
+    if sym_meta.file_type().is_symlink() {
+        tracing::debug!(path = %path.display(), "startup_scan_key: skipping symlink");
+        return None;
+    }
 
     if path.extension().and_then(|e| e.to_str()) == Some("json") {
         #[derive(serde::Deserialize)]
@@ -105,7 +114,10 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
             url: Option<String>,
             content_hash: Option<String>,
         }
-        if let Ok(q) = serde_json::from_slice::<Q>(&bytes) {
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(q) = serde_json::from_slice::<Q>(&bytes)
+        {
+            use sha2::Digest;
             let hash = q
                 .metadata
                 .content_hash
@@ -116,9 +128,20 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
                 return Some((hash, url));
             }
         }
+        // Fall through to mtime+size key below if JSON parse failed or URL missing.
     }
 
-    let hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+    // Non-JSON (and JSON fallback) branch: use mtime+size as a lightweight dedup key
+    // instead of hashing full file contents. This is O(stat) vs O(file_bytes).
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let size = meta.len();
+    let hash = format!("mtime:{mtime_secs}:{size}");
     let url = url::Url::from_file_path(path).ok()?.to_string();
     Some((hash, url))
 }
@@ -184,7 +207,7 @@ fn git_head_path(git_entry: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         canonical_watch_roots, collect_indexable_paths, detect_git_branch, is_indexable,
-        path_is_within_any_watch_root,
+        path_is_within_any_watch_root, startup_scan_key,
     };
     use std::fs;
 
@@ -384,5 +407,83 @@ mod tests {
         let file = tmp.path().join("foo.txt");
         fs::write(&file, "x").expect("write file");
         assert_eq!(detect_git_branch(&file), None);
+    }
+
+    #[test]
+    fn startup_scan_key_skips_symlinks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("target.md");
+        fs::write(&target, "# real content").expect("write target");
+
+        let link = tmp.path().join("link.md");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).expect("create symlink");
+
+        // Symlink must return None — do not read its target bytes.
+        assert_eq!(
+            startup_scan_key(&link),
+            None,
+            "symlinks must be skipped to prevent reading files outside watch roots"
+        );
+
+        // Regular file still produces a key.
+        assert!(startup_scan_key(&target).is_some());
+    }
+
+    #[test]
+    fn startup_scan_key_non_json_uses_mtime_size() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("doc.md");
+        fs::write(&file, "hello world").expect("write file");
+
+        let (hash, url) = startup_scan_key(&file).expect("key for md file");
+        assert!(
+            hash.starts_with("mtime:"),
+            "non-JSON key should be mtime-based, got: {hash}"
+        );
+        // Format is mtime:<secs>:<size> with size = 11 bytes ("hello world").
+        assert!(hash.ends_with(":11"), "key should encode file size: {hash}");
+        assert!(url.starts_with("file://"), "url should be file://: {url}");
+    }
+
+    #[test]
+    fn startup_scan_key_non_json_key_changes_on_content_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("doc.txt");
+        fs::write(&file, "one").expect("write v1");
+        let (k1, _) = startup_scan_key(&file).expect("v1 key");
+
+        // Different size ensures the size component changes, so even if mtime
+        // resolution is 1s and the test runs faster than that, the key still differs.
+        fs::write(&file, "two two two").expect("write v2");
+        let (k2, _) = startup_scan_key(&file).expect("v2 key");
+
+        assert_ne!(k1, k2, "key must change when file size changes");
+    }
+
+    #[test]
+    fn startup_scan_key_json_prefers_metadata_content_hash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("doc.json");
+        let body = r#"{"metadata":{"url":"https://example.com/a","content_hash":"abc123"}}"#;
+        fs::write(&file, body).expect("write json");
+
+        let (hash, url) = startup_scan_key(&file).expect("json key");
+        assert_eq!(hash, "abc123");
+        assert_eq!(url, "https://example.com/a");
+    }
+
+    #[test]
+    fn startup_scan_key_json_without_url_falls_back_to_mtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("doc.json");
+        // No url inside metadata -> falls through to file:// + mtime:size.
+        fs::write(&file, r#"{"metadata":{"content_hash":"x"}}"#).expect("write json");
+
+        let (hash, url) = startup_scan_key(&file).expect("json fallback key");
+        assert!(hash.starts_with("mtime:"), "fallback hash: {hash}");
+        assert!(url.starts_with("file://"), "fallback url: {url}");
     }
 }
