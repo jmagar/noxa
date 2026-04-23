@@ -27,9 +27,10 @@ fn dir_size_bytes(path: &Path) -> u64 {
 }
 
 pub(crate) async fn run_store_watch() {
-    if !super::watch_singleton::acquire(super::watch_singleton::STORE_WATCH) {
+    let Some(_singleton) = super::watch_singleton::acquire(super::watch_singleton::STORE_WATCH)
+    else {
         return;
-    }
+    };
 
     let store_root = dirs::home_dir()
         .unwrap_or_default()
@@ -46,7 +47,6 @@ pub(crate) async fn run_store_watch() {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                super::watch_singleton::release(super::watch_singleton::STORE_WATCH);
                 return;
             }
             _ = sleep(Duration::from_secs(60)) => {}
