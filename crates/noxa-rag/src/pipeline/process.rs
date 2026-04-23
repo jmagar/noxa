@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -15,46 +14,20 @@ use crate::types::Point;
 
 use super::parse;
 use super::scan;
-use super::{IndexJob, JobStats, SessionCounters};
+use super::{DeleteJob, IndexJob, JobStats, SessionCounters};
 
 /// Maximum size of the failed-jobs log before it is rotated (10 MiB).
 const FAILED_JOBS_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-fn is_private_ip(host: &str) -> bool {
-    if let Ok(addr) = host.parse::<IpAddr>() {
-        return is_private_or_reserved_ip(addr);
-    }
-    false
-}
-
-fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()
-                || v4.is_unspecified()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || octets[0] == 10
-                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
-                || (octets[0] == 192 && octets[1] == 168)
-                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
-        }
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_or_reserved_ip(IpAddr::V4(v4));
-            }
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg0 & 0xffc0) == 0xfe80
-                || (seg0 & 0xfe00) == 0xfc00
-        }
-    }
-}
-
-pub(crate) fn validate_url_scheme(url: &str) -> Result<(), RagError> {
+/// Validate that `url` is a permitted indexing target.
+///
+/// - `http`/`https`: delegates to `noxa_store::url_validation::validate_public_http_url`, which
+///   resolves hostnames via DNS and rejects all private/reserved IP ranges. This closes the
+///   SSRF gap where hostname-based internal addresses (e.g. `qdrant.internal`) bypass a
+///   numeric-IP-only check.
+/// - `file`: allowed only for local paths (no remote host).
+/// - All other schemes: rejected.
+pub(crate) async fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     if url.is_empty() {
         return Err(RagError::Generic(
             "extraction result has no URL".to_string(),
@@ -65,18 +38,9 @@ pub(crate) fn validate_url_scheme(url: &str) -> Result<(), RagError> {
 
     match parsed.scheme() {
         "http" | "https" => {
-            if let Some(host) = parsed.host_str() {
-                if is_private_ip(host) {
-                    return Err(RagError::Generic(format!(
-                        "URL {url:?} uses a private/loopback IP literal as its host — indexing blocked"
-                    )));
-                }
-                if host.eq_ignore_ascii_case("localhost") {
-                    return Err(RagError::Generic(
-                        "URL points to localhost — indexing blocked".to_string(),
-                    ));
-                }
-            }
+            noxa_store::url_validation::validate_public_http_url(url)
+                .await
+                .map_err(|e| RagError::Generic(format!("URL {url:?} blocked: {e}")))?;
         }
         "file" => match parsed.host_str() {
             None | Some("") | Some("localhost") => {}
@@ -171,6 +135,7 @@ pub(crate) async fn process_job(
     tokenizer: &Arc<Tokenizer>,
     config: &RagConfig,
     url_locks: &Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    git_branch_cache: &Arc<DashMap<PathBuf, Option<String>>>,
     watch_roots: &[PathBuf],
     counters: &Arc<SessionCounters>,
     failed_jobs_log_lock: &Arc<tokio::sync::Mutex<()>>,
@@ -236,14 +201,31 @@ pub(crate) async fn process_job(
         result.metadata.last_modified =
             Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
-    let git_branch = scan::detect_git_branch(&job.path);
+    let git_branch = {
+        let path = job.path.clone();
+        let cache = git_branch_cache.clone();
+        tokio::task::spawn_blocking(move || {
+            // Walk up to find the git root first so we can use it as a stable cache key.
+            if let Some((git_root, branch)) = scan::detect_git_root_and_branch(&path) {
+                cache
+                    .entry(git_root)
+                    .or_insert_with(|| Some(branch.clone()))
+                    .clone()
+            } else {
+                None
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    };
 
     let raw_url = result.metadata.url.clone().unwrap_or_else(|| {
         url::Url::from_file_path(&canonical)
             .map(|url| url.to_string())
             .unwrap_or_else(|_| canonical.to_string_lossy().into_owned())
     });
-    if let Err(e) = validate_url_scheme(&raw_url) {
+    if let Err(e) = validate_url_scheme(&raw_url).await {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
         return Ok(JobStats {
             chunks: 0,
@@ -383,39 +365,55 @@ pub(crate) async fn process_job(
     })
 }
 
+/// Remove all Qdrant chunks for a file that was deleted from disk.
+///
+/// The file no longer exists so we cannot canonicalize its path — we derive a
+/// `file://` URL directly from the raw watcher-reported path instead.
+pub(crate) async fn process_delete_job(job: DeleteJob, store: &DynVectorStore) {
+    let url = url::Url::from_file_path(&job.path)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| job.path.to_string_lossy().into_owned());
+    let url = crate::url_util::normalize_url(&url);
+    match store.delete_by_url(&url).await {
+        Ok(()) => tracing::info!(url = %url, "deleted chunks for removed file"),
+        Err(e) => tracing::warn!(url = %url, error = %e, "failed to delete chunks for removed file"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_url_scheme;
 
-    #[test]
-    fn validate_url_scheme_accepts_file_local_path() {
-        assert!(validate_url_scheme("file:///tmp/foo.md").is_ok());
+    #[tokio::test]
+    async fn validate_url_scheme_accepts_file_local_path() {
+        assert!(validate_url_scheme("file:///tmp/foo.md").await.is_ok());
     }
 
-    #[test]
-    fn validate_url_scheme_accepts_file_localhost_host() {
-        assert!(validate_url_scheme("file://localhost/tmp/foo.md").is_ok());
+    #[tokio::test]
+    async fn validate_url_scheme_accepts_file_localhost_host() {
+        assert!(validate_url_scheme("file://localhost/tmp/foo.md").await.is_ok());
     }
 
-    #[test]
-    fn validate_url_scheme_rejects_file_with_remote_host() {
-        let result = validate_url_scheme("file://remoteserver/share/doc.txt");
-        assert!(result.is_err());
+    #[tokio::test]
+    async fn validate_url_scheme_rejects_file_with_remote_host() {
+        assert!(
+            validate_url_scheme("file://remoteserver/share/doc.txt")
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn validate_url_scheme_accepts_https() {
-        assert!(validate_url_scheme("https://example.com/page").is_ok());
+    #[tokio::test]
+    async fn validate_url_scheme_rejects_ftp() {
+        assert!(
+            validate_url_scheme("ftp://example.com/file.txt")
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn validate_url_scheme_rejects_ftp() {
-        let result = validate_url_scheme("ftp://example.com/file.txt");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_url_scheme_rejects_empty_url() {
-        assert!(validate_url_scheme("").is_err());
+    #[tokio::test]
+    async fn validate_url_scheme_rejects_empty_url() {
+        assert!(validate_url_scheme("").await.is_err());
     }
 }

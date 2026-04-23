@@ -16,7 +16,7 @@ use crate::store::{DynVectorStore, HashExistsResult};
 
 use super::process;
 use super::scan;
-use super::{IndexJob, Pipeline};
+use super::{DeleteJob, IndexJob, Pipeline, PipelineJob};
 
 /// Maximum concurrent Qdrant existence probes during startup delta scan.
 const STARTUP_SCAN_CONCURRENCY: usize = 16;
@@ -40,7 +40,7 @@ impl notify_debouncer_mini::DebounceEventHandler for BoundedSender {
 
 fn spawn_workers(
     pipeline: &Pipeline,
-    rx: Arc<Mutex<mpsc::Receiver<IndexJob>>>,
+    rx: Arc<Mutex<mpsc::Receiver<PipelineJob>>>,
     watch_roots: Arc<Vec<PathBuf>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::with_capacity(pipeline.config.pipeline.embed_concurrency);
@@ -52,6 +52,7 @@ fn spawn_workers(
         let tokenizer = pipeline.tokenizer.clone();
         let config = pipeline.config.clone();
         let url_locks = pipeline.url_locks.clone();
+        let git_branch_cache = pipeline.git_branch_cache.clone();
         let counters = pipeline.counters.clone();
         let failed_jobs_log_lock = pipeline.failed_jobs_log_lock.clone();
         let watch_roots = watch_roots.clone();
@@ -64,7 +65,7 @@ fn spawn_workers(
                     guard.recv().await
                 };
                 match job {
-                    Some(job) => {
+                    Some(PipelineJob::Index(job)) => {
                         let span = job.span.clone();
                         async {
                             match process::process_job(
@@ -74,6 +75,7 @@ fn spawn_workers(
                                 &tokenizer,
                                 &config,
                                 &url_locks,
+                                &git_branch_cache,
                                 &watch_roots,
                                 &counters,
                                 &failed_jobs_log_lock,
@@ -110,6 +112,16 @@ fn spawn_workers(
                         .instrument(span)
                         .await;
                     }
+                    Some(PipelineJob::Delete(job)) => {
+                        // Derive the file:// URL from the raw (non-canonicalized) path.
+                        // canonicalize() would fail because the file no longer exists.
+                        let span = job.span.clone();
+                        async {
+                            process::process_delete_job(job, &store).await;
+                        }
+                        .instrument(span)
+                        .await;
+                    }
                     None => {
                         tracing::debug!(worker_id, "index worker shutting down");
                         break;
@@ -137,7 +149,7 @@ fn spawn_workers(
 fn setup_watcher(
     watch_dirs: &[PathBuf],
     debounce_ms: u64,
-    tx: mpsc::Sender<IndexJob>,
+    tx: mpsc::Sender<PipelineJob>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<JoinHandle<()>, RagError> {
     let (notify_tx, notify_rx) = std::sync::mpsc::sync_channel::<DebounceEventResult>(256);
@@ -169,9 +181,61 @@ fn setup_watcher(
                         break;
                     }
                     for event in events {
-                        for path in scan::collect_indexable_paths(&event.path) {
+                        // notify_debouncer_mini coalesces all event kinds into
+                        // DebouncedEventKind::Any / AnyContinuous — we cannot
+                        // match on Remove directly.  Instead, we detect a deletion
+                        // by checking whether the path still exists on disk.
+                        //
+                        // If the path is gone AND has a supported extension, emit a
+                        // Delete job so workers can purge stale Qdrant chunks.
+                        // If the path exists, fall through to the normal index path.
+                        let path = &event.path;
+
+                        if !path.exists() {
+                            // Deletion detected.  Only act on supported extensions;
+                            // ignore temporary / unsupported files (e.g. editor swap files).
+                            if scan::has_indexable_extension(path) {
+                                let span = tracing::info_span!(
+                                    "delete_job",
+                                    path = %path.display()
+                                );
+                                let job = PipelineJob::Delete(DeleteJob {
+                                    path: path.clone(),
+                                    span,
+                                });
+                                let mut pending_job = job;
+                                let mut saturated_logged = false;
+                                loop {
+                                    match tx.try_send(pending_job) {
+                                        Ok(()) => break,
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(j)) => {
+                                            if shutdown.is_cancelled() {
+                                                break;
+                                            }
+                                            if !saturated_logged {
+                                                tracing::warn!(
+                                                    "job queue saturated (256/256), backing off — embed/upsert catching up"
+                                                );
+                                                saturated_logged = true;
+                                            }
+                                            pending_job = j;
+                                            std::thread::sleep(Duration::from_millis(10));
+                                        }
+                                        Err(
+                                            tokio::sync::mpsc::error::TrySendError::Closed(_),
+                                        ) => {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            // Skip the index path — file is gone.
+                            continue;
+                        }
+
+                        for path in scan::collect_indexable_paths(path) {
                             let span = tracing::info_span!("index_job", path = %path.display());
-                            let job = IndexJob { path, span };
+                            let job = PipelineJob::Index(IndexJob { path, span });
                             let mut pending_job = job;
                             let mut saturated_logged = false;
                             loop {
@@ -223,7 +287,7 @@ fn setup_watcher(
 // ---------------------------------------------------------------------------
 
 fn spawn_startup_scan(
-    tx: mpsc::Sender<IndexJob>,
+    tx: mpsc::Sender<PipelineJob>,
     store: DynVectorStore,
     shutdown: tokio_util::sync::CancellationToken,
     watch_dirs: Vec<PathBuf>,
@@ -288,7 +352,7 @@ fn spawn_startup_scan(
                             let span =
                                 tracing::info_span!("index_job", path = %path.display());
                             tokio::select! {
-                                _ = tx.send(IndexJob { path, span }) => {}
+                                _ = tx.send(PipelineJob::Index(IndexJob { path, span })) => {}
                                 _ = shutdown.cancelled() => {}
                             }
                             queued.fetch_add(1, Ordering::Relaxed);
@@ -309,7 +373,7 @@ fn spawn_startup_scan(
                             let span =
                                 tracing::info_span!("index_job", path = %path.display());
                             tokio::select! {
-                                _ = tx.send(IndexJob { path, span }) => {}
+                                _ = tx.send(PipelineJob::Index(IndexJob { path, span })) => {}
                                 _ = shutdown.cancelled() => {}
                             }
                             queued.fetch_add(1, Ordering::Relaxed);
@@ -481,7 +545,7 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     let watch_roots = Arc::new(scan::canonical_watch_roots(&watch_dirs).await?);
 
     // --- channel ---
-    let (tx, rx) = mpsc::channel::<IndexJob>(256);
+    let (tx, rx) = mpsc::channel::<PipelineJob>(256);
     let rx = Arc::new(Mutex::new(rx));
 
     // --- spawn workers ---
@@ -622,7 +686,7 @@ mod tests {
 
     async fn run_scan_and_collect(store: DynVectorStore, watch_dir: PathBuf) -> HashSet<PathBuf> {
         let shutdown = CancellationToken::new();
-        let (tx, mut rx) = mpsc::channel::<super::super::IndexJob>(256);
+        let (tx, mut rx) = mpsc::channel::<super::super::PipelineJob>(256);
 
         let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), vec![watch_dir]);
 
@@ -634,7 +698,10 @@ mod tests {
 
         let mut queued = HashSet::new();
         while let Ok(job) = rx.try_recv() {
-            queued.insert(job.path);
+            // Startup scan only ever emits Index jobs; collect their paths.
+            if let super::super::PipelineJob::Index(index_job) = job {
+                queued.insert(index_job.path);
+            }
         }
         queued
     }
