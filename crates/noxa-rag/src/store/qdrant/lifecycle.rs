@@ -7,6 +7,7 @@ use super::http::{CollectionInfoResponse, parse_collection_vector_size};
 
 const BASE_COLLECTION_INDEXES: &[(&str, &str)] = &[
     ("url", "keyword"),
+    ("content_hash", "keyword"),
     ("domain", "keyword"),
     ("source_type", "keyword"),
     ("language", "keyword"),
