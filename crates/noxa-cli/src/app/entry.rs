@@ -4,6 +4,31 @@ use crate::setup;
 pub(crate) async fn run() {
     noxa_mcp::load_env().ok();
 
+    // Pre-scan argv for --config so pre-clap subcommands (setup, rag start/stop, mcp)
+    // still honor a user-supplied config path via NOXA_RAG_CONFIG.
+    if std::env::var_os("NOXA_RAG_CONFIG").is_none() {
+        let args: Vec<String> = std::env::args().collect();
+        let mut i = 1;
+        while i < args.len() {
+            let a = &args[i];
+            if a == "--config" {
+                if let Some(p) = args.get(i + 1) {
+                    // SAFETY: single-threaded at this point, before any async runtime work.
+                    unsafe {
+                        std::env::set_var("NOXA_RAG_CONFIG", p);
+                    }
+                }
+                break;
+            } else if let Some(p) = a.strip_prefix("--config=") {
+                unsafe {
+                    std::env::set_var("NOXA_RAG_CONFIG", p);
+                }
+                break;
+            }
+            i += 1;
+        }
+    }
+
     if matches!(std::env::args().nth(1).as_deref(), Some("setup")) {
         setup::run();
         return;
