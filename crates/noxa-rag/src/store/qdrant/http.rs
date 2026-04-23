@@ -62,6 +62,21 @@ pub(crate) struct DeleteByFilterRequest {
 pub(crate) struct SearchParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hnsw_ef: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<QuantizationSearchParams>,
+}
+
+/// Quantization rescore parameters for Qdrant search.
+///
+/// With INT8 quantization: `rescore=true` refines the top-k candidates using
+/// full-precision vectors stored on disk. `oversampling=2.0` retrieves 2× the
+/// requested limit from the quantized index before rescoring, balancing recall
+/// against the cost of extra disk reads.
+#[derive(Serialize)]
+pub(crate) struct QuantizationSearchParams {
+    pub ignore: bool,
+    pub rescore: bool,
+    pub oversampling: f32,
 }
 
 #[derive(Serialize)]

@@ -49,7 +49,14 @@ impl QdrantStore {
                 "on_disk": true,
                 "hnsw_config": { "m": 16, "ef_construct": 200 }
             },
-            "on_disk_payload": true
+            "on_disk_payload": true,
+            "quantization_config": {
+                "scalar": {
+                    "type": "int8",
+                    "quantile": 0.99,
+                    "always_ram": true
+                }
+            }
         });
 
         let resp = self.client.put(&url).json(&body).send().await?;

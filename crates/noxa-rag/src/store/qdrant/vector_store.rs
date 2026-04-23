@@ -9,7 +9,7 @@ use crate::store::{HashExistsResult, VectorStore};
 use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
 use super::QdrantStore;
-use super::http::{DeleteByFilterRequest, SearchParams, SearchRequest, SearchResponse, UpsertRequest};
+use super::http::{DeleteByFilterRequest, QuantizationSearchParams, SearchParams, SearchRequest, SearchResponse, UpsertRequest};
 use super::payload::{point_to_qdrant_payload, search_filter, search_result_from_payload};
 use crate::url_util::normalize_url;
 
@@ -130,7 +130,14 @@ impl VectorStore for QdrantStore {
             with_payload: true,
             score_threshold: None,
             filter: search_filter(filter),
-            params: Some(SearchParams { hnsw_ef: Some(hnsw_ef) }),
+            params: Some(SearchParams {
+                hnsw_ef: Some(hnsw_ef),
+                quantization: Some(QuantizationSearchParams {
+                    ignore: false,
+                    rescore: true,
+                    oversampling: 2.0,
+                }),
+            }),
         };
 
         let resp = self.client.post(&url).json(&body).send().await?;
