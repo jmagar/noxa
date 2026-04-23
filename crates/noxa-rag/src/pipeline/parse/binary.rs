@@ -2,7 +2,7 @@ use std::io::Read;
 
 use crate::error::RagError;
 
-use super::{IngestionProvenance, ParsedFile, make_text_result};
+use super::{FormatProvenance, IngestionProvenance, ParsedFile, make_text_result};
 
 pub(crate) fn parse_ipynb_file(
     bytes: &[u8],
@@ -204,9 +204,12 @@ pub(crate) fn parse_office_zip_file(
     let extraction = make_text_result(text.clone(), text, url, Some(title), "file", word_count);
     let provenance = if ext == "pptx" {
         IngestionProvenance {
-            pptx_slide_count: Some(slide_count),
-            pptx_has_notes: Some(has_notes),
-            ..IngestionProvenance::default()
+            external_id: None,
+            platform_url: None,
+            format: FormatProvenance::Presentation {
+                slide_count: Some(slide_count),
+                has_notes: Some(has_notes),
+            },
         }
     } else {
         IngestionProvenance::default()
