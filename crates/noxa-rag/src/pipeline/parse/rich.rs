@@ -1,6 +1,6 @@
 use crate::error::RagError;
 
-use super::{IngestionProvenance, ParsedFile, extract_xml_text, make_text_result};
+use super::{FormatProvenance, IngestionProvenance, ParsedFile, extract_xml_text, make_text_result};
 
 pub(crate) fn parse_feed_file(
     bytes: Vec<u8>,
@@ -103,11 +103,13 @@ fn parse_email_text(
         extraction,
         IngestionProvenance {
             external_id: message_id.clone(),
-            email_to: to,
-            email_message_id: message_id,
-            email_thread_id: thread_id,
-            email_has_attachments: Some(has_attachments),
-            ..IngestionProvenance::default()
+            platform_url: None,
+            format: FormatProvenance::Email {
+                to,
+                message_id,
+                thread_id,
+                has_attachments: Some(has_attachments),
+            },
         },
     ))
 }
@@ -206,9 +208,11 @@ fn parse_feed_text(
                 let id = feed.id.trim();
                 (!id.is_empty()).then(|| id.to_string())
             }),
-            feed_url,
-            feed_item_id,
-            ..IngestionProvenance::default()
+            platform_url: None,
+            format: FormatProvenance::Feed {
+                feed_url,
+                item_id: feed_item_id,
+            },
         },
     ))
 }
@@ -307,10 +311,13 @@ fn subtitle_provenance(content: &str) -> IngestionProvenance {
     }
 
     IngestionProvenance {
-        subtitle_start_s: start_s,
-        subtitle_end_s: end_s,
-        subtitle_source_file: source_file,
-        ..IngestionProvenance::default()
+        external_id: None,
+        platform_url: None,
+        format: FormatProvenance::Subtitle {
+            start_s,
+            end_s,
+            source_file,
+        },
     }
 }
 

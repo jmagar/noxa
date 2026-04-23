@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use noxa_core::types::ExtractionResult;
-use serde::Deserialize;
 
 use crate::error::RagError;
 use crate::types::PointPayload;
@@ -23,40 +22,50 @@ pub(crate) struct ParsedFile {
     pub provenance: IngestionProvenance,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Format-specific ingestion metadata. Variants are mutually exclusive so the
+/// compiler enforces that (for example) subtitle fields cannot be set on an
+/// email point. The payload field names produced in `build_point_payload`
+/// must remain identical to the old flat struct -- this is a Qdrant schema
+/// contract, not an internal Rust detail.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum FormatProvenance {
+    Web {
+        seed_url: Option<String>,
+        search_query: Option<String>,
+        crawl_depth: Option<u32>,
+    },
+    Email {
+        /// Field types mirror `PointPayload` exactly so serialization is
+        /// byte-identical to the previous flat struct. `to` is a plain Vec
+        /// (not Option<Vec>) so an absent value serializes as `[]`, and
+        /// `has_attachments` stays Option<bool> so unknown stays null.
+        to: Vec<String>,
+        message_id: Option<String>,
+        thread_id: Option<String>,
+        has_attachments: Option<bool>,
+    },
+    Feed {
+        feed_url: Option<String>,
+        item_id: Option<String>,
+    },
+    Subtitle {
+        start_s: Option<f64>,
+        end_s: Option<f64>,
+        source_file: Option<String>,
+    },
+    Presentation {
+        slide_count: Option<u32>,
+        has_notes: Option<bool>,
+    },
+    #[default]
+    Generic,
+}
+
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IngestionProvenance {
-    #[serde(default)]
     pub external_id: Option<String>,
-    #[serde(default)]
     pub platform_url: Option<String>,
-    #[serde(default)]
-    pub seed_url: Option<String>,
-    #[serde(default)]
-    pub search_query: Option<String>,
-    #[serde(default)]
-    pub crawl_depth: Option<u32>,
-    #[serde(default)]
-    pub email_to: Vec<String>,
-    #[serde(default)]
-    pub email_message_id: Option<String>,
-    #[serde(default)]
-    pub email_thread_id: Option<String>,
-    #[serde(default)]
-    pub email_has_attachments: Option<bool>,
-    #[serde(default)]
-    pub feed_url: Option<String>,
-    #[serde(default)]
-    pub feed_item_id: Option<String>,
-    #[serde(default)]
-    pub pptx_slide_count: Option<u32>,
-    #[serde(default)]
-    pub pptx_has_notes: Option<bool>,
-    #[serde(default)]
-    pub subtitle_start_s: Option<f64>,
-    #[serde(default)]
-    pub subtitle_end_s: Option<f64>,
-    #[serde(default)]
-    pub subtitle_source_file: Option<String>,
+    pub format: FormatProvenance,
 }
 
 pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError> {
@@ -157,16 +166,17 @@ pub(crate) fn extract_ingestion_provenance(value: &serde_json::Value) -> Ingesti
     IngestionProvenance {
         external_id: top_value("external_id").and_then(json_string),
         platform_url: top_value("platform_url").and_then(json_string),
-        seed_url: top_value("seed_url")
-            .and_then(json_string)
-            .or_else(|| metadata_value("seed_url").and_then(json_string)),
-        search_query: top_value("search_query")
-            .and_then(json_string)
-            .or_else(|| metadata_value("search_query").and_then(json_string)),
-        crawl_depth: top_value("crawl_depth")
-            .and_then(json_u32)
-            .or_else(|| metadata_value("crawl_depth").and_then(json_u32)),
-        ..IngestionProvenance::default()
+        format: FormatProvenance::Web {
+            seed_url: top_value("seed_url")
+                .and_then(json_string)
+                .or_else(|| metadata_value("seed_url").and_then(json_string)),
+            search_query: top_value("search_query")
+                .and_then(json_string)
+                .or_else(|| metadata_value("search_query").and_then(json_string)),
+            crawl_depth: top_value("crawl_depth")
+                .and_then(json_u32)
+                .or_else(|| metadata_value("crawl_depth").and_then(json_u32)),
+        },
     }
 }
 
@@ -177,6 +187,72 @@ pub(crate) fn build_point_payload(
     provenance: &IngestionProvenance,
     url: &str,
 ) -> PointPayload {
+    // Default values for every format-specific field. Only the fields
+    // belonging to the active variant are overridden below; the rest stay
+    // at their type default (None / empty Vec), matching the old flat
+    // struct's behaviour where inactive fields were simply not set.
+    let mut seed_url: Option<String> = None;
+    let mut search_query: Option<String> = None;
+    let mut crawl_depth: Option<u32> = None;
+    let mut email_to: Vec<String> = Vec::new();
+    let mut email_message_id: Option<String> = None;
+    let mut email_thread_id: Option<String> = None;
+    let mut email_has_attachments: Option<bool> = None;
+    let mut feed_url: Option<String> = None;
+    let mut feed_item_id: Option<String> = None;
+    let mut pptx_slide_count: Option<u32> = None;
+    let mut pptx_has_notes: Option<bool> = None;
+    let mut subtitle_start_s: Option<f64> = None;
+    let mut subtitle_end_s: Option<f64> = None;
+    let mut subtitle_source_file: Option<String> = None;
+
+    match &provenance.format {
+        FormatProvenance::Web {
+            seed_url: s,
+            search_query: q,
+            crawl_depth: d,
+        } => {
+            seed_url = s.clone();
+            search_query = q.clone();
+            crawl_depth = *d;
+        }
+        FormatProvenance::Email {
+            to,
+            message_id,
+            thread_id,
+            has_attachments,
+        } => {
+            email_to = to.clone();
+            email_message_id = message_id.clone();
+            email_thread_id = thread_id.clone();
+            email_has_attachments = *has_attachments;
+        }
+        FormatProvenance::Feed {
+            feed_url: f,
+            item_id,
+        } => {
+            feed_url = f.clone();
+            feed_item_id = item_id.clone();
+        }
+        FormatProvenance::Subtitle {
+            start_s,
+            end_s,
+            source_file,
+        } => {
+            subtitle_start_s = *start_s;
+            subtitle_end_s = *end_s;
+            subtitle_source_file = source_file.clone();
+        }
+        FormatProvenance::Presentation {
+            slide_count,
+            has_notes,
+        } => {
+            pptx_slide_count = *slide_count;
+            pptx_has_notes = *has_notes;
+        }
+        FormatProvenance::Generic => {}
+    }
+
     PointPayload {
         text: chunk.text.clone(),
         url: url.to_string(),
@@ -197,26 +273,20 @@ pub(crate) fn build_point_payload(
         git_branch,
         external_id: provenance.external_id.clone(),
         platform_url: provenance.platform_url.clone(),
-        seed_url: provenance
-            .seed_url
-            .clone()
-            .or_else(|| result.metadata.seed_url.clone()),
-        search_query: provenance
-            .search_query
-            .clone()
-            .or_else(|| result.metadata.search_query.clone()),
-        crawl_depth: provenance.crawl_depth.or(result.metadata.crawl_depth),
-        email_to: provenance.email_to.clone(),
-        email_message_id: provenance.email_message_id.clone(),
-        email_thread_id: provenance.email_thread_id.clone(),
-        email_has_attachments: provenance.email_has_attachments,
-        feed_url: provenance.feed_url.clone(),
-        feed_item_id: provenance.feed_item_id.clone(),
-        pptx_slide_count: provenance.pptx_slide_count,
-        pptx_has_notes: provenance.pptx_has_notes,
-        subtitle_start_s: provenance.subtitle_start_s,
-        subtitle_end_s: provenance.subtitle_end_s,
-        subtitle_source_file: provenance.subtitle_source_file.clone(),
+        seed_url: seed_url.or_else(|| result.metadata.seed_url.clone()),
+        search_query: search_query.or_else(|| result.metadata.search_query.clone()),
+        crawl_depth: crawl_depth.or(result.metadata.crawl_depth),
+        email_to,
+        email_message_id,
+        email_thread_id,
+        email_has_attachments,
+        feed_url,
+        feed_item_id,
+        pptx_slide_count,
+        pptx_has_notes,
+        subtitle_start_s,
+        subtitle_end_s,
+        subtitle_source_file,
     }
 }
 
