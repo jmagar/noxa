@@ -9,7 +9,7 @@ use crate::store::{HashExistsResult, VectorStore};
 use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
 use super::QdrantStore;
-use super::http::{DeleteByFilterRequest, SearchRequest, SearchResponse, UpsertRequest};
+use super::http::{DeleteByFilterRequest, SearchParams, SearchRequest, SearchResponse, UpsertRequest};
 use super::payload::{point_to_qdrant_payload, search_filter, search_result_from_payload};
 use crate::url_util::normalize_url;
 
@@ -118,12 +118,19 @@ impl VectorStore for QdrantStore {
             "{}/collections/{}/points/search",
             self.base_url, self.collection
         );
+        // Knowledge: hnsw_ef=128 is below ef_construct=200 (Qdrant default collection
+        // config) — good recall/latency balance for interactive queries. Caller can
+        // override via SearchMetadataFilter::hnsw_ef; None falls back to this default.
+        let hnsw_ef = filter
+            .and_then(|f| f.hnsw_ef)
+            .unwrap_or(128);
         let body = SearchRequest {
             vector: vector.to_vec(),
             limit,
             with_payload: true,
             score_threshold: None,
             filter: search_filter(filter),
+            params: Some(SearchParams { hnsw_ef: Some(hnsw_ef) }),
         };
 
         let resp = self.client.post(&url).json(&body).send().await?;

@@ -170,6 +170,7 @@ async fn search_filters_by_landed_file_path_and_returns_it() {
         file_path: Some("/tmp/report.md".to_string()),
         last_modified: None,
         git_branch: None,
+        hnsw_ef: None,
     };
 
     let results = store
@@ -323,6 +324,7 @@ async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metada
         file_path: Some("/tmp/report.md".to_string()),
         last_modified: None,
         git_branch: None,
+        hnsw_ef: None,
     };
     let results = store
         .search(&[0.25, 0.75], 3, Some(&filter))

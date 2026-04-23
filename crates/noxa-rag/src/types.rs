@@ -182,6 +182,11 @@ impl SearchResult {
 }
 
 /// Narrow metadata filter for vector search.
+///
+/// `hnsw_ef` overrides the per-request HNSW search parameter sent to Qdrant.
+/// When `None`, the search layer uses 128 (good interactive-query default).
+/// Set higher (e.g. 256) for recall-sensitive batch workloads; lower (e.g. 64)
+/// for latency-critical paths where some recall loss is acceptable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SearchMetadataFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +195,10 @@ pub struct SearchMetadataFilter {
     pub last_modified: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+    /// Override HNSW ef parameter for this search request.
+    /// Default when None: 128. Qdrant collection default is ef_construct (200).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hnsw_ef: Option<usize>,
 }
 
 /// RAG-pipeline provenance carried alongside ExtractionResult through ingestion.

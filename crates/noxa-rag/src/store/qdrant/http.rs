@@ -51,6 +51,19 @@ pub(crate) struct DeleteByFilterRequest {
     pub filter: serde_json::Value,
 }
 
+/// Per-request HNSW search parameters sent to Qdrant.
+///
+/// Knowledge: Qdrant defaults `hnsw_ef` to `ef_construct` (200 in the default collection
+/// config) when not set — unnecessarily high for interactive queries. Setting it explicitly
+/// to 128 gives a good recall/speed balance while staying below ef_construct=200.
+/// `skip_serializing_if` keeps None fields out of the JSON body so Qdrant uses its
+/// own defaults for any unset knob.
+#[derive(Serialize)]
+pub(crate) struct SearchParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hnsw_ef: Option<usize>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct SearchRequest {
     pub vector: Vec<f32>,
@@ -59,6 +72,8 @@ pub(crate) struct SearchRequest {
     pub score_threshold: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<SearchParams>,
 }
 
 #[derive(Deserialize)]
