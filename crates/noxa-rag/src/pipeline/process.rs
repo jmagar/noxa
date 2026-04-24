@@ -173,7 +173,7 @@ pub(crate) async fn process_job(
         );
         return Ok(JobStats::default());
     }
-    let mut file = tokio::fs::File::open(&canonical).await?;
+    let file = tokio::fs::File::open(&canonical).await?;
     let file_meta = file.metadata().await?;
     let size = file_meta.len();
 
@@ -184,7 +184,15 @@ pub(crate) async fn process_job(
     }
 
     let mut file_bytes: Vec<u8> = Vec::with_capacity(size as usize);
-    file.read_to_end(&mut file_bytes).await?;
+    // Enforce the cap at I/O level — guards against grow-after-stat race where a
+    // writer appends bytes between the metadata() check and read_to_end().
+    file.take(MAX_FILE_SIZE_BYTES + 1)
+        .read_to_end(&mut file_bytes)
+        .await?;
+    if file_bytes.len() as u64 > MAX_FILE_SIZE_BYTES {
+        tracing::warn!(path = ?job.path, "file exceeded 50MB after read (grow-after-stat), skipping");
+        return Ok(JobStats::default());
+    }
     let parse_ms = t0.elapsed().as_millis() as u64;
 
     // Compute xxHash3 of raw bytes before file_bytes is moved into parse_file.
@@ -239,16 +247,20 @@ pub(crate) async fn process_job(
     }
     let url = crate::url_util::normalize_url(&raw_url);
 
+    // Freeze result in Arc: no further mutations, and the chunker closure needs
+    // 'static ownership while we still need &result for build_point_payload below.
+    let result = Arc::new(result);
+
     let t1 = std::time::Instant::now();
     // KNOWLEDGE: chunker tokenization is CPU-bound (HuggingFace BPE). Wrap in
     // spawn_blocking to avoid blocking async Tokio worker threads — same pattern
     // as parse/mod.rs for PDF/DOCX. See bead noxa-3fi.2.
     let chunks = {
-        let result_clone = result.clone();
+        let result_for_chunk = Arc::clone(&result);
         let config_chunker = config.chunker.clone();
         let tokenizer = Arc::clone(tokenizer);
         tokio::task::spawn_blocking(move || {
-            crate::chunker::chunk(&result_clone, &config_chunker, &tokenizer)
+            crate::chunker::chunk(&result_for_chunk, &config_chunker, &tokenizer)
         })
         .await
         .map_err(|e| RagError::Generic(format!("chunker panicked: {e}")))?
@@ -292,7 +304,7 @@ pub(crate) async fn process_job(
     let n_chunks = chunks.len();
     let points: Vec<Point> = chunks
         .iter()
-        .zip(vectors.iter())
+        .zip(vectors.into_iter())
         .enumerate()
         .map(|(i, (chunk, vector))| {
             let id = uuid::Uuid::new_v5(
@@ -301,10 +313,10 @@ pub(crate) async fn process_job(
             );
             Point {
                 id,
-                vector: vector.clone(),
+                vector,
                 payload: parse::build_point_payload(
                     chunk,
-                    &result,
+                    &*result,
                     git_branch.clone(),
                     &parsed.provenance,
                     &url,

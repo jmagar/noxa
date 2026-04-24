@@ -163,25 +163,19 @@ fn send_job(
     tx: &async_channel::Sender<PipelineJob>,
     shutdown: &tokio_util::sync::CancellationToken,
 ) {
-    let mut pending = job;
-    let mut saturated_logged = false;
-    loop {
-        match tx.try_send(pending) {
-            Ok(()) => return,
-            Err(async_channel::TrySendError::Full(j)) => {
-                if shutdown.is_cancelled() {
-                    return;
-                }
-                if !saturated_logged {
-                    tracing::warn!(
-                        "job queue saturated (256/256), backing off — embed/upsert catching up"
-                    );
-                    saturated_logged = true;
-                }
-                pending = j;
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(async_channel::TrySendError::Closed(_)) => return,
+    if shutdown.is_cancelled() {
+        return;
+    }
+    match tx.try_send(job) {
+        Ok(()) => return,
+        Err(async_channel::TrySendError::Closed(_)) => return,
+        Err(async_channel::TrySendError::Full(j)) => {
+            tracing::warn!("job queue saturated (256/256), backing off — embed/upsert catching up");
+            // Park the blocking thread on the channel's condvar until a slot opens.
+            // Zero CPU overhead vs. the previous 10ms-sleep spin. Safe to call from
+            // spawn_blocking. Returns Err only when all receivers are dropped (shutdown
+            // drain), at which point we exit cleanly.
+            let _ = tx.send_blocking(j);
         }
     }
 }

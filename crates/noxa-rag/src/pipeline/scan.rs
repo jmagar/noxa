@@ -123,20 +123,21 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
             url: Option<String>,
             content_hash: Option<String>,
         }
-        if let Ok(bytes) = std::fs::read(path)
-            && let Ok(q) = serde_json::from_slice::<Q>(&bytes)
-        {
-            let hash = q
-                .metadata
-                .content_hash
-                .unwrap_or_else(|| format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&bytes)));
-            if let Some(url) = q.metadata.url
-                && !url.is_empty()
-            {
-                return Some((hash, url));
+        // Use BufReader + from_reader to avoid allocating the full file in memory —
+        // O(8KB buffer) instead of O(file_size). When content_hash is absent, fall
+        // through to the mtime+size key below (re-indexing on collision is acceptable).
+        if let Ok(file) = std::fs::File::open(path) {
+            let reader = std::io::BufReader::new(file);
+            if let Ok(q) = serde_json::from_reader::<_, Q>(reader) {
+                if let Some(hash) = q.metadata.content_hash
+                    && let Some(url) = q.metadata.url
+                    && !url.is_empty()
+                {
+                    return Some((hash, url));
+                }
             }
         }
-        // Fall through to mtime+size key below if JSON parse failed or URL missing.
+        // Fall through to mtime+size if JSON parse failed, or url/content_hash missing.
     }
 
     // Non-JSON (and JSON fallback) branch: use mtime+size as a lightweight dedup key
