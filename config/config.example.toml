@@ -111,3 +111,10 @@ max_chunks_per_page = 100
 embed_concurrency = 4
 # Must be an absolute path — the systemd daemon runs with CWD = /
 # failed_jobs_log = "/home/user/.noxa/rag-failed.jsonl"
+
+# UUID namespace for deterministic Qdrant point IDs (UUIDv5 keyed on URL + chunk index).
+# Default: auto-generated per-deployment (random UUIDv4). Without this, point IDs will
+# change across daemon restarts, which may cause duplicate entries in Qdrant.
+# Override here only if you need stable IDs across re-indexing (e.g. after a wipe and reload).
+# Generate a value with: python3 -c "import uuid; print(uuid.uuid4())"
+# uuid_namespace = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"

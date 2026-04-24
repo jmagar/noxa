@@ -6,25 +6,36 @@ use crate::error::RagError;
 /// Wrapper that owns the `[rag]` section of noxa.toml.
 #[derive(Debug, Deserialize)]
 struct TomlRoot {
-    rag: Option<RagConfig>,
+    rag: Option<RagConfigRaw>,
+}
+
+/// Raw deserialization struct — uuid_namespace is `Option` so we can detect
+/// whether the user explicitly set it. After `load_config` resolves it, callers
+/// use `RagConfig` which always has a concrete `uuid_namespace`.
+#[derive(Debug, Clone, Deserialize)]
+struct RagConfigRaw {
+    source: SourceConfig,
+    embed_provider: EmbedProviderConfig,
+    vector_store: VectorStoreConfig,
+    chunker: ChunkerConfig,
+    pipeline: PipelineConfig,
+    /// Optional — absence means "generate a random namespace at startup".
+    uuid_namespace: Option<uuid::Uuid>,
 }
 
 /// RAG pipeline configuration from the `[rag]` section of noxa.toml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RagConfig {
     pub source: SourceConfig,
     pub embed_provider: EmbedProviderConfig,
     pub vector_store: VectorStoreConfig,
     pub chunker: ChunkerConfig,
     pub pipeline: PipelineConfig,
-    /// UUID namespace for deterministic point IDs.
-    /// Default: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
-    #[serde(default = "default_uuid_namespace")]
+    /// UUID namespace for deterministic Qdrant point IDs (UUIDv5 keyed on URL+chunk index).
+    ///
+    /// Auto-generated per-deployment when absent from config. Point IDs will differ
+    /// across restarts unless `rag.uuid_namespace` is pinned in `noxa.toml`.
     pub uuid_namespace: uuid::Uuid,
-}
-
-fn default_uuid_namespace() -> uuid::Uuid {
-    uuid::Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap()
 }
 
 #[non_exhaustive]
@@ -253,9 +264,35 @@ pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     let root: TomlRoot = toml::from_str(&content)
         .map_err(|e| RagError::Config(format!("config parse error: {}", e)))?;
 
-    let mut config = root.rag.ok_or_else(|| {
+    let raw = root.rag.ok_or_else(|| {
         RagError::Config(format!("missing [rag] section in {}", path.display()))
     })?;
+
+    // Resolve uuid_namespace: use the explicit value from config, or generate a
+    // random one for this deployment. A random namespace means point IDs are
+    // unpredictable to external observers but will change across daemon restarts.
+    let uuid_namespace = match raw.uuid_namespace {
+        Some(ns) => ns,
+        None => {
+            let ns = uuid::Uuid::new_v4();
+            tracing::warn!(
+                uuid_namespace = %ns,
+                "Using auto-generated UUID namespace — Qdrant point IDs will change on \
+                 restart. Set `rag.uuid_namespace = \"{}\"` in noxa.toml for stable IDs.",
+                ns
+            );
+            ns
+        }
+    };
+
+    let mut config = RagConfig {
+        source: raw.source,
+        embed_provider: raw.embed_provider,
+        vector_store: raw.vector_store,
+        chunker: raw.chunker,
+        pipeline: raw.pipeline,
+        uuid_namespace,
+    };
 
     normalize_source(&mut config)?;
     validate_supported_backends(&config)?;
