@@ -2,6 +2,43 @@ use crate::error::RagError;
 
 use super::{IngestionProvenance, ParsedFile, extract_ingestion_provenance, make_text_result};
 
+pub(crate) fn parse_ipynb_file(
+    bytes: &[u8],
+    url: String,
+    title: String,
+) -> Result<ParsedFile, RagError> {
+    let v: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| RagError::Parse(format!("ipynb JSON parse: {e}")))?;
+
+    let cells = v["cells"]
+        .as_array()
+        .ok_or_else(|| RagError::Parse("ipynb: missing 'cells' array".to_string()))?;
+
+    let mut parts: Vec<String> = Vec::new();
+    for cell in cells {
+        let cell_type = cell["cell_type"].as_str().unwrap_or("");
+        if !matches!(cell_type, "markdown" | "code") {
+            continue;
+        }
+        let source = match &cell["source"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(lines) => lines.iter().filter_map(|l| l.as_str()).collect(),
+            _ => continue,
+        };
+        let trimmed = source.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+
+    let text = parts.join("\n\n");
+    let word_count = text.split_whitespace().count();
+    Ok(ParsedFile {
+        extraction: make_text_result(text.clone(), text, url, Some(title), "notebook", word_count),
+        provenance: IngestionProvenance::default(),
+    })
+}
+
 pub(crate) fn parse_json_file(
     bytes: &[u8],
     file_url: String,

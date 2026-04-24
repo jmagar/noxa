@@ -9,11 +9,11 @@ mod binary;
 mod rich;
 mod text;
 
-pub(crate) use binary::{parse_ipynb_file, parse_office_zip_file, parse_pdf_file};
+pub(crate) use binary::{parse_office_zip_file, parse_pdf_file};
 pub(crate) use rich::{parse_email_file, parse_feed_file, parse_subtitle_file};
 pub(crate) use text::{
-    extract_xml_text, parse_html_file, parse_json_file, parse_jsonl_file, parse_log_file,
-    parse_markdown_file, parse_plain_text_file, parse_xml_file,
+    extract_xml_text, parse_html_file, parse_ipynb_file, parse_json_file, parse_jsonl_file,
+    parse_log_file, parse_markdown_file, parse_plain_text_file, parse_xml_file,
 };
 
 #[derive(Debug, Clone)]
