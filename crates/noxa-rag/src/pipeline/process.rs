@@ -333,54 +333,51 @@ pub(crate) async fn process_job(
     let _guard = url_lock.lock().await;
 
     let new_ids: Vec<uuid::Uuid> = points.iter().map(|p| p.id).collect();
-    let t3 = std::time::Instant::now();
-    let store_fut = async {
-        let t4 = std::time::Instant::now();
-        let upserted = store.upsert(points).await.map_err(|e| {
-            tracing::error!(url = %url, error = %e, "upsert failed");
-            e
-        })?;
-        let upsert_ms = t4.elapsed().as_millis() as u64;
-
-        store
-            .delete_stale_by_url(&url, &new_ids)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    url = %url,
-                    error = %e,
-                    "stale cleanup failed after upsert — duplicate chunks until next file event"
-                );
+    let t4 = std::time::Instant::now();
+    // Cooperative cancellation around upsert+delete so shutdown does not strand
+    // in-flight HTTP calls past the drain timeout. On cancellation, implicit drop
+    // of _guard and url_lock releases the per-URL mutex; heartbeat sweeps the
+    // stale DashMap entry within 60s.
+    let store_result: Result<u64, RagError> = tokio::select! {
+        r = async {
+            let upserted = store.upsert(points).await.map_err(|e| {
+                tracing::error!(url = %url, error = %e, "upsert failed");
                 e
             })?;
-        let delete_ms = t3.elapsed().as_millis() as u64 - upsert_ms;
+            let upsert_ms = t4.elapsed().as_millis() as u64;
 
-        tracing::info!(
-            url = %url,
-            chunks = upserted,
-            embed_tokens = total_tokens,
-            embed_tokens_per_sec,
-            parse_ms,
-            chunk_ms,
-            embed_ms,
-            delete_ms,
-            upsert_ms,
-            total_ms = job_start.elapsed().as_millis() as u64,
-            "indexed"
-        );
+            let t5 = std::time::Instant::now();
+            store
+                .delete_stale_by_url(&url, &new_ids)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        url = %url,
+                        error = %e,
+                        "stale cleanup failed after upsert — duplicate chunks until next file event"
+                    );
+                    e
+                })?;
+            let delete_ms = t5.elapsed().as_millis() as u64;
 
-        Ok::<u64, RagError>(upsert_ms)
-    };
+            tracing::info!(
+                url = %url,
+                chunks = upserted,
+                embed_tokens = total_tokens,
+                embed_tokens_per_sec,
+                parse_ms,
+                chunk_ms,
+                embed_ms,
+                delete_ms,
+                upsert_ms,
+                total_ms = job_start.elapsed().as_millis() as u64,
+                "indexed"
+            );
 
-    // Cooperative cancellation around upsert+delete so shutdown does not strand
-    // in-flight HTTP calls past the drain timeout.
-    let store_result: Result<u64, RagError> = tokio::select! {
-        r = store_fut => r,
+            Ok::<u64, RagError>(upsert_ms)
+        } => r,
         _ = shutdown.cancelled() => {
             tracing::debug!(url = %url, "upsert cancelled by shutdown");
-            drop(_guard);
-            drop(url_lock);
-            url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
             return Ok(JobStats::default());
         }
     };

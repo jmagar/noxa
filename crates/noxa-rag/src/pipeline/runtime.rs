@@ -196,14 +196,14 @@ fn setup_watcher(
 
     let mut debouncer =
         new_debouncer(Duration::from_millis(debounce_ms), None, BoundedSender(notify_tx))
-            .map_err(|e| RagError::Generic(format!("failed to create fs watcher: {e}")))?;
+            .map_err(|e| RagError::WatcherSetup(format!("failed to create fs watcher: {e}")))?;
 
     for watch_dir in watch_dirs {
         debouncer
             .watcher()
             .watch(watch_dir, RecursiveMode::Recursive)
             .map_err(|e| {
-                RagError::Generic(format!(
+                RagError::WatcherSetup(format!(
                     "failed to watch directory {}: {e}",
                     watch_dir.display()
                 ))
@@ -211,9 +211,21 @@ fn setup_watcher(
         tracing::info!(path = %watch_dir.display(), "watching directory recursively");
     }
 
+    // Capture watch_dirs for confinement checks in the bridge closure.
+    let watch_dirs_owned: Vec<PathBuf> = watch_dirs.to_vec();
+
     let bridge_handle = tokio::task::spawn_blocking(move || {
         // Keep debouncer alive for the duration of the bridge.
         let _debouncer = debouncer;
+
+        // Returns true iff `path`'s parent can be canonicalized within a watch dir.
+        // Used to guard delete events — the deleted file itself cannot be canonicalized.
+        let is_delete_path_confined = |path: &std::path::Path| -> bool {
+            path.parent()
+                .and_then(|p| p.canonicalize().ok())
+                .map(|canon| watch_dirs_owned.iter().any(|d| canon.starts_with(d)))
+                .unwrap_or(false)
+        };
 
         loop {
             match notify_rx.recv_timeout(Duration::from_millis(250)) {
@@ -235,7 +247,9 @@ fn setup_watcher(
                         {
                             let old_path = &event.paths[0];
                             let new_path = event.paths[1].clone();
-                            if scan::has_indexable_extension(old_path) {
+                            if scan::has_indexable_extension(old_path)
+                                && is_delete_path_confined(old_path)
+                            {
                                 let span = tracing::info_span!(
                                     "delete_job",
                                     path = %old_path.display()
@@ -265,7 +279,9 @@ fn setup_watcher(
                         // directly (unlike debouncer-mini which coalesced everything into Any).
                         if matches!(kind, notify::EventKind::Remove(_)) {
                             for path in &event.paths {
-                                if scan::has_indexable_extension(path) {
+                                if scan::has_indexable_extension(path)
+                                    && is_delete_path_confined(path)
+                                {
                                     let span = tracing::info_span!(
                                         "delete_job",
                                         path = %path.display()
@@ -474,15 +490,16 @@ fn spawn_heartbeat(
                             "url_locks heartbeat sweep"
                         );
                     }
+                    let snap = counters.snapshot();
                     tracing::info!(
-                        indexed       = counters.files_indexed.load(std::sync::atomic::Ordering::Relaxed),
-                        failed        = counters.files_failed.load(std::sync::atomic::Ordering::Relaxed),
-                        parse_failures = counters.parse_failures.load(std::sync::atomic::Ordering::Relaxed),
-                        parse_ms      = counters.total_parse_ms.load(std::sync::atomic::Ordering::Relaxed),
-                        chunk_ms      = counters.total_chunk_ms.load(std::sync::atomic::Ordering::Relaxed),
-                        embed_ms      = counters.total_embed_ms.load(std::sync::atomic::Ordering::Relaxed),
-                        upsert_ms     = counters.total_upsert_ms.load(std::sync::atomic::Ordering::Relaxed),
-                        url_locks     = after,
+                        indexed        = snap.indexed,
+                        failed         = snap.failed,
+                        parse_failures = snap.parse_failures,
+                        parse_ms       = snap.total_parse_ms,
+                        chunk_ms       = snap.total_chunk_ms,
+                        embed_ms       = snap.total_embed_ms,
+                        upsert_ms      = snap.total_upsert_ms,
+                        url_locks      = after,
                         uptime_m,
                         "pipeline alive"
                     );
@@ -511,54 +528,21 @@ async fn drain_and_report(
         Ok(_) => tracing::info!("pipeline shut down cleanly"),
         Err(_) => {
             tracing::warn!("workers did not drain within 10s, forcing exit");
-            return Err(RagError::Generic(
-                "workers did not drain within 10s".to_string(),
-            ));
+            return Err(RagError::DrainTimeout);
         }
     }
 
-    let indexed = pipeline
-        .counters
-        .files_indexed
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let failed = pipeline
-        .counters
-        .files_failed
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let parse_failures = pipeline
-        .counters
-        .parse_failures
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let chunks = pipeline
-        .counters
-        .total_chunks
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let embed_ms = pipeline
-        .counters
-        .total_embed_ms
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let upsert_ms = pipeline
-        .counters
-        .total_upsert_ms
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let avg_embed_ms = if indexed > 0 {
-        embed_ms / indexed as u64
-    } else {
-        0
-    };
-    let avg_upsert_ms = if indexed > 0 {
-        upsert_ms / indexed as u64
-    } else {
-        0
-    };
+    let snap = pipeline.counters.snapshot();
+    let avg_embed_ms = if snap.indexed > 0 { snap.total_embed_ms / snap.indexed as u64 } else { 0 };
+    let avg_upsert_ms = if snap.indexed > 0 { snap.total_upsert_ms / snap.indexed as u64 } else { 0 };
     tracing::info!(
-        indexed,
-        failed,
-        parse_failures,
-        chunks,
+        indexed        = snap.indexed,
+        failed         = snap.failed,
+        parse_failures = snap.parse_failures,
+        chunks         = snap.total_chunks,
         avg_embed_ms,
         avg_upsert_ms,
-        duration_s = session_start.elapsed().as_secs(),
+        duration_s     = session_start.elapsed().as_secs(),
         "session complete"
     );
 

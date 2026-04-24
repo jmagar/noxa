@@ -48,21 +48,6 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Vec<SearchResult>, RagError>;
     /// Return the total number of indexed points in the collection.
     async fn collection_point_count(&self) -> Result<u64, RagError>;
-    /// Return true iff there is at least one point with both `url` and `content_hash`
-    /// matching the given values. Used by the startup delta scan to skip already-indexed
-    /// files whose content has not changed.
-    ///
-    /// Deprecated in favour of [`VectorStore::url_with_hash_exists_checked`] which
-    /// distinguishes backend failures from "not indexed".  Kept for backwards
-    /// compatibility; the default implementation delegates to the checked variant.
-    async fn url_with_hash_exists(&self, url: &str, hash: &str) -> Result<bool, RagError> {
-        match self.url_with_hash_exists_checked(url, hash).await {
-            HashExistsResult::Exists => Ok(true),
-            HashExistsResult::NotIndexed => Ok(false),
-            HashExistsResult::BackendError(msg) => Err(RagError::Store(msg)),
-        }
-    }
-
     /// Three-way existence check used by the startup delta scan.
     ///
     /// Returns [`HashExistsResult::BackendError`] instead of `Ok(false)` on any

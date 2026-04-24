@@ -51,7 +51,7 @@ pub(crate) fn is_indexable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
-    has_indexable_extension(path) && path.exists()
+    has_indexable_extension(path)
 }
 
 pub(crate) fn collect_indexable_paths(path: &Path) -> Vec<PathBuf> {
@@ -207,6 +207,12 @@ fn git_head_path(git_entry: &Path) -> Option<PathBuf> {
     if metadata.is_file() {
         let contents = std::fs::read_to_string(git_entry).ok()?;
         let gitdir = contents.trim().strip_prefix("gitdir:")?.trim();
+        // Reject absolute gitdir values — they can point outside the repository tree.
+        // Legitimate worktrees always use relative paths (e.g. "../.git/worktrees/name").
+        if std::path::Path::new(gitdir).is_absolute() {
+            tracing::warn!(gitdir = %gitdir, "gitdir pointer is absolute — skipping to prevent path escape");
+            return None;
+        }
         let head = git_entry.parent()?.join(gitdir).join("HEAD");
         return head.exists().then_some(head);
     }

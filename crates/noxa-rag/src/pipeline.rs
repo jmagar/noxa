@@ -15,6 +15,17 @@ mod process;
 mod runtime;
 mod scan;
 
+struct CounterSnapshot {
+    indexed: usize,
+    failed: usize,
+    parse_failures: usize,
+    total_chunks: usize,
+    total_parse_ms: u64,
+    total_chunk_ms: u64,
+    total_embed_ms: u64,
+    total_upsert_ms: u64,
+}
+
 #[derive(Default)]
 struct SessionCounters {
     files_indexed: std::sync::atomic::AtomicUsize,
@@ -27,6 +38,22 @@ struct SessionCounters {
     total_chunk_ms: std::sync::atomic::AtomicU64,
     total_embed_ms: std::sync::atomic::AtomicU64,
     total_upsert_ms: std::sync::atomic::AtomicU64,
+}
+
+impl SessionCounters {
+    fn snapshot(&self) -> CounterSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        CounterSnapshot {
+            indexed: self.files_indexed.load(Relaxed),
+            failed: self.files_failed.load(Relaxed),
+            parse_failures: self.parse_failures.load(Relaxed),
+            total_chunks: self.total_chunks.load(Relaxed),
+            total_parse_ms: self.total_parse_ms.load(Relaxed),
+            total_chunk_ms: self.total_chunk_ms.load(Relaxed),
+            total_embed_ms: self.total_embed_ms.load(Relaxed),
+            total_upsert_ms: self.total_upsert_ms.load(Relaxed),
+        }
+    }
 }
 
 struct IndexJob {
