@@ -82,6 +82,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Ensure all watch_dirs exist (create if missing — convenience for first-run).
     let watch_dirs = match &config.source {
         SourceConfig::FsWatcher { watch_dirs, .. } => watch_dirs.clone(),
+        _ => {
+            return Err("unsupported source type in config".to_string().into());
+        }
     };
 
     for watch_dir in &watch_dirs {

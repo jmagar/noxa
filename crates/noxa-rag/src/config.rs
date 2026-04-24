@@ -27,6 +27,7 @@ fn default_uuid_namespace() -> uuid::Uuid {
     uuid::Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap()
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceConfig {
