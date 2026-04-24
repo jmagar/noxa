@@ -3,9 +3,12 @@
 use crate::embed::EmbedProvider;
 use crate::error::RagError;
 use async_trait::async_trait;
+use futures::StreamExt;
 
 /// Batch size tuned for RTX 4070 (~3x throughput vs default 32).
 const BATCH_SIZE: usize = 96;
+/// Concurrent in-flight embed batches — overlaps HTTP latency with GPU compute.
+const EMBED_PIPELINE_DEPTH: usize = 3;
 /// Default embedding dimensions for Qwen3-0.6B.
 const DEFAULT_DIMENSIONS: usize = 1024;
 /// Per-batch request timeout.
@@ -21,33 +24,38 @@ fn should_retry(status: u16, attempt: u32) -> bool {
 struct EmbedRequest<'a> {
     inputs: &'a [String],
     truncate: bool,
+    // "Right" drops from the tail of the user content, preserving the beginning of the
+    // document AND ensuring EOS remains the final token — required for Qwen3 last-token
+    // (pooling_mode_lasttoken = true) pooling.
+    truncation_direction: &'static str,
     normalize: bool,
 }
 
 pub struct TeiProvider {
     pub(crate) client: reqwest::Client,
     pub(crate) url: String,
-    pub(crate) _model: String,
     pub(crate) dimensions: usize,
     pub(crate) auth_token: Option<String>,
+    /// If set, truncate all returned vectors to this many dimensions (MRL).
+    pub(crate) configured_dimensions: Option<usize>,
 }
 
 impl TeiProvider {
     /// Construct with hardcoded dimensions (1024 for Qwen3-0.6B).
-    pub fn new(url: String, model: String, auth_token: Option<String>) -> Self {
+    pub fn new(url: String, _model: String, auth_token: Option<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             url,
-            _model: model,
             dimensions: DEFAULT_DIMENSIONS,
             auth_token,
+            configured_dimensions: None,
         }
     }
 
     /// Construct by probing /embed with a single dummy text to discover dimensions.
     pub async fn new_with_probe(
         url: String,
-        model: String,
+        _model: String,
         client: reqwest::Client,
         auth_token: Option<String>,
     ) -> Result<Self, RagError> {
@@ -55,6 +63,7 @@ impl TeiProvider {
         let req = EmbedRequest {
             inputs: &dummy,
             truncate: true,
+            truncation_direction: "Right",
             normalize: true,
         };
         let mut probe_req = client
@@ -86,10 +95,71 @@ impl TeiProvider {
         Ok(Self {
             client,
             url,
-            _model: model,
             dimensions,
             auth_token,
+            configured_dimensions: None,
         })
+    }
+
+    /// Apply the configured MRL dimension truncation if set.
+    pub fn with_configured_dimensions(mut self, dims: Option<usize>) -> Self {
+        self.configured_dimensions = dims;
+        self
+    }
+
+    /// GET /info and warn if TEI's max_batch_tokens is too small for the client batch size.
+    ///
+    /// If max_batch_tokens < BATCH_SIZE * target_tokens, TEI will internally re-split every
+    /// client batch, defeating client-side batching and adding tokenization overhead.
+    /// Correct value for BATCH_SIZE=96, target_tokens=512: at least 49152 (recommend 65536).
+    pub async fn check_max_batch_tokens(&self, target_tokens: usize) {
+        let url = format!("{}/info", self.url);
+        let resp = match self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                tracing::debug!(status = %r.status(), "TEI /info returned non-200; skipping batch-token check");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "TEI /info not reachable; skipping batch-token check");
+                return;
+            }
+        };
+
+        let json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "TEI /info JSON parse failed; skipping batch-token check");
+                return;
+            }
+        };
+
+        if let Some(max_batch_tokens) = json.get("max_batch_tokens").and_then(|v| v.as_u64()) {
+            let needed = (BATCH_SIZE * target_tokens) as u64;
+            if max_batch_tokens < needed {
+                tracing::warn!(
+                    tei_max_batch_tokens = max_batch_tokens,
+                    client_batch_size = BATCH_SIZE,
+                    target_tokens,
+                    needed,
+                    "TEI max_batch_tokens too small — TEI will re-split client batches internally. \
+                     Restart TEI with --max-batch-tokens {} (recommend 65536 for RTX 4070)",
+                    needed,
+                );
+            } else {
+                tracing::debug!(
+                    tei_max_batch_tokens = max_batch_tokens,
+                    needed,
+                    "TEI max_batch_tokens OK"
+                );
+            }
+        }
     }
 
     /// GET /health — must return 200 within 2 s.
@@ -129,6 +199,7 @@ impl TeiProvider {
         let req_body = EmbedRequest {
             inputs: batch,
             truncate: true,
+            truncation_direction: "Right",
             normalize: true,
         };
 
@@ -256,16 +327,37 @@ impl EmbedProvider for TeiProvider {
         }
 
         let total_batches = texts.len().div_ceil(BATCH_SIZE);
-        let mut results: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
-        for (batch_idx, chunk) in texts.chunks(BATCH_SIZE).enumerate() {
-            results.extend(
-                self.embed_batch_adaptive(chunk, batch_idx, total_batches)
-                    .await?,
-            );
+        // Keep EMBED_PIPELINE_DEPTH batches in-flight concurrently so HTTP
+        // round-trip latency overlaps with GPU compute on the TEI server.
+        // buffered() preserves batch ordering.
+        let batches: Vec<(usize, Vec<String>)> = texts
+            .chunks(BATCH_SIZE)
+            .enumerate()
+            .map(|(i, chunk)| (i, chunk.to_vec()))
+            .collect();
+
+        let results: Vec<Vec<Vec<f32>>> = futures::stream::iter(batches)
+            .map(|(batch_idx, batch)| async move {
+                self.embed_batch_adaptive(&batch, batch_idx, total_batches)
+                    .await
+            })
+            .buffered(EMBED_PIPELINE_DEPTH)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        let mut flat: Vec<Vec<f32>> = results.into_iter().flatten().collect();
+
+        // MRL truncation: if a dimension override is configured, truncate client-side.
+        if let Some(target) = self.configured_dimensions {
+            for vec in &mut flat {
+                vec.truncate(target);
+            }
         }
 
-        Ok(results)
+        Ok(flat)
     }
 }
 
@@ -394,9 +486,9 @@ mod tests {
         let provider = TeiProvider {
             client: reqwest::Client::new(),
             url: base_url,
-            _model: "test-model".to_string(),
             dimensions: DEFAULT_DIMENSIONS,
             auth_token: None,
+            configured_dimensions: None,
         };
         let texts: Vec<String> = (0..20).map(|index| format!("chunk {index}")).collect();
 

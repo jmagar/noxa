@@ -9,17 +9,41 @@ use crate::store::{HashExistsResult, VectorStore};
 use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
 use super::QdrantStore;
-use super::http::{DeleteByFilterRequest, SearchRequest, SearchResponse, UpsertRequest};
+use super::http::{DeleteByFilterRequest, QuantizationSearchParams, SearchParams, SearchRequest, SearchResponse, UpsertRequest};
 use super::payload::{point_to_qdrant_payload, search_filter, search_result_from_payload};
 use crate::url_util::normalize_url;
 
+/// Error-check a Qdrant HTTP response: if the status is non-2xx, read the
+/// body preview and return `RagError::Store("<method> failed: <preview>")`.
+/// Otherwise return the response so the caller can continue reading its body.
+///
+/// `url_with_hash_exists_checked` and `url_with_file_hash_exists_checked`
+/// intentionally use their own bespoke error handling (returning
+/// `HashExistsResult::BackendError` instead of `RagError`) and do NOT go
+/// through this helper.
+async fn check_response(
+    resp: reqwest::Response,
+    method: &str,
+) -> Result<reqwest::Response, RagError> {
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let preview: String = text.chars().take(512).collect();
+        return Err(RagError::Store(format!("{method} failed: {preview}")));
+    }
+    Ok(resp)
+}
+
 #[async_trait]
 impl VectorStore for QdrantStore {
-    /// PUT /collections/{name}/points?wait=true. Returns the number of points written.
+    /// PUT /collections/{name}/points?wait=false — idempotent with deterministic
+    /// UUID v5 point IDs, so we do not block on WAL+index flush. This saves the
+    /// ~30ms RTT per upsert that `wait=true` imposes. Delete operations still
+    /// use `wait=true` because stale-chunk cleanup must observably complete
+    /// before the URL-lock is released.
     async fn upsert(&self, points: Vec<Point>) -> Result<usize, RagError> {
         let n = points.len();
         let url = format!(
-            "{}/collections/{}/points?wait=true",
+            "{}/collections/{}/points?wait=false",
             self.base_url, self.collection
         );
 
@@ -37,11 +61,7 @@ impl VectorStore for QdrantStore {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!("upsert failed: {preview}")));
-        }
+        check_response(resp, "upsert").await?;
 
         Ok(n)
     }
@@ -60,11 +80,7 @@ impl VectorStore for QdrantStore {
         };
 
         let resp = self.client.post(&endpoint).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!("delete_by_url failed: {preview}")));
-        }
+        check_response(resp, "delete_by_url").await?;
 
         Ok(())
     }
@@ -97,13 +113,7 @@ impl VectorStore for QdrantStore {
             .json(&DeleteByFilterRequest { filter })
             .send()
             .await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!(
-                "delete_stale_by_url failed: {preview}"
-            )));
-        }
+        check_response(resp, "delete_stale_by_url").await?;
 
         Ok(())
     }
@@ -118,20 +128,30 @@ impl VectorStore for QdrantStore {
             "{}/collections/{}/points/search",
             self.base_url, self.collection
         );
+        // Knowledge: hnsw_ef=128 is below ef_construct=200 (Qdrant default collection
+        // config) — good recall/latency balance for interactive queries. Caller can
+        // override via SearchMetadataFilter::hnsw_ef; None falls back to this default.
+        let hnsw_ef = filter
+            .and_then(|f| f.hnsw_ef)
+            .unwrap_or(128);
         let body = SearchRequest {
             vector: vector.to_vec(),
             limit,
             with_payload: true,
             score_threshold: None,
             filter: search_filter(filter),
+            params: Some(SearchParams {
+                hnsw_ef: Some(hnsw_ef),
+                quantization: Some(QuantizationSearchParams {
+                    ignore: false,
+                    rescore: true,
+                    oversampling: 2.0,
+                }),
+            }),
         };
 
         let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!("search failed: {preview}")));
-        }
+        let resp = check_response(resp, "search").await?;
 
         let response: SearchResponse = resp.json().await?;
         let mut decode_failures: u64 = 0;
@@ -181,13 +201,7 @@ impl VectorStore for QdrantStore {
     async fn collection_point_count(&self) -> Result<u64, RagError> {
         let endpoint = format!("{}/collections/{}", self.base_url, self.collection);
         let resp = self.client.get(&endpoint).send().await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let preview: String = text.chars().take(512).collect();
-            return Err(RagError::Store(format!(
-                "collection_point_count failed: {preview}"
-            )));
-        }
+        let resp = check_response(resp, "collection_point_count").await?;
         let body: serde_json::Value = resp
             .json()
             .await
@@ -271,6 +285,90 @@ impl VectorStore for QdrantStore {
                 "missing or non-integer result.count in Qdrant response".to_string(),
             );
         };
+        if count > 0 {
+            HashExistsResult::Exists
+        } else {
+            HashExistsResult::NotIndexed
+        }
+    }
+
+    async fn url_with_file_hash_exists_checked(&self, url: &str, file_hash: &str) -> HashExistsResult {
+        if file_hash.is_empty() {
+            return HashExistsResult::NotIndexed;
+        }
+        let normalized = normalize_url(url);
+        let endpoint = format!(
+            "{}/collections/{}/points/count",
+            self.base_url, self.collection
+        );
+        let body = serde_json::json!({
+            "filter": {
+                "must": [
+                    { "key": "url", "match": { "value": normalized } },
+                    { "key": "file_hash", "match": { "value": file_hash } }
+                ]
+            }
+        });
+
+        let resp = match self
+            .client
+            .post(&endpoint)
+            .timeout(std::time::Duration::from_secs(5))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    url = %normalized,
+                    error = %e,
+                    "url_with_file_hash_exists_checked: network error — treating as backend error"
+                );
+                return HashExistsResult::BackendError(format!("network error: {e}"));
+            }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let preview: String = text.chars().take(512).collect();
+            tracing::warn!(
+                status,
+                url = %normalized,
+                body = %preview,
+                "url_with_file_hash_exists_checked: non-success HTTP — treating as backend error"
+            );
+            return HashExistsResult::BackendError(format!("HTTP {status}: {preview}"));
+        }
+
+        let json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    url = %normalized,
+                    error = %e,
+                    "url_with_file_hash_exists_checked: JSON parse error — treating as backend error"
+                );
+                return HashExistsResult::BackendError(format!("JSON parse error: {e}"));
+            }
+        };
+
+        let Some(count) = json
+            .get("result")
+            .and_then(|r| r.get("count"))
+            .and_then(|c| c.as_u64())
+        else {
+            tracing::warn!(
+                url = %normalized,
+                body = %json,
+                "url_with_file_hash_exists_checked: missing result.count — treating as backend error"
+            );
+            return HashExistsResult::BackendError(
+                "missing or non-integer result.count in Qdrant response".to_string(),
+            );
+        };
+
         if count > 0 {
             HashExistsResult::Exists
         } else {

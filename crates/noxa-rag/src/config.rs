@@ -74,6 +74,36 @@ fn normalize_source(config: &mut RagConfig) -> Result<(), RagError> {
     }
 }
 
+fn validate_supported_backends(config: &RagConfig) -> Result<(), RagError> {
+    match &config.embed_provider {
+        EmbedProviderConfig::Tei { .. } => {}
+        EmbedProviderConfig::OpenAi { .. } => {
+            return Err(RagError::Config(
+                "rag.embed_provider.type = \"open_ai\" is not supported in this build; use \"tei\""
+                    .to_string(),
+            ));
+        }
+        EmbedProviderConfig::VoyageAi { .. } => {
+            return Err(RagError::Config(
+                "rag.embed_provider.type = \"voyage_ai\" is not supported in this build; use \"tei\""
+                    .to_string(),
+            ));
+        }
+    }
+
+    match &config.vector_store {
+        VectorStoreConfig::Qdrant { .. } => {}
+        VectorStoreConfig::InMemory => {
+            return Err(RagError::Config(
+                "rag.vector_store.type = \"in_memory\" is not supported in this build; use \"qdrant\""
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmbedProviderConfig {
@@ -86,6 +116,28 @@ pub enum EmbedProviderConfig {
         /// TEI request. When `None`, no auth header is sent (backward-compatible).
         #[serde(default)]
         auth_token: Option<String>,
+        /// Optional instruction prefix applied to search-time query embeddings only.
+        ///
+        /// Required for instruction-tuned models such as Qwen3-Embedding-0.6B.
+        /// Documents are indexed as plain text — no prefix. Queries are formatted as:
+        ///   `Instruct: {instruction}\nQuery: {query_text}`
+        ///
+        /// Default: "Given a web search query, retrieve relevant passages that answer the query"
+        #[serde(default = "default_query_instruction")]
+        query_instruction: Option<String>,
+        /// MRL dimension override — truncate vectors client-side after embedding.
+        ///
+        /// Qwen3-Embedding-0.6B supports Matryoshka Representation Learning: any prefix
+        /// of the 1024-dim vector is meaningful. Set to 512 or 256 to reduce Qdrant
+        /// storage at a small quality cost (~3% and ~7% respectively).
+        ///
+        /// Must be ≤ the model's probed output dimensions. Changing this on an existing
+        /// collection requires deleting and recreating it (dimension mismatch at startup
+        /// will produce a clear error).
+        ///
+        /// Defaults to None (use probed dimensions, typically 1024 for Qwen3-0.6B).
+        #[serde(default)]
+        dimensions: Option<usize>,
     },
     OpenAi {
         api_key: String,
@@ -95,6 +147,29 @@ pub enum EmbedProviderConfig {
         api_key: String,
         model: String,
     },
+}
+
+fn default_query_instruction() -> Option<String> {
+    Some(
+        "Given a web search query, retrieve relevant passages that answer the query".to_string(),
+    )
+}
+
+impl EmbedProviderConfig {
+    /// Format a query with the Qwen3-style instruction prefix if configured.
+    ///
+    /// Returns `Cow::Borrowed` (no allocation) when no instruction is set.
+    /// Only applies to the TEI provider — all others pass the query through unchanged.
+    /// Never call this on document text during indexing.
+    pub fn format_query<'a>(&'a self, query: &'a str) -> std::borrow::Cow<'a, str> {
+        match self {
+            EmbedProviderConfig::Tei {
+                query_instruction: Some(instruction),
+                ..
+            } => std::borrow::Cow::Owned(format!("Instruct: {instruction}\nQuery: {query}")),
+            _ => std::borrow::Cow::Borrowed(query),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +257,7 @@ pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     })?;
 
     normalize_source(&mut config)?;
+    validate_supported_backends(&config)?;
 
     // Validate embed_concurrency > 0
     if config.pipeline.embed_concurrency == 0 {
@@ -326,5 +402,82 @@ watch_dirs = []
         let f = write_config(&toml);
         let err = load_config(f.path()).expect_err("should fail");
         assert!(matches!(err, RagError::Config(_)));
+    }
+
+    #[test]
+    fn format_query_applies_instruction_prefix_for_tei() {
+        let config = EmbedProviderConfig::Tei {
+            url: "http://tei.test".to_string(),
+            model: "Qwen3-Embedding-0.6B".to_string(),
+            local_path: None,
+            auth_token: None,
+            query_instruction: Some(
+                "Given a web search query, retrieve relevant passages that answer the query"
+                    .to_string(),
+            ),
+            dimensions: None,
+        };
+        let result = config.format_query("rust async runtime comparison");
+        assert_eq!(
+            result.as_ref(),
+            "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: rust async runtime comparison"
+        );
+    }
+
+    #[test]
+    fn format_query_none_instruction_returns_query_unchanged() {
+        let config = EmbedProviderConfig::Tei {
+            url: "http://tei.test".to_string(),
+            model: "some-model".to_string(),
+            local_path: None,
+            auth_token: None,
+            query_instruction: None,
+            dimensions: None,
+        };
+        let result = config.format_query("my query");
+        assert_eq!(result.as_ref(), "my query");
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn format_query_openai_returns_query_unchanged() {
+        let config = EmbedProviderConfig::OpenAi {
+            api_key: "sk-test".to_string(),
+            model: "text-embedding-3-small".to_string(),
+        };
+        let result = config.format_query("my query");
+        assert_eq!(result.as_ref(), "my query");
+    }
+
+    #[test]
+    fn load_config_default_query_instruction_is_set() {
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
+        let toml = minimal_toml(&format!(
+            r#"[rag.source]
+type = "fs_watcher"
+watch_dirs = ["{}"]
+"#,
+            tmp_dir.path().display()
+        ));
+        let f = write_config(&toml);
+        let config = load_config(f.path()).expect("load_config");
+        match &config.embed_provider {
+            EmbedProviderConfig::Tei {
+                query_instruction, ..
+            } => {
+                assert!(
+                    query_instruction.is_some(),
+                    "default query_instruction should be Some"
+                );
+                assert!(
+                    query_instruction
+                        .as_deref()
+                        .unwrap()
+                        .contains("web search query"),
+                    "default instruction should mention 'web search query'"
+                );
+            }
+            _ => panic!("expected Tei embed provider"),
+        }
     }
 }

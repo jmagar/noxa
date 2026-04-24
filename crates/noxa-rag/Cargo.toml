@@ -14,6 +14,8 @@ noxa-core = { workspace = true }
 noxa-pdf = { path = "../noxa-pdf" }
 # noxa-fetch provides extract_document() for DOCX/XLSX/CSV — reused rather than re-implemented.
 noxa-fetch = { workspace = true }
+# URL validation: validate_public_http_url_with_resolver for SSRF prevention (noxa-xv7.19/20)
+noxa-store = { path = "../noxa-store" }
 
 # Multi-format ingestion
 zip = "2"                         # DOCX, ODT, PPTX (ZIP archives) — matches noxa-fetch version
@@ -53,15 +55,19 @@ tokenizers = "0.21"
 # UUID v5 for deterministic point IDs
 uuid = { version = "1", features = ["v5", "serde"] }
 
-# SHA-256 for startup scan delta detection (file content hashing)
-sha2 = "0.10"
+# xxHash3 for fast raw-bytes file_hash (startup scan skip unchanged files)
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Filesystem watcher
 notify = "6"
-notify-debouncer-mini = "0.4"
+notify-debouncer-full = "0.3"
 
 # Concurrent data structures
 dashmap = "6"
+
+# MPMC async channel — replaces Arc<Mutex<mpsc::Receiver>> so workers dequeue
+# jobs in parallel instead of serialising on a shared mutex.
+async-channel = "2"
 
 # URL parsing
 url = "2"

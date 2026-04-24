@@ -16,14 +16,43 @@ RAG pipeline for [noxa](https://github.com/jmagar/noxa) — watches noxa's outpu
 # CRITICAL: --pooling last-token is REQUIRED for Qwen3-0.6B
 # Qwen3 is a decoder-only model. Mean pooling (TEI default) produces
 # semantically incorrect embeddings. This flag is NOT optional.
+#
+# Use the GPU-specific image tag (89-1.9 for RTX 4000 series / Ada Lovelace).
+# The generic "latest" tag targets A100 and loses Flash Attention on RTX GPUs.
 docker run --gpus all -p 8080:80 \
-  ghcr.io/huggingface/text-embeddings-inference:latest \
+  -v $HOME/.cache/noxa-rag/models:/data \
+  ghcr.io/huggingface/text-embeddings-inference:89-1.9 \
   --model-id Qwen/Qwen3-Embedding-0.6B \
+  --dtype float16 \
   --pooling last-token \
-  --max-batch-tokens 32768 \
-  --max-client-batch-size 128 \
-  --dtype float16
+  --max-batch-tokens 65536 \
+  --max-batch-requests 128 \
+  --max-client-batch-size 96 \
+  --max-concurrent-requests 512 \
+  --tokenization-workers 4
 ```
+
+**Why these flags matter:**
+
+| Flag | Value | Reason |
+|------|-------|--------|
+| `--max-batch-tokens` | `65536` | Client sends 96 chunks × 512 tokens = 49,152 tokens/batch. TEI must not re-split these internally or throughput drops ~3x. |
+| `--max-client-batch-size` | `96` | Must match `BATCH_SIZE` in `embed/tei.rs` (default 96). |
+| `--pooling last-token` | — | Qwen3 is decoder-only; mean pooling produces wrong embeddings. |
+| `--dtype float16` | — | ~2x throughput vs float32 on CUDA GPUs. |
+| `--tokenization-workers` | `4` | Parallel tokenization for concurrent requests. |
+
+**GPU image tag reference:**
+
+| GPU | Architecture | Tag |
+|-----|-------------|-----|
+| RTX 4000 series (Ada Lovelace) | sm_89 | `89-1.9` |
+| RTX 3000 series (Ampere 8.6) | sm_86 | `86-1.9` |
+| A100 (Ampere 8.0) | sm_80 | `1.9` |
+| H100 (Hopper 9.0) | sm_90 | `hopper-1.9` |
+| CPU only | — | `cpu-1.9` |
+
+The daemon checks TEI's `/info` endpoint at startup and **warns** if `max_batch_tokens` is smaller than `BATCH_SIZE × target_tokens`.
 
 ### Verify TEI is working
 
@@ -161,7 +190,7 @@ Source-specific behavior:
 ```text
 noxa-cli (writes .json) → watch_dir
                                 ↓
-              notify-debouncer-mini (500ms debounce)
+              notify-debouncer-full (500ms debounce)
                                 ↓
               bounded mpsc channel (256 capacity)
                                 ↓

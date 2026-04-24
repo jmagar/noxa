@@ -135,9 +135,10 @@ async fn parse_file_json_keeps_crawler_provenance_in_point_payload() {
         total_chunks: 1,
         char_offset: 0,
         token_estimate: 6,
+        section_header: None,
     };
 
-    let payload = build_point_payload(&chunk, &parsed.extraction, None, &parsed.provenance, url);
+    let payload = build_point_payload(&chunk, &parsed.extraction, None, &parsed.provenance, url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -160,6 +161,7 @@ fn sample_chunk() -> crate::types::Chunk {
         total_chunks: 1,
         char_offset: 0,
         token_estimate: 2,
+        section_header: None,
     }
 }
 
@@ -216,7 +218,7 @@ fn build_point_payload_serializes_web_variant() {
         },
     };
 
-    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url);
+    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -261,7 +263,7 @@ fn build_point_payload_serializes_email_variant() {
         },
     };
 
-    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url);
+    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -298,7 +300,7 @@ fn build_point_payload_serializes_feed_variant() {
         },
     };
 
-    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url);
+    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -325,7 +327,7 @@ fn build_point_payload_serializes_presentation_variant() {
         },
     };
 
-    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url);
+    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -353,7 +355,7 @@ fn build_point_payload_serializes_subtitle_variant() {
         },
     };
 
-    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url);
+    let payload = build_point_payload(&chunk, &extraction, None, &provenance, &chunk.source_url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(

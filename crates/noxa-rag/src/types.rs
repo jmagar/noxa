@@ -14,6 +14,8 @@ pub struct Chunk {
     pub total_chunks: usize,
     pub char_offset: usize,
     pub token_estimate: usize,
+    /// The nearest preceding markdown heading (h1–h3) for this chunk, if any.
+    pub section_header: Option<String>,
 }
 
 /// A point ready for upsert into the vector store.
@@ -106,6 +108,14 @@ pub struct PointPayload {
     pub subtitle_end_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle_source_file: Option<String>,
+    // ── Structural metadata ──────────────────────────────────────────────────
+    /// Nearest preceding markdown h1–h3 heading for this chunk, if detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_header: Option<String>,
+    /// xxHash3 hex digest of raw file bytes — used by the startup delta scan to
+    /// skip files whose on-disk contents have not changed since last index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_hash: Option<String>,
 }
 
 impl PointPayload {
@@ -182,6 +192,11 @@ impl SearchResult {
 }
 
 /// Narrow metadata filter for vector search.
+///
+/// `hnsw_ef` overrides the per-request HNSW search parameter sent to Qdrant.
+/// When `None`, the search layer uses 128 (good interactive-query default).
+/// Set higher (e.g. 256) for recall-sensitive batch workloads; lower (e.g. 64)
+/// for latency-critical paths where some recall loss is acceptable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SearchMetadataFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +205,10 @@ pub struct SearchMetadataFilter {
     pub last_modified: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+    /// Override HNSW ef parameter for this search request.
+    /// Default when None: 128. Qdrant collection default is ef_construct (200).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hnsw_ef: Option<usize>,
 }
 
 /// RAG-pipeline provenance carried alongside ExtractionResult through ingestion.

@@ -170,6 +170,7 @@ async fn search_filters_by_landed_file_path_and_returns_it() {
         file_path: Some("/tmp/report.md".to_string()),
         last_modified: None,
         git_branch: None,
+        hnsw_ef: None,
     };
 
     let results = store
@@ -305,6 +306,8 @@ async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metada
             model: "dummy".to_string(),
             local_path: Some(PathBuf::from("/tmp/tokenizer")),
             auth_token: None,
+            query_instruction: None,
+            dimensions: None,
         },
         vector_store: VectorStoreConfig::Qdrant {
             url: base_url.clone(),
@@ -324,6 +327,7 @@ async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metada
         file_path: Some("/tmp/report.md".to_string()),
         last_modified: None,
         git_branch: None,
+        hnsw_ef: None,
     };
     let results = store
         .search(&[0.25, 0.75], 3, Some(&filter))

@@ -21,6 +21,7 @@ pub async fn build_embed_provider(
             url,
             model,
             auth_token,
+            dimensions: config_dims,
             ..
         } => {
             let client = reqwest::Client::new();
@@ -41,27 +42,53 @@ pub async fn build_embed_provider(
                 )));
             }
 
-            let dims = provider.dimensions();
-            if dims == 0 {
+            let probed_dims = provider.dimensions();
+            if probed_dims == 0 {
                 return Err(RagError::Config(
                     "TEI provider returned 0 dimensions — probe failed silently".to_string(),
                 ));
             }
 
+            // MRL dimension override validation.
+            if let Some(target) = config_dims {
+                if *target == 0 {
+                    return Err(RagError::Config(
+                        "configured dimensions must be > 0".to_string(),
+                    ));
+                }
+                if *target > probed_dims {
+                    return Err(RagError::Config(format!(
+                        "configured dimensions {target} exceeds model output {probed_dims} — \
+                         set dimensions ≤ {probed_dims} or remove the override"
+                    )));
+                }
+            }
+
+            let effective_dims = config_dims.unwrap_or(probed_dims);
+            let provider = provider.with_configured_dimensions(*config_dims);
+
+            // Non-fatal: warn if TEI max_batch_tokens < BATCH_SIZE × target_tokens.
+            provider
+                .check_max_batch_tokens(config.chunker.target_tokens)
+                .await;
+
             tracing::info!(
                 provider = provider.name(),
-                dims,
+                probed_dims,
+                effective_dims,
                 url = %url,
                 "embed provider ready"
             );
 
-            Ok((Arc::new(provider), dims))
+            Ok((Arc::new(provider), effective_dims))
         }
         EmbedProviderConfig::OpenAi { .. } => Err(RagError::Config(
-            "OpenAI embed provider not implemented — use tei for phase 1".to_string(),
+            "OpenAI embed provider reached factory unexpectedly after config validation"
+                .to_string(),
         )),
         EmbedProviderConfig::VoyageAi { .. } => Err(RagError::Config(
-            "VoyageAI embed provider not implemented — use tei for phase 1".to_string(),
+            "VoyageAI embed provider reached factory unexpectedly after config validation"
+                .to_string(),
         )),
     }
 }
@@ -131,7 +158,8 @@ pub async fn build_vector_store(
             Ok(Arc::new(store))
         }
         VectorStoreConfig::InMemory => Err(RagError::Config(
-            "InMemory vector store not implemented — use testcontainers-rs for tests".to_string(),
+            "InMemory vector store reached factory unexpectedly after config validation"
+                .to_string(),
         )),
     }
 }

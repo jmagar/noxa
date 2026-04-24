@@ -69,6 +69,12 @@ pub trait VectorStore: Send + Sync {
     /// Qdrant communication failure so callers can avoid triggering a reindex.
     async fn url_with_hash_exists_checked(&self, url: &str, hash: &str) -> HashExistsResult;
 
+    /// Three-way existence check on `file_hash` (xxHash3 of raw bytes).
+    ///
+    /// Used by the startup delta scan to skip re-embedding files whose raw bytes
+    /// have not changed since last indexing. Faster than SHA-256 content_hash checks.
+    async fn url_with_file_hash_exists_checked(&self, url: &str, file_hash: &str) -> HashExistsResult;
+
     fn name(&self) -> &str;
 }
 

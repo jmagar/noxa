@@ -186,6 +186,7 @@ pub(crate) fn build_point_payload(
     git_branch: Option<String>,
     provenance: &IngestionProvenance,
     url: &str,
+    file_hash: Option<&str>,
 ) -> PointPayload {
     // Default values for every format-specific field. Only the fields
     // belonging to the active variant are overridden below; the rest stay
@@ -287,6 +288,8 @@ pub(crate) fn build_point_payload(
         subtitle_start_s,
         subtitle_end_s,
         subtitle_source_file,
+        section_header: chunk.section_header.clone(),
+        file_hash: file_hash.map(str::to_owned),
     }
 }
 

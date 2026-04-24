@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -15,46 +14,20 @@ use crate::types::Point;
 
 use super::parse;
 use super::scan;
-use super::{IndexJob, JobStats, SessionCounters};
+use super::{DeleteJob, IndexJob, JobStats, SessionCounters};
 
 /// Maximum size of the failed-jobs log before it is rotated (10 MiB).
 const FAILED_JOBS_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-fn is_private_ip(host: &str) -> bool {
-    if let Ok(addr) = host.parse::<IpAddr>() {
-        return is_private_or_reserved_ip(addr);
-    }
-    false
-}
-
-fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()
-                || v4.is_unspecified()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || octets[0] == 10
-                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
-                || (octets[0] == 192 && octets[1] == 168)
-                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
-        }
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_or_reserved_ip(IpAddr::V4(v4));
-            }
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg0 & 0xffc0) == 0xfe80
-                || (seg0 & 0xfe00) == 0xfc00
-        }
-    }
-}
-
-pub(crate) fn validate_url_scheme(url: &str) -> Result<(), RagError> {
+/// Validate that `url` is a permitted indexing target.
+///
+/// - `http`/`https`: delegates to `noxa_store::url_validation::validate_public_http_url`, which
+///   resolves hostnames via DNS and rejects all private/reserved IP ranges. This closes the
+///   SSRF gap where hostname-based internal addresses (e.g. `qdrant.internal`) bypass a
+///   numeric-IP-only check.
+/// - `file`: allowed only for local paths (no remote host).
+/// - All other schemes: rejected.
+pub(crate) async fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     if url.is_empty() {
         return Err(RagError::Generic(
             "extraction result has no URL".to_string(),
@@ -65,18 +38,9 @@ pub(crate) fn validate_url_scheme(url: &str) -> Result<(), RagError> {
 
     match parsed.scheme() {
         "http" | "https" => {
-            if let Some(host) = parsed.host_str() {
-                if is_private_ip(host) {
-                    return Err(RagError::Generic(format!(
-                        "URL {url:?} uses a private/loopback IP literal as its host — indexing blocked"
-                    )));
-                }
-                if host.eq_ignore_ascii_case("localhost") {
-                    return Err(RagError::Generic(
-                        "URL points to localhost — indexing blocked".to_string(),
-                    ));
-                }
-            }
+            noxa_store::url_validation::validate_public_http_url(url)
+                .await
+                .map_err(|e| RagError::Generic(format!("URL {url:?} blocked: {e}")))?;
         }
         "file" => match parsed.host_str() {
             None | Some("") | Some("localhost") => {}
@@ -171,29 +135,43 @@ pub(crate) async fn process_job(
     tokenizer: &Arc<Tokenizer>,
     config: &RagConfig,
     url_locks: &Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    git_branch_cache: &Arc<DashMap<PathBuf, Option<String>>>,
     watch_roots: &[PathBuf],
     counters: &Arc<SessionCounters>,
     failed_jobs_log_lock: &Arc<tokio::sync::Mutex<()>>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<JobStats, RagError> {
     let job_start = std::time::Instant::now();
 
     let t0 = std::time::Instant::now();
-    let canonical = tokio::fs::canonicalize(&job.path).await.map_err(|e| {
-        RagError::Generic(format!(
-            "canonicalize failed for {}: {e}",
-            job.path.display()
-        ))
-    })?;
+    // Canonicalize can fail for benign reasons — most commonly ENOENT when the
+    // file was deleted between the watcher event and job execution. That's a
+    // race, not a backend failure, so we must NOT return `Err` (which would
+    // wrongly bump `files_failed`). Return Ok with empty stats instead.
+    let canonical = match tokio::fs::canonicalize(&job.path).await {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                path = %job.path.display(),
+                "file vanished before processing"
+            );
+            return Ok(JobStats::default());
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %job.path.display(),
+                error = %e,
+                "canonicalize failed — skipping job"
+            );
+            return Ok(JobStats::default());
+        }
+    };
     if !scan::path_is_within_any_watch_root(&canonical, watch_roots) {
         tracing::warn!(
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"
         );
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
     let mut file = tokio::fs::File::open(&canonical).await?;
     let file_meta = file.metadata().await?;
@@ -202,27 +180,22 @@ pub(crate) async fn process_job(
     const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
     if size > MAX_FILE_SIZE_BYTES {
         tracing::warn!(path = ?job.path, size, "file too large (>50MB), skipping");
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
 
     let mut file_bytes: Vec<u8> = Vec::with_capacity(size as usize);
     file.read_to_end(&mut file_bytes).await?;
     let parse_ms = t0.elapsed().as_millis() as u64;
 
+    // Compute xxHash3 of raw bytes before file_bytes is moved into parse_file.
+    let file_hash = format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&file_bytes));
+
     let parsed = match parse::parse_file(&job.path, file_bytes).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(path = ?job.path, error = %e, "parse failed, skipping");
             append_failed_job(&job.path, &e, config, counters, failed_jobs_log_lock).await;
-            return Ok(JobStats {
-                chunks: 0,
-                embed_ms: 0,
-                upsert_ms: 0,
-            });
+            return Ok(JobStats::default());
         }
     };
     let mut result = parsed.extraction;
@@ -236,39 +209,68 @@ pub(crate) async fn process_job(
         result.metadata.last_modified =
             Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
-    let git_branch = scan::detect_git_branch(&job.path);
+    let git_branch = {
+        let path = job.path.clone();
+        let cache = git_branch_cache.clone();
+        tokio::task::spawn_blocking(move || {
+            // Walk up to find the git root first so we can use it as a stable cache key.
+            if let Some((git_root, branch)) = scan::detect_git_root_and_branch(&path) {
+                cache
+                    .entry(git_root)
+                    .or_insert_with(|| Some(branch.clone()))
+                    .clone()
+            } else {
+                None
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    };
 
     let raw_url = result.metadata.url.clone().unwrap_or_else(|| {
         url::Url::from_file_path(&canonical)
             .map(|url| url.to_string())
             .unwrap_or_else(|_| canonical.to_string_lossy().into_owned())
     });
-    if let Err(e) = validate_url_scheme(&raw_url) {
+    if let Err(e) = validate_url_scheme(&raw_url).await {
         tracing::warn!(path = ?job.path, error = %e, "url validation failed, skipping");
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
     let url = crate::url_util::normalize_url(&raw_url);
 
     let t1 = std::time::Instant::now();
-    let chunks = crate::chunker::chunk(&result, &config.chunker, tokenizer);
+    // KNOWLEDGE: chunker tokenization is CPU-bound (HuggingFace BPE). Wrap in
+    // spawn_blocking to avoid blocking async Tokio worker threads — same pattern
+    // as parse/mod.rs for PDF/DOCX. See bead noxa-3fi.2.
+    let chunks = {
+        let result_clone = result.clone();
+        let config_chunker = config.chunker.clone();
+        let tokenizer = Arc::clone(tokenizer);
+        tokio::task::spawn_blocking(move || {
+            crate::chunker::chunk(&result_clone, &config_chunker, &tokenizer)
+        })
+        .await
+        .map_err(|e| RagError::Generic(format!("chunker panicked: {e}")))?
+    };
     if chunks.is_empty() {
         tracing::info!(url = %url, "no indexable content after chunking");
-        return Ok(JobStats {
-            chunks: 0,
-            embed_ms: 0,
-            upsert_ms: 0,
-        });
+        return Ok(JobStats::default());
     }
     let chunk_ms = t1.elapsed().as_millis() as u64;
 
     let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
     let total_tokens: u64 = chunks.iter().map(|c| c.token_estimate as u64).sum();
     let t2 = std::time::Instant::now();
-    let vectors = embed.embed(&texts).await?;
+    // Cooperative cancellation: if shutdown fires mid-HTTP we return cleanly
+    // rather than being force-aborted by the 10s drain timeout.
+    let vectors = tokio::select! {
+        r = embed.embed(&texts) => r?,
+        _ = shutdown.cancelled() => {
+            tracing::debug!(url = %url, "embed cancelled by shutdown");
+            return Ok(JobStats::default());
+        }
+    };
     let embed_ms = t2.elapsed().as_millis() as u64;
     let embed_tokens_per_sec = if embed_ms > 0 {
         total_tokens * 1_000 / embed_ms
@@ -306,6 +308,7 @@ pub(crate) async fn process_job(
                     git_branch.clone(),
                     &parsed.provenance,
                     &url,
+                    Some(&file_hash),
                 ),
             }
         })
@@ -319,7 +322,7 @@ pub(crate) async fn process_job(
 
     let new_ids: Vec<uuid::Uuid> = points.iter().map(|p| p.id).collect();
     let t3 = std::time::Instant::now();
-    let store_result: Result<u64, RagError> = async {
+    let store_fut = async {
         let t4 = std::time::Instant::now();
         let upserted = store.upsert(points).await.map_err(|e| {
             tracing::error!(url = %url, error = %e, "upsert failed");
@@ -354,9 +357,21 @@ pub(crate) async fn process_job(
             "indexed"
         );
 
-        Ok(upsert_ms)
-    }
-    .await;
+        Ok::<u64, RagError>(upsert_ms)
+    };
+
+    // Cooperative cancellation around upsert+delete so shutdown does not strand
+    // in-flight HTTP calls past the drain timeout.
+    let store_result: Result<u64, RagError> = tokio::select! {
+        r = store_fut => r,
+        _ = shutdown.cancelled() => {
+            tracing::debug!(url = %url, "upsert cancelled by shutdown");
+            drop(_guard);
+            drop(url_lock);
+            url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
+            return Ok(JobStats::default());
+        }
+    };
 
     drop(_guard);
     drop(url_lock);
@@ -366,44 +381,62 @@ pub(crate) async fn process_job(
 
     Ok(JobStats {
         chunks: n_chunks,
+        parse_ms,
+        chunk_ms,
         embed_ms,
         upsert_ms,
     })
+}
+
+/// Remove all Qdrant chunks for a file that was deleted from disk.
+///
+/// The file no longer exists so we cannot canonicalize its path — we derive a
+/// `file://` URL directly from the raw watcher-reported path instead.
+pub(crate) async fn process_delete_job(job: DeleteJob, store: &DynVectorStore) {
+    let url = url::Url::from_file_path(&job.path)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| job.path.to_string_lossy().into_owned());
+    let url = crate::url_util::normalize_url(&url);
+    match store.delete_by_url(&url).await {
+        Ok(()) => tracing::info!(url = %url, "deleted chunks for removed file"),
+        Err(e) => tracing::warn!(url = %url, error = %e, "failed to delete chunks for removed file"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::validate_url_scheme;
 
-    #[test]
-    fn validate_url_scheme_accepts_file_local_path() {
-        assert!(validate_url_scheme("file:///tmp/foo.md").is_ok());
+    #[tokio::test]
+    async fn validate_url_scheme_accepts_file_local_path() {
+        assert!(validate_url_scheme("file:///tmp/foo.md").await.is_ok());
     }
 
-    #[test]
-    fn validate_url_scheme_accepts_file_localhost_host() {
-        assert!(validate_url_scheme("file://localhost/tmp/foo.md").is_ok());
+    #[tokio::test]
+    async fn validate_url_scheme_accepts_file_localhost_host() {
+        assert!(validate_url_scheme("file://localhost/tmp/foo.md").await.is_ok());
     }
 
-    #[test]
-    fn validate_url_scheme_rejects_file_with_remote_host() {
-        let result = validate_url_scheme("file://remoteserver/share/doc.txt");
-        assert!(result.is_err());
+    #[tokio::test]
+    async fn validate_url_scheme_rejects_file_with_remote_host() {
+        assert!(
+            validate_url_scheme("file://remoteserver/share/doc.txt")
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn validate_url_scheme_accepts_https() {
-        assert!(validate_url_scheme("https://example.com/page").is_ok());
+    #[tokio::test]
+    async fn validate_url_scheme_rejects_ftp() {
+        assert!(
+            validate_url_scheme("ftp://example.com/file.txt")
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn validate_url_scheme_rejects_ftp() {
-        let result = validate_url_scheme("ftp://example.com/file.txt");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_url_scheme_rejects_empty_url() {
-        assert!(validate_url_scheme("").is_err());
+    #[tokio::test]
+    async fn validate_url_scheme_rejects_empty_url() {
+        assert!(validate_url_scheme("").await.is_err());
     }
 }

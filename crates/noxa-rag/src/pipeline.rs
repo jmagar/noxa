@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -22,6 +23,8 @@ struct SessionCounters {
     /// broader process errors so the heartbeat can report them independently.
     parse_failures: std::sync::atomic::AtomicUsize,
     total_chunks: std::sync::atomic::AtomicUsize,
+    total_parse_ms: std::sync::atomic::AtomicU64,
+    total_chunk_ms: std::sync::atomic::AtomicU64,
     total_embed_ms: std::sync::atomic::AtomicU64,
     total_upsert_ms: std::sync::atomic::AtomicU64,
 }
@@ -31,8 +34,32 @@ struct IndexJob {
     span: tracing::Span,
 }
 
+/// A deletion job: remove all Qdrant chunks for the given file URL.
+///
+/// Used when the fs-watcher detects that a watched file no longer exists on disk.
+/// `path` is the raw (non-canonicalized) path reported by the watcher — we cannot
+/// call `canonicalize()` on a deleted file.
+struct DeleteJob {
+    path: std::path::PathBuf,
+    span: tracing::Span,
+}
+
+/// Discriminated union of index and delete pipeline jobs.
+///
+/// Both variants share a tracing span so log lines are tied to the originating
+/// fs-watcher event regardless of which worker picks the job up.
+enum PipelineJob {
+    /// Index (or re-index) a file that exists on disk.
+    Index(IndexJob),
+    /// Delete all Qdrant chunks for a file that was removed from disk.
+    Delete(DeleteJob),
+}
+
+#[derive(Default)]
 struct JobStats {
     chunks: usize,
+    parse_ms: u64,
+    chunk_ms: u64,
     embed_ms: u64,
     upsert_ms: u64,
 }
@@ -45,6 +72,10 @@ pub struct Pipeline {
     pub shutdown: CancellationToken,
     /// Per-URL mutex: prevents concurrent delete-then-upsert races for the same URL.
     url_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Cache of git root directory → branch name, shared across workers to avoid
+    /// redundant `.git/HEAD` reads. Keyed by the git root so all files in the same
+    /// repo share one cache entry per session.
+    git_branch_cache: Arc<DashMap<PathBuf, Option<String>>>,
     /// Session-level metrics shared between workers, heartbeat, and shutdown tasks.
     counters: Arc<SessionCounters>,
     /// Serialises failed-jobs log rotation: check-size → rotate → append must be atomic
@@ -67,6 +98,7 @@ impl Pipeline {
             tokenizer,
             shutdown,
             url_locks: Arc::new(DashMap::new()),
+            git_branch_cache: Arc::new(DashMap::new()),
             counters: Arc::new(SessionCounters::default()),
             failed_jobs_log_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
