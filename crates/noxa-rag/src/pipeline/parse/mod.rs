@@ -132,13 +132,6 @@ where
 
 fn file_url_for_path(path: &Path) -> String {
     url::Url::from_file_path(path)
-        .or_else(|_| {
-            std::env::current_dir()
-                .ok()
-                .map(|cwd| cwd.join(path))
-                .and_then(|abs| url::Url::from_file_path(abs).ok())
-                .ok_or(())
-        })
         .map(|u| u.to_string())
         .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
