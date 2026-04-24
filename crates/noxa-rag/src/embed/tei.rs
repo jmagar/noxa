@@ -9,8 +9,6 @@ use futures::StreamExt;
 const BATCH_SIZE: usize = 96;
 /// Concurrent in-flight embed batches — overlaps HTTP latency with GPU compute.
 const EMBED_PIPELINE_DEPTH: usize = 3;
-/// Default embedding dimensions for Qwen3-0.6B.
-const DEFAULT_DIMENSIONS: usize = 1024;
 /// Per-batch request timeout.
 const BATCH_TIMEOUT_SECS: u64 = 60;
 /// Max retries on 429/503.
@@ -41,17 +39,6 @@ pub struct TeiProvider {
 }
 
 impl TeiProvider {
-    /// Construct with hardcoded dimensions (1024 for Qwen3-0.6B).
-    pub fn new(url: String, _model: String, auth_token: Option<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            url,
-            dimensions: DEFAULT_DIMENSIONS,
-            auth_token,
-            configured_dimensions: None,
-        }
-    }
-
     /// Construct by probing /embed with a single dummy text to discover dimensions.
     pub async fn new_with_probe(
         url: String,
@@ -363,7 +350,8 @@ impl EmbedProvider for TeiProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_DIMENSIONS, MAX_RETRIES, TeiProvider, should_retry};
+    use super::{MAX_RETRIES, TeiProvider, should_retry};
+    const DEFAULT_DIMENSIONS: usize = 1024;
     use crate::embed::EmbedProvider;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
