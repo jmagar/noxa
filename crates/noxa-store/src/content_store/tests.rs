@@ -858,6 +858,65 @@ async fn test_list_domain_urls_counts_corrupt_sidecars() {
     );
 }
 
+// ── Query-variant dedup regression test ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_all_docs_query_variant_docs_not_deduplicated() {
+    // Regression test for noxa-i22: the manifest cache was previously keyed by
+    // `d.url` (canonical URL), so query-variant docs that shared a base URL
+    // would overwrite each other in the cache. The cache is now keyed by file
+    // path, so each query-variant gets its own cache slot.
+    //
+    // Two URLs with the same base path but different query strings must map to
+    // distinct storage files (url_to_store_path appends a hash for query-bearing
+    // URLs). Both calls to list_all_docs() must return count == 2.
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemContentStore::new(dir.path());
+
+    let url_a = "https://example.com/search?q=rust";
+    let url_b = "https://example.com/search?q=golang";
+
+    store
+        .write(
+            url_a,
+            &make_extraction_with_url("rust results", url_a, "Rust Search"),
+        )
+        .await
+        .unwrap();
+    store
+        .write(
+            url_b,
+            &make_extraction_with_url("golang results", url_b, "Go Search"),
+        )
+        .await
+        .unwrap();
+
+    // Cold call: cache is not yet populated → full filesystem walk.
+    let docs_cold = store.list_all_docs().await.unwrap();
+    assert_eq!(
+        docs_cold.len(),
+        2,
+        "cold list_all_docs must return both query-variant docs"
+    );
+
+    // Warm call: cache is now populated → served from HashMap keyed by path.
+    let docs_warm = store.list_all_docs().await.unwrap();
+    assert_eq!(
+        docs_warm.len(),
+        2,
+        "warm list_all_docs must return the same count as the cold walk (no dedup by URL)"
+    );
+
+    let urls_cold: std::collections::HashSet<&str> =
+        docs_cold.iter().map(|d| d.url.as_str()).collect();
+    let urls_warm: std::collections::HashSet<&str> =
+        docs_warm.iter().map(|d| d.url.as_str()).collect();
+    assert_eq!(
+        urls_cold, urls_warm,
+        "cold and warm results must contain identical URL sets"
+    );
+}
+
 // ── Manifest cache tests ──────────────────────────────────────────────────────
 
 #[tokio::test]
