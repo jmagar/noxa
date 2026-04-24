@@ -1,23 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use dashmap::DashMap;
-use tokenizers::Tokenizer;
 use tokio::io::AsyncReadExt;
 
-use crate::config::RagConfig;
-use crate::embed::DynEmbedProvider;
 use crate::error::RagError;
 use crate::store::DynVectorStore;
 use crate::types::Point;
 
 use super::parse;
 use super::scan;
-use super::{DeleteJob, IndexJob, JobStats, SessionCounters};
-
-/// Maximum size of the failed-jobs log before it is rotated (10 MiB).
-const FAILED_JOBS_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+use super::{DeleteJob, IndexJob, JobStats, WorkerContext};
 
 /// Validate that `url` is a permitted indexing target.
 ///
@@ -63,23 +56,17 @@ pub(crate) async fn validate_url_scheme(url: &str) -> Result<(), RagError> {
 /// Append one NDJSON failure entry to the failed-jobs log.
 ///
 /// Performs size-based rotation under `log_lock`: if the log exceeds
-/// `FAILED_JOBS_LOG_MAX_BYTES`, the existing file is renamed to `<path>.1`
-/// (overwriting any prior `.1` backup) and a fresh log is started.
+/// `config.pipeline.failed_jobs_log_max_bytes`, the existing file is renamed to
+/// `<path>.1` (overwriting any prior `.1` backup) and a fresh log is started.
 ///
 /// The entire check-rotate-append sequence is serialised by `log_lock` so
 /// concurrent workers cannot race on the rename.
-async fn append_failed_job(
-    path: &Path,
-    error: &impl std::fmt::Display,
-    config: &RagConfig,
-    counters: &Arc<SessionCounters>,
-    log_lock: &Arc<tokio::sync::Mutex<()>>,
-) {
+async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, ctx: &WorkerContext) {
     // Increment the parse-failure counter regardless of whether a log path is
     // configured — this ensures the heartbeat metric is always accurate.
-    counters.parse_failures.fetch_add(1, Ordering::Relaxed);
+    ctx.counters.parse_failures.fetch_add(1, Ordering::Relaxed);
 
-    let Some(ref log_path) = config.pipeline.failed_jobs_log else {
+    let Some(ref log_path) = ctx.config.pipeline.failed_jobs_log else {
         return;
     };
 
@@ -91,11 +78,12 @@ async fn append_failed_job(
     let line = format!("{entry}\n");
 
     // Serialise the check-rotate-append sequence across concurrent workers.
-    let _guard = log_lock.lock().await;
+    let _guard = ctx.failed_jobs_log_lock.lock().await;
 
+    let max_log_bytes = ctx.config.pipeline.failed_jobs_log_max_bytes;
     // Rotate if the log has grown past the cap.
     if let Ok(meta) = tokio::fs::metadata(log_path).await {
-        if meta.len() >= FAILED_JOBS_LOG_MAX_BYTES {
+        if meta.len() >= max_log_bytes {
             let mut rotated = log_path.to_path_buf();
             rotated.as_mut_os_string().push(".1");
             // Remove any existing backup first; rename fails on Windows if the
@@ -110,7 +98,7 @@ async fn append_failed_job(
             } else {
                 tracing::info!(
                     log = %log_path.display(),
-                    max_bytes = FAILED_JOBS_LOG_MAX_BYTES,
+                    max_bytes = max_log_bytes,
                     "rotated failed-jobs log"
                 );
             }
@@ -130,16 +118,7 @@ async fn append_failed_job(
 
 pub(crate) async fn process_job(
     job: IndexJob,
-    embed: &DynEmbedProvider,
-    store: &DynVectorStore,
-    tokenizer: &Arc<Tokenizer>,
-    config: &RagConfig,
-    url_locks: &Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    git_branch_cache: &Arc<DashMap<PathBuf, Option<String>>>,
-    watch_roots: &[PathBuf],
-    counters: &Arc<SessionCounters>,
-    failed_jobs_log_lock: &Arc<tokio::sync::Mutex<()>>,
-    shutdown: tokio_util::sync::CancellationToken,
+    ctx: &WorkerContext,
 ) -> Result<JobStats, RagError> {
     let job_start = std::time::Instant::now();
 
@@ -166,7 +145,7 @@ pub(crate) async fn process_job(
             return Ok(JobStats::default());
         }
     };
-    if !scan::path_is_within_any_watch_root(&canonical, watch_roots) {
+    if !scan::path_is_within_any_watch_root(&canonical, &ctx.watch_roots) {
         tracing::warn!(
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"
@@ -177,20 +156,20 @@ pub(crate) async fn process_job(
     let file_meta = file.metadata().await?;
     let size = file_meta.len();
 
-    const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
-    if size > MAX_FILE_SIZE_BYTES {
-        tracing::warn!(path = ?job.path, size, "file too large (>50MB), skipping");
+    let max_file_bytes = ctx.config.pipeline.max_file_size_bytes;
+    if size > max_file_bytes {
+        tracing::warn!(path = ?job.path, size, max_file_bytes, "file too large, skipping");
         return Ok(JobStats::default());
     }
 
     let mut file_bytes: Vec<u8> = Vec::with_capacity(size as usize);
     // Enforce the cap at I/O level — guards against grow-after-stat race where a
     // writer appends bytes between the metadata() check and read_to_end().
-    file.take(MAX_FILE_SIZE_BYTES + 1)
+    file.take(max_file_bytes + 1)
         .read_to_end(&mut file_bytes)
         .await?;
-    if file_bytes.len() as u64 > MAX_FILE_SIZE_BYTES {
-        tracing::warn!(path = ?job.path, "file exceeded 50MB after read (grow-after-stat), skipping");
+    if file_bytes.len() as u64 > max_file_bytes {
+        tracing::warn!(path = ?job.path, max_file_bytes, "file exceeded size limit after read (grow-after-stat), skipping");
         return Ok(JobStats::default());
     }
     let parse_ms = t0.elapsed().as_millis() as u64;
@@ -202,7 +181,7 @@ pub(crate) async fn process_job(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(path = ?job.path, error = %e, "parse failed, skipping");
-            append_failed_job(&job.path, &e, config, counters, failed_jobs_log_lock).await;
+            append_failed_job(&job.path, &e, ctx).await;
             return Ok(JobStats::default());
         }
     };
@@ -219,7 +198,7 @@ pub(crate) async fn process_job(
     }
     let git_branch = {
         let path = job.path.clone();
-        let cache = git_branch_cache.clone();
+        let cache = ctx.git_branch_cache.clone();
         tokio::task::spawn_blocking(move || {
             // Walk up to find the git root first so we can use it as a stable cache key.
             if let Some((git_root, branch)) = scan::detect_git_root_and_branch(&path) {
@@ -257,8 +236,8 @@ pub(crate) async fn process_job(
     // as parse/mod.rs for PDF/DOCX. See bead noxa-3fi.2.
     let chunks = {
         let result_for_chunk = Arc::clone(&result);
-        let config_chunker = config.chunker.clone();
-        let tokenizer = Arc::clone(tokenizer);
+        let config_chunker = ctx.config.chunker.clone();
+        let tokenizer = Arc::clone(&ctx.tokenizer);
         tokio::task::spawn_blocking(move || {
             crate::chunker::chunk(&result_for_chunk, &config_chunker, &tokenizer)
         })
@@ -277,8 +256,8 @@ pub(crate) async fn process_job(
     // Cooperative cancellation: if shutdown fires mid-HTTP we return cleanly
     // rather than being force-aborted by the 10s drain timeout.
     let vectors = tokio::select! {
-        r = embed.embed(&texts) => r?,
-        _ = shutdown.cancelled() => {
+        r = ctx.embed.embed(&texts) => r?,
+        _ = ctx.shutdown.cancelled() => {
             tracing::debug!(url = %url, "embed cancelled by shutdown");
             return Ok(JobStats::default());
         }
@@ -308,7 +287,7 @@ pub(crate) async fn process_job(
         .enumerate()
         .map(|(i, (chunk, vector))| {
             let id = uuid::Uuid::new_v5(
-                &config.uuid_namespace,
+                &ctx.config.uuid_namespace,
                 format!("{}#chunk{}", url, i).as_bytes(),
             );
             Point {
@@ -326,7 +305,8 @@ pub(crate) async fn process_job(
         })
         .collect();
 
-    let url_lock = url_locks
+    let url_lock = ctx
+        .url_locks
         .entry(url.clone())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone();
@@ -340,14 +320,14 @@ pub(crate) async fn process_job(
     // stale DashMap entry within 60s.
     let store_result: Result<u64, RagError> = tokio::select! {
         r = async {
-            let upserted = store.upsert(points).await.map_err(|e| {
+            let upserted = ctx.store.upsert(points).await.map_err(|e| {
                 tracing::error!(url = %url, error = %e, "upsert failed");
                 e
             })?;
             let upsert_ms = t4.elapsed().as_millis() as u64;
 
             let t5 = std::time::Instant::now();
-            store
+            ctx.store
                 .delete_stale_by_url(&url, &new_ids)
                 .await
                 .map_err(|e| {
@@ -376,7 +356,7 @@ pub(crate) async fn process_job(
 
             Ok::<u64, RagError>(upsert_ms)
         } => r,
-        _ = shutdown.cancelled() => {
+        _ = ctx.shutdown.cancelled() => {
             tracing::debug!(url = %url, "upsert cancelled by shutdown");
             return Ok(JobStats::default());
         }
@@ -384,7 +364,7 @@ pub(crate) async fn process_job(
 
     drop(_guard);
     drop(url_lock);
-    url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
+    ctx.url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
 
     let upsert_ms = store_result?;
 

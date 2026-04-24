@@ -240,6 +240,19 @@ pub struct PipelineConfig {
     pub embed_concurrency: usize,
     /// MUST be an absolute path — systemd daemon runs with CWD = /.
     pub failed_jobs_log: Option<PathBuf>,
+    #[serde(default = "default_startup_scan_concurrency")]
+    pub startup_scan_concurrency: usize,
+    #[serde(default = "default_job_queue_capacity")]
+    pub job_queue_capacity: usize,
+    /// Maximum file size in bytes. Files larger than this are skipped.
+    #[serde(default = "default_max_file_size_bytes")]
+    pub max_file_size_bytes: u64,
+    /// Maximum size of the failed-jobs log before rotation.
+    #[serde(default = "default_failed_jobs_log_max_bytes")]
+    pub failed_jobs_log_max_bytes: u64,
+    /// Seconds to wait for workers to drain on shutdown before forcing exit.
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
 }
 
 impl Default for PipelineConfig {
@@ -247,12 +260,37 @@ impl Default for PipelineConfig {
         Self {
             embed_concurrency: default_embed_concurrency(),
             failed_jobs_log: None,
+            startup_scan_concurrency: default_startup_scan_concurrency(),
+            job_queue_capacity: default_job_queue_capacity(),
+            max_file_size_bytes: default_max_file_size_bytes(),
+            failed_jobs_log_max_bytes: default_failed_jobs_log_max_bytes(),
+            drain_timeout_secs: default_drain_timeout_secs(),
         }
     }
 }
 
 fn default_embed_concurrency() -> usize {
     4
+}
+
+fn default_startup_scan_concurrency() -> usize {
+    16
+}
+
+fn default_job_queue_capacity() -> usize {
+    256
+}
+
+fn default_max_file_size_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+
+fn default_failed_jobs_log_max_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+fn default_drain_timeout_secs() -> u64 {
+    10
 }
 
 /// Load and validate the `[rag]` section from a noxa.toml file.

@@ -10,10 +10,14 @@ use crate::embed::DynEmbedProvider;
 use crate::error::RagError;
 use crate::store::DynVectorStore;
 
+mod heartbeat;
 mod parse;
 mod process;
 mod runtime;
 mod scan;
+mod startup_scan;
+mod watcher;
+mod worker;
 
 struct CounterSnapshot {
     indexed: usize,
@@ -91,12 +95,31 @@ struct JobStats {
     upsert_ms: u64,
 }
 
+/// Shared per-worker context cloned from the Pipeline before each worker task spawns.
+///
+/// Collapses the 10-parameter `process_job` signature into a single borrow, making
+/// call sites readable and making it cheap to add new shared state without touching
+/// every call site.
+#[derive(Clone)]
+struct WorkerContext {
+    embed: DynEmbedProvider,
+    store: DynVectorStore,
+    tokenizer: Arc<Tokenizer>,
+    config: RagConfig,
+    url_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    git_branch_cache: Arc<DashMap<PathBuf, Option<String>>>,
+    watch_roots: Arc<Vec<PathBuf>>,
+    counters: Arc<SessionCounters>,
+    failed_jobs_log_lock: Arc<tokio::sync::Mutex<()>>,
+    shutdown: CancellationToken,
+}
+
 pub struct Pipeline {
-    pub config: RagConfig,
-    pub embed: DynEmbedProvider,
-    pub store: DynVectorStore,
-    pub tokenizer: Arc<Tokenizer>,
-    pub shutdown: CancellationToken,
+    config: RagConfig,
+    embed: DynEmbedProvider,
+    store: DynVectorStore,
+    tokenizer: Arc<Tokenizer>,
+    shutdown: CancellationToken,
     /// Per-URL mutex: prevents concurrent delete-then-upsert races for the same URL.
     url_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Cache of git root directory → branch name, shared across workers to avoid
@@ -108,6 +131,9 @@ pub struct Pipeline {
     /// Serialises failed-jobs log rotation: check-size → rotate → append must be atomic
     /// across concurrent workers to avoid double-rename races.
     failed_jobs_log_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Canonicalized watch roots, set once during `run()` before workers are spawned.
+    /// Workers access this directly instead of receiving it as a spawn parameter.
+    watch_roots: std::sync::OnceLock<Arc<Vec<PathBuf>>>,
 }
 
 impl Pipeline {
@@ -128,6 +154,7 @@ impl Pipeline {
             git_branch_cache: Arc::new(DashMap::new()),
             counters: Arc::new(SessionCounters::default()),
             failed_jobs_log_lock: Arc::new(tokio::sync::Mutex::new(())),
+            watch_roots: std::sync::OnceLock::new(),
         }
     }
 
