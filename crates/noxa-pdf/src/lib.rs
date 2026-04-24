@@ -10,6 +10,28 @@ pub use error::PdfError;
 use pdf_extract::{Dictionary, Document, Object};
 use tracing::debug;
 
+/// Suppress stdout during the closure on Unix (where gag works).
+/// On any platform where BufferRedirect fails, the closure runs unguarded.
+#[cfg(unix)]
+fn suppress_stdout<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    // BufferRedirect captures stdout into an in-memory buffer for the duration
+    // of the guard's lifetime. We drop the guard immediately after the closure
+    // so the buffer (and its noisy contents) are silently discarded.
+    let _guard = gag::BufferRedirect::stdout().ok();
+    f()
+}
+
+#[cfg(not(unix))]
+fn suppress_stdout<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    f()
+}
+
 /// Controls how strictly we treat empty/sparse PDFs.
 #[derive(Debug, Clone, Default)]
 pub enum PdfMode {
@@ -57,7 +79,11 @@ pub fn extract_pdf(bytes: &[u8], mode: PdfMode) -> Result<PdfResult, PdfError> {
         return Err(PdfError::InvalidPdf("missing PDF header".into()));
     }
 
-    let doc = Document::load_mem(bytes).map_err(|e| PdfError::InvalidPdf(e.to_string()))?;
+    // pdf-extract and lopdf emit diagnostic println!s (Unicode mismatches,
+    // missing chars, encoding fallbacks). Suppress them so they don't corrupt
+    // stdout for downstream parsers.
+    let doc = suppress_stdout(|| Document::load_mem(bytes))
+        .map_err(|e| PdfError::InvalidPdf(e.to_string()))?;
 
     let page_count = doc.get_pages().len();
     let metadata = read_metadata(&doc);
@@ -65,7 +91,7 @@ pub fn extract_pdf(bytes: &[u8], mode: PdfMode) -> Result<PdfResult, PdfError> {
     debug!(pages = page_count, "PDF document loaded");
 
     // Extract text via pdf-extract (higher-level API over lopdf)
-    let text = pdf_extract::extract_text_from_mem(bytes)
+    let text = suppress_stdout(|| pdf_extract::extract_text_from_mem(bytes))
         .map_err(|e| PdfError::ExtractionFailed(e.to_string()))?;
 
     let text = normalize_text(&text);

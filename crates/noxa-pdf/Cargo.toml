@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+gag = "1"
 pdf-extract = "0.7"
 thiserror = { workspace = true }
 tracing = { workspace = true }
