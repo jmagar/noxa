@@ -32,6 +32,8 @@ impl McpSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeConfig {
     pub server: String,
+    /// Directory where bridge JSON files are written. Must be one of the dirs
+    /// listed in the daemon's `source.watch_dirs` so the daemon picks them up.
     pub watch_dir: PathBuf,
     pub page_size: u32,
     pub platform_base_url: Option<String>,

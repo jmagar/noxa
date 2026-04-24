@@ -69,7 +69,8 @@ use_sitemap = false
 
 [rag.source]
 type = "fs_watcher"
-watch_dir = "/home/user/.noxa/content"
+watch_dirs = ["/home/user/.noxa/content"]
+# watch_dirs = ["/home/user/.noxa/content", "/home/user/docs"]  # multiple dirs supported
 debounce_ms = 500
 
 # TEI (local) embed provider
