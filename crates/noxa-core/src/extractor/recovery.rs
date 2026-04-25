@@ -466,13 +466,17 @@ fn strip_md_formatting(md: &str) -> String {
 /// Find `needle` in `markdown` only at a position that isn't inside image/link
 /// alt text (`![...](...)`). Returns the byte offset or None.
 fn find_content_position(markdown: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+
     let mut search_from = 0;
     while let Some(pos) = markdown[search_from..].find(needle) {
         let abs_pos = search_from + pos;
         if !is_inside_image_syntax(markdown, abs_pos) {
             return Some(abs_pos);
         }
-        search_from = abs_pos + 1;
+        search_from = abs_pos + needle.len();
     }
     None
 }
@@ -490,4 +494,32 @@ fn is_inside_image_syntax(markdown: &str, pos: usize) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_content_position_skips_rejected_multibyte_image_alt_match() {
+        let markdown = "![тест](https://example.com/image.png)\n\nтест";
+
+        let pos = find_content_position(markdown, "тест").expect("visible text should be found");
+
+        assert_eq!(pos, markdown.rfind("тест").unwrap());
+    }
+
+    #[test]
+    fn find_content_position_handles_repeated_rejected_non_ascii_matches() {
+        let markdown = concat!(
+            "![заголовок](https://example.com/one.png)\n",
+            "![заголовок](https://example.com/two.png)\n\n",
+            "заголовок"
+        );
+
+        let pos =
+            find_content_position(markdown, "заголовок").expect("visible text should be found");
+
+        assert_eq!(pos, markdown.rfind("заголовок").unwrap());
+    }
 }
