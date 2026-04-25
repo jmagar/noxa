@@ -2370,6 +2370,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "shlex",
  "strip-ansi-escapes",
  "tempfile",
  "tokio",

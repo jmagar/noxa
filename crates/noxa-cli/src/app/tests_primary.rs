@@ -466,7 +466,7 @@ mod tests {
         let output_path = dir.path().join("payload.json");
         let payload = r#"{"status":"changed"}"#;
         let quoted_output_path = output_path.to_string_lossy().replace('\'', "'\"'\"'");
-        let cmd = format!("cat > '{quoted_output_path}'");
+        let cmd = format!("tee '{quoted_output_path}'");
 
         run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))
             .await
@@ -474,6 +474,24 @@ mod tests {
 
         let written = tokio::fs::read_to_string(&output_path).await.unwrap();
         assert_eq!(written, payload);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_change_command_treats_shell_metacharacters_as_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let injected_path = dir.path().join("injected");
+        let payload = "{}";
+        let cmd = format!("printf ok ; touch {}", injected_path.display());
+
+        run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))
+            .await
+            .expect("on-change command should succeed");
+
+        assert!(
+            !injected_path.exists(),
+            "metacharacters in --on-change must not be evaluated by a shell"
+        );
     }
 
     #[cfg(unix)]
