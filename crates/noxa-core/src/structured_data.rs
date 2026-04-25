@@ -53,7 +53,7 @@ pub fn extract_json_ld(html: &str) -> Vec<Value> {
         }
 
         // Parse — some sites have arrays at top level
-        match serde_json::from_str::<Value>(json_str) {
+        match parse_json_ld_value(json_str) {
             Ok(Value::Array(arr)) => results.extend(arr),
             Ok(val) => results.push(val),
             Err(_) => {}
@@ -61,6 +61,55 @@ pub fn extract_json_ld(html: &str) -> Vec<Value> {
     }
 
     results
+}
+
+fn parse_json_ld_value(json_str: &str) -> serde_json::Result<Value> {
+    match serde_json::from_str::<Value>(json_str) {
+        Ok(value) => Ok(value),
+        Err(original_err) => {
+            let Some(sanitized) = escape_raw_newlines_in_json_strings(json_str) else {
+                return Err(original_err);
+            };
+            serde_json::from_str::<Value>(&sanitized)
+        }
+    }
+}
+
+fn escape_raw_newlines_in_json_strings(input: &str) -> Option<String> {
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escape_next = false;
+    let mut changed = false;
+
+    for ch in input.chars() {
+        if escape_next {
+            out.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => {
+                out.push(ch);
+                escape_next = true;
+            }
+            '"' => {
+                out.push(ch);
+                in_string = !in_string;
+            }
+            '\n' if in_string => {
+                out.push_str("\\n");
+                changed = true;
+            }
+            '\r' if in_string => {
+                out.push_str("\\r");
+                changed = true;
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    changed.then_some(out)
 }
 
 /// Extract `__NEXT_DATA__` from Next.js pages.
@@ -363,6 +412,24 @@ mod tests {
         let results = extract_json_ld(html);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["name"], "Test");
+    }
+
+    #[test]
+    fn recovers_json_ld_with_raw_newline_inside_string() {
+        let html = r#"
+            <script type="application/ld+json">
+                {
+                    "@type": "Article",
+                    "headline": "First line
+Second line"
+                }
+            </script>
+        "#;
+
+        let results = extract_json_ld(html);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["headline"], "First line\nSecond line");
     }
 
     #[test]
