@@ -283,6 +283,40 @@ async fn spawn_status_server(status: u16, body: &'static str) -> String {
     format!("http://{addr}/")
 }
 
+#[cfg(test)]
+async fn spawn_raw_response_server(response: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf))
+                .await;
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    format!("http://{addr}/")
+}
+
+#[tokio::test]
+async fn fetch_rejects_oversized_html_response_from_content_length() {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        5 * 1024 * 1024 + 1
+    );
+    let url = spawn_raw_response_server(response).await;
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+
+    let result = client.fetch(&url).await;
+
+    assert!(matches!(result, Err(FetchError::Limit(_))));
+}
+
 #[tokio::test]
 async fn fetch_rejects_retryable_status_after_exhaustion() {
     // fetch() had a latent bug: on the last retry attempt with a retryable

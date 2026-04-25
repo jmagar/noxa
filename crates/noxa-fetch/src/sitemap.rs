@@ -155,17 +155,26 @@ async fn fetch_sitemaps(
 pub fn parse_robots_txt(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
-            let trimmed = line.trim();
-            // Case-insensitive match for "Sitemap:" prefix
-            if trimmed.len() > 8 && trimmed[..8].eq_ignore_ascii_case("sitemap:") {
-                let url = trimmed[8..].trim();
-                if !url.is_empty() {
-                    return Some(url.to_string());
-                }
+            let (directive, value) = line.split_once(':')?;
+            if !directive.trim().eq_ignore_ascii_case("sitemap") {
+                return None;
             }
-            None
+
+            let url = value.split('#').next().unwrap_or("").trim();
+            if is_plausible_sitemap_url(url) {
+                Some(url.to_string())
+            } else {
+                None
+            }
         })
         .collect()
+}
+
+fn is_plausible_sitemap_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
 }
 
 /// Parse a sitemap XML string. Handles both `<urlset>` and `<sitemapindex>`.
@@ -472,6 +481,25 @@ mod tests {
         let urls = parse_robots_txt(robots);
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0], "https://example.com/s.xml");
+    }
+
+    #[test]
+    fn test_parse_robots_txt_handles_spacing_comments_and_invalid_values() {
+        let robots = "Sitemap : https://example.com/spaced.xml\n\
+                      Sitemap: https://example.com/inline.xml # primary sitemap\n\
+                      Sitemap: not-a-url\n\
+                      Sitemap: ftp://example.com/not-web.xml\n\
+                      Sitemap:\n";
+
+        let urls = parse_robots_txt(robots);
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/spaced.xml".to_string(),
+                "https://example.com/inline.xml".to_string(),
+            ]
+        );
     }
 
     #[test]
