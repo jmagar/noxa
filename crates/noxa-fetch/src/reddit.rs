@@ -7,6 +7,12 @@ use noxa_core::{Content, ExtractionResult, Metadata};
 use serde::Deserialize;
 use tracing::debug;
 
+const JSON_API_USER_AGENT: &str = "noxa bot/0.7 (+https://github.com/jmagar/noxa)";
+
+pub fn json_api_user_agent() -> &'static str {
+    JSON_API_USER_AGENT
+}
+
 /// Check if a URL points to a Reddit post/comment page.
 pub fn is_reddit_url(url: &str) -> bool {
     let host = url
@@ -30,6 +36,10 @@ pub fn json_url(url: &str) -> String {
 
 /// Convert Reddit JSON API response into an ExtractionResult.
 pub fn parse_reddit_json(json_bytes: &[u8], url: &str) -> Result<ExtractionResult, String> {
+    if is_reddit_verify_wall_html(json_bytes) {
+        return Err("reddit verification page returned from json endpoint".to_string());
+    }
+
     let listings: Vec<Listing> =
         serde_json::from_slice(json_bytes).map_err(|e| format!("reddit json parse: {e}"))?;
 
@@ -115,6 +125,18 @@ pub fn parse_reddit_json(json_bytes: &[u8], url: &str) -> Result<ExtractionResul
         domain_data: None,
         structured_data: vec![],
     })
+}
+
+pub fn is_reddit_verify_wall_html(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let lower = text.to_ascii_lowercase();
+
+    (lower.contains("<html") || lower.contains("<!doctype html"))
+        && (lower.contains("whoa there")
+            || lower.contains("not a robot")
+            || lower.contains("blocked")
+            || lower.contains("verify you are human")
+            || lower.contains("enable javascript"))
 }
 
 fn render_comment(thing: &Thing, depth: usize, out: &mut String) {
@@ -238,5 +260,33 @@ mod tests {
             "plain_text should include comment text: {:?}",
             result.content.plain_text
         );
+    }
+
+    #[test]
+    fn parse_reddit_json_rejects_html_verify_page() {
+        let html = br#"<!doctype html>
+            <html>
+                <head><title>Reddit - Dive into anything</title></head>
+                <body>
+                    <h1>Whoa there, pardner!</h1>
+                    <p>We need to make sure you're not a robot.</p>
+                </body>
+            </html>"#;
+
+        let err = parse_reddit_json(
+            html,
+            "https://www.reddit.com/r/rust/comments/abc123/release_thread/",
+        )
+        .expect_err("verification HTML should not be treated as generic JSON parse failure");
+
+        assert!(err.contains("verification"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn reddit_json_user_agent_identifies_bot_contact() {
+        let ua = json_api_user_agent();
+
+        assert!(ua.contains("noxa"));
+        assert!(ua.contains("bot"));
     }
 }

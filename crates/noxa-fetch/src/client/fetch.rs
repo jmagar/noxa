@@ -122,10 +122,20 @@ impl FetchClient {
             debug!("reddit detected, fetching {json_url}");
 
             let client = self.pick_client(url);
-            let resp = client.get(&json_url).send().await?;
+            let resp = client
+                .get(&json_url)
+                .header("User-Agent", crate::reddit::json_api_user_agent())
+                .header("Accept", "application/json")
+                .send()
+                .await?;
             let response = Response::from_wreq(resp).await?;
             if response.is_success() {
                 let bytes = response.body();
+                if crate::reddit::is_reddit_verify_wall_html(bytes) {
+                    return Err(FetchError::BodyDecode(
+                        "reddit json endpoint returned verification page".to_string(),
+                    ));
+                }
                 match crate::reddit::parse_reddit_json(bytes, url) {
                     Ok(result) => return Ok(result),
                     Err(error) => {
