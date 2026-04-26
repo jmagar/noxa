@@ -6,8 +6,8 @@ use tokio::task::JoinHandle;
 use crate::config::SourceConfig;
 use crate::error::RagError;
 
-use super::scan;
 use super::Pipeline;
+use super::scan;
 
 use super::heartbeat::spawn_heartbeat;
 use super::startup_scan::spawn_startup_scan;
@@ -28,22 +28,33 @@ async fn drain_and_report(
     match tokio::time::timeout(Duration::from_secs(timeout_secs), drain).await {
         Ok(_) => tracing::info!("pipeline shut down cleanly"),
         Err(_) => {
-            tracing::warn!(timeout_secs, "workers did not drain within timeout, forcing exit");
+            tracing::warn!(
+                timeout_secs,
+                "workers did not drain within timeout, forcing exit"
+            );
             return Err(RagError::DrainTimeout);
         }
     }
 
     let snap = pipeline.counters.snapshot();
-    let avg_embed_ms = if snap.indexed > 0 { snap.total_embed_ms / snap.indexed as u64 } else { 0 };
-    let avg_upsert_ms = if snap.indexed > 0 { snap.total_upsert_ms / snap.indexed as u64 } else { 0 };
+    let avg_embed_ms = if snap.indexed > 0 {
+        snap.total_embed_ms / snap.indexed as u64
+    } else {
+        0
+    };
+    let avg_upsert_ms = if snap.indexed > 0 {
+        snap.total_upsert_ms / snap.indexed as u64
+    } else {
+        0
+    };
     tracing::info!(
-        indexed        = snap.indexed,
-        failed         = snap.failed,
+        indexed = snap.indexed,
+        failed = snap.failed,
         parse_failures = snap.parse_failures,
-        chunks         = snap.total_chunks,
+        chunks = snap.total_chunks,
         avg_embed_ms,
         avg_upsert_ms,
-        duration_s     = session_start.elapsed().as_secs(),
+        duration_s = session_start.elapsed().as_secs(),
         "session complete"
     );
 

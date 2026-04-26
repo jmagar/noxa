@@ -113,8 +113,7 @@ pub fn chunk(
         .enumerate()
         .map(|(chunk_index, (char_offset, text))| {
             let t_est = token_estimate(&text, tokenizer);
-            let section_header =
-                nearest_heading(&headings, char_offset).map(|s| s.to_string());
+            let section_header = nearest_heading(&headings, char_offset).map(|s| s.to_string());
             Chunk {
                 text,
                 source_url: source_url.clone(),

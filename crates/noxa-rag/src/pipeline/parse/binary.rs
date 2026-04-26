@@ -87,8 +87,7 @@ pub(crate) fn parse_office_zip_file(
                 .map_err(|e| RagError::Parse(format!("docx decompress '{entry_name}': {e}")))?;
             if copied > remaining {
                 return Err(RagError::Parse(
-                    "DOCX entry exceeds 50MB decompressed limit — possible zip bomb"
-                        .to_string(),
+                    "DOCX entry exceeds 50MB decompressed limit — possible zip bomb".to_string(),
                 ));
             }
             measured_total = measured_total.saturating_add(copied);

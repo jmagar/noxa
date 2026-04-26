@@ -1,6 +1,8 @@
 use crate::error::RagError;
 
-use super::{FormatProvenance, IngestionProvenance, ParsedFile, extract_xml_text, make_text_result};
+use super::{
+    FormatProvenance, IngestionProvenance, ParsedFile, extract_xml_text, make_text_result,
+};
 
 pub(crate) fn parse_feed_file(
     bytes: Vec<u8>,

@@ -82,7 +82,10 @@ fn vertical_extraction_result_sets_vertical_payload_and_summary() {
     );
 
     assert_eq!(result.metadata.title.as_deref(), Some("Noxa Repo"));
-    assert_eq!(result.vertical_data.as_ref().unwrap().extractor, "github_repo");
+    assert_eq!(
+        result.vertical_data.as_ref().unwrap().extractor,
+        "github_repo"
+    );
     assert_eq!(result.vertical_data.as_ref().unwrap().data["stars"], 42);
     assert!(result.content.markdown.contains("Repository metadata"));
 }

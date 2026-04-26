@@ -152,8 +152,8 @@ mod tests {
     use crate::store::{DynVectorStore, HashExistsResult, VectorStore};
     use crate::types::{Point, SearchMetadataFilter, SearchResult};
 
-    use super::spawn_startup_scan;
     use super::super::PipelineJob;
+    use super::spawn_startup_scan;
 
     // ── Mock VectorStore ──────────────────────────────────────────────────────
 
