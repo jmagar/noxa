@@ -151,14 +151,39 @@ pub(crate) fn parse_jsonl_file(bytes: Vec<u8>, file_url: String, title: String) 
     }
 }
 
-pub(crate) fn parse_xml_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
+/// Scan the first 8 KiB of bytes for DOCTYPE/ENTITY declarations that could
+/// trigger exponential entity expansion (the "billion laughs" attack). Returns
+/// `true` if such declarations are found.
+///
+/// quick-xml 0.37.x does NOT apply DTD expansion limits, so this pre-scan is
+/// the primary — and not merely defensive — guard against out-of-memory
+/// attacks. Later versions of quick-xml may add limits, but we keep the scan
+/// regardless (defense-in-depth).
+pub(super) fn contains_xml_entity_expansion_risk(bytes: &[u8]) -> bool {
+    let scan_limit = bytes.len().min(8192);
+    let header = &bytes[..scan_limit];
+    let s = std::str::from_utf8(header).unwrap_or("");
+    s.contains("<!DOCTYPE") || s.contains("<!ENTITY")
+}
+
+pub(crate) fn parse_xml_file(
+    bytes: Vec<u8>,
+    file_url: String,
+    title: String,
+) -> Result<ParsedFile, RagError> {
+    if contains_xml_entity_expansion_risk(&bytes) {
+        return Err(RagError::Parse(
+            "XML entity expansion risk detected: file contains DOCTYPE/ENTITY declarations"
+                .to_string(),
+        ));
+    }
     let content = String::from_utf8_lossy(&bytes).into_owned();
     let text = extract_xml_text(&content).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "xml text extraction failed; falling back to raw text");
         content.clone()
     });
     let word_count = text.split_whitespace().count();
-    ParsedFile {
+    Ok(ParsedFile {
         extraction: make_text_result(
             text.clone(),
             text,
@@ -168,7 +193,7 @@ pub(crate) fn parse_xml_file(bytes: Vec<u8>, file_url: String, title: String) ->
             word_count,
         ),
         provenance: IngestionProvenance::default(),
-    }
+    })
 }
 
 /// Extract plain text from XML/OPML/RSS/Atom by collecting all text and CDATA nodes.

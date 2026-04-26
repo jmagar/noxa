@@ -414,3 +414,52 @@ fn build_point_payload_serializes_subtitle_variant() {
         Some("demo.mp4")
     );
 }
+
+/// Entity expansion (billion-laughs) in XML should be rejected before parsing.
+#[tokio::test]
+async fn parse_xml_rejects_entity_expansion() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("evil.xml");
+    let payload = b"<?xml version=\"1.0\"?>\
+        <!DOCTYPE foo [<!ENTITY lol \"lol\">]>\
+        <root>&lol;</root>";
+    std::fs::write(&path, payload).expect("write");
+    let result = parse_file(&path, payload.to_vec()).await;
+    assert!(
+        result.is_err(),
+        "expected Err for DOCTYPE/ENTITY XML, got Ok"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("DOCTYPE") || msg.contains("ENTITY") || msg.contains("entity expansion"),
+        "error message should mention DOCTYPE/ENTITY: {msg}"
+    );
+}
+
+/// Entity expansion guard in RSS/Atom feed parser.
+#[tokio::test]
+async fn parse_feed_rejects_entity_expansion() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("evil.rss");
+    let payload = b"<?xml version=\"1.0\"?>\
+        <!DOCTYPE foo [<!ENTITY lol \"lol\">]>\
+        <rss version=\"2.0\"><channel><title>&lol;</title></channel></rss>";
+    std::fs::write(&path, payload).expect("write");
+    let result = parse_file(&path, payload.to_vec()).await;
+    assert!(
+        result.is_err(),
+        "expected Err for DOCTYPE/ENTITY feed, got Ok"
+    );
+}
+
+/// Normal XML without DOCTYPE/ENTITY should still parse successfully.
+#[tokio::test]
+async fn parse_xml_allows_normal_content() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("normal.xml");
+    let payload =
+        b"<?xml version=\"1.0\"?><root><item>hello world</item><item>foo bar</item></root>";
+    std::fs::write(&path, payload).expect("write");
+    let result = parse_file(&path, payload.to_vec()).await;
+    assert!(result.is_ok(), "normal XML should parse without error");
+}

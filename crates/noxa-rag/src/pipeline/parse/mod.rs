@@ -113,7 +113,7 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
             .await
         }
         "jsonl" => Ok(parse_jsonl_file(bytes, file_url, title)),
-        "xml" | "opml" => Ok(parse_xml_file(bytes, file_url, title)),
+        "xml" | "opml" => parse_xml_file(bytes, file_url, title),
         "rss" | "atom" => parse_feed_file(bytes, file_url, title),
         "eml" => parse_email_file(&bytes, file_url, title),
         "vtt" | "srt" => Ok(parse_subtitle_file(bytes, file_url, title)),

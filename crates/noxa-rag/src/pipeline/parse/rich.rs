@@ -2,6 +2,7 @@ use crate::error::RagError;
 
 use super::{
     FormatProvenance, IngestionProvenance, ParsedFile, extract_xml_text, make_text_result,
+    text::contains_xml_entity_expansion_risk,
 };
 
 pub(crate) fn parse_feed_file(
@@ -9,6 +10,12 @@ pub(crate) fn parse_feed_file(
     file_url: String,
     title: String,
 ) -> Result<ParsedFile, RagError> {
+    if contains_xml_entity_expansion_risk(&bytes) {
+        return Err(RagError::Parse(
+            "XML entity expansion risk detected: file contains DOCTYPE/ENTITY declarations"
+                .to_string(),
+        ));
+    }
     let content = String::from_utf8_lossy(&bytes).into_owned();
     let (extraction, provenance) = parse_feed_text(&content, file_url, title)?;
     Ok(ParsedFile {
