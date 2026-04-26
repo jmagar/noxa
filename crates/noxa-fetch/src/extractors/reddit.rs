@@ -11,7 +11,15 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
 };
 
 pub fn matches(url: &str) -> bool {
-    host_matches(url, "reddit.com") && url.contains("/comments/")
+    host_matches(url, "reddit.com")
+        && url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .path_segments()
+                    .map(|mut segments| segments.any(|segment| segment == "comments"))
+            })
+            .unwrap_or(false)
 }
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {

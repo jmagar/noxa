@@ -11,11 +11,13 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
 };
 
 pub fn matches(url: &str) -> bool {
-    url.contains("/products/")
+    product_api_url(url).is_some()
 }
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
-    let product_url = format!("{}.js", url.trim_end_matches('/'));
+    let product_url = product_api_url(url).ok_or_else(|| {
+        FetchError::Build(format!("shopify_product: cannot parse product URL '{url}'"))
+    })?;
     let product = client.get_json(&product_url).await?;
     Ok(json!({
         "url": url,
@@ -30,4 +32,19 @@ pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, Fet
         "images": product.get("images").cloned(),
         "description": product.get("description").cloned(),
     }))
+}
+
+fn product_api_url(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url).ok()?;
+    let has_product_path = parsed.path_segments().is_some_and(|mut segments| {
+        segments.next() == Some("products") && segments.next().is_some()
+    });
+    if !has_product_path {
+        return None;
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let path = parsed.path().trim_end_matches('/').to_string();
+    parsed.set_path(&format!("{path}.js"));
+    Some(parsed.to_string())
 }

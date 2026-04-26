@@ -7,7 +7,7 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
     name: "trustpilot_reviews",
     label: "Trustpilot Reviews",
     description: "Extract review data from Trustpilot.",
-    url_patterns: &["https://www.trustpilot.com/review/*"],
+    url_patterns: &["https://*.trustpilot.com/review/*"],
 };
 
 pub fn matches(url: &str) -> bool {

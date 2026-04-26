@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{ExtractorInfo, host_matches, http::ExtractorHttp};
+use super::{ExtractorInfo, http::ExtractorHttp};
 use crate::error::FetchError;
 
 pub const INFO: ExtractorInfo = ExtractorInfo {
@@ -11,7 +11,7 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
 };
 
 pub fn matches(url: &str) -> bool {
-    host_matches(url, "pypi.org") && url.contains("/project/")
+    parse_project(url).is_some()
 }
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {

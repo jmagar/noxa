@@ -459,7 +459,7 @@ pub(super) fn build_vertical_extraction_result(
             language: None,
             url: Some(url.to_string()),
             site_name: Some(extractor.to_string()),
-            image: string_field(&data, &["image_url", "thumbnail_url"]),
+            image: string_field(&data, &["image", "image_url", "thumbnail_url"]),
             favicon: None,
             word_count,
             content_hash: None,

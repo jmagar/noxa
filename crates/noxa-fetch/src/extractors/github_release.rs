@@ -18,7 +18,12 @@ pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, Fet
     let (owner, repo, tag) = parse_release(url).ok_or_else(|| {
         FetchError::Build(format!("github_release: cannot parse release URL '{url}'"))
     })?;
-    let api_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}");
+    let api_url = format!(
+        "https://api.github.com/repos/{}/{}/releases/tags/{}",
+        encode_path_segment(&owner),
+        encode_path_segment(&repo),
+        encode_path_segment(&tag)
+    );
     let r = client.get_json(&api_url).await?;
     let assets = r.get("assets").cloned().unwrap_or_else(|| json!([]));
     let total_downloads = assets
@@ -61,6 +66,15 @@ fn parse_release(url: &str) -> Option<(String, String, String)> {
     Some((
         segs[0].to_string(),
         segs[1].to_string(),
-        segs[4].to_string(),
+        segs[4..].join("/"),
     ))
+}
+
+fn encode_path_segment(value: &str) -> String {
+    value
+        .split('/')
+        .map(|segment| url::form_urlencoded::byte_serialize(segment.as_bytes()))
+        .map(Iterator::collect::<String>)
+        .collect::<Vec<_>>()
+        .join("%2F")
 }

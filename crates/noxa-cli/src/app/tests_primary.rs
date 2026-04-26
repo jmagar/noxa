@@ -259,7 +259,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         let entries = value.as_array().unwrap();
 
-        assert_eq!(entries.len(), 28);
+        assert_eq!(entries.len(), noxa_fetch::extractors::list().len());
         assert!(entries.iter().any(|entry| entry["name"] == "substack_post"));
     }
 

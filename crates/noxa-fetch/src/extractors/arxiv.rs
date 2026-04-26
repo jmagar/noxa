@@ -48,7 +48,14 @@ fn parse_id(url: &str) -> Option<String> {
     if segs.len() < 2 || (segs[0] != "abs" && segs[0] != "pdf") {
         return None;
     }
-    let stripped = segs[1].trim_end_matches(".pdf");
+    let is_old_style_archive = segs.len() >= 3
+        && (segs[1].contains('.') || segs[1].chars().all(|c| c.is_ascii_alphabetic()));
+    let raw_id = if is_old_style_archive {
+        format!("{}/{}", segs[1], segs[2])
+    } else {
+        segs[1].to_string()
+    };
+    let stripped = raw_id.trim_end_matches(".pdf");
     let no_version = match stripped.rfind('v') {
         Some(index) if stripped[index + 1..].chars().all(|c| c.is_ascii_digit()) => {
             &stripped[..index]
@@ -148,7 +155,10 @@ fn parse_atom_entry(xml: &str) -> Option<AtomEntry> {
                 }
             }
             Ok(Event::Text(text)) => {
-                let text = text.unescape().ok()?.to_string();
+                let text = text
+                    .unescape()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|_| String::from_utf8_lossy(text.as_ref()).into_owned());
                 match current {
                     Some("id") => entry.id = Some(text.trim().to_string()),
                     Some("title") => entry.title = append_text(entry.title.take(), &text),

@@ -76,7 +76,7 @@ These options stay on the command line and do not belong in `config.json`:
 - `--on-change`
 - `--raw-html`
 
-`--on-change` is CLI-only because it executes shell commands. `--raw-html` is a per-run mode, not a persistent default.
+`--on-change` is CLI-only because it executes commands on the local machine. It parses the configured command into argv directly; wrap the command in `sh -c "..."` when you need shell features such as pipes, redirects, globs, or environment expansion. `--raw-html` is a per-run mode, not a persistent default.
 
 ## Config File Rules
 

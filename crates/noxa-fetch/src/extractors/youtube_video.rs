@@ -77,7 +77,7 @@ fn parse_video_id(url: &str) -> Option<String> {
 }
 
 fn extract_player_response(html: &str) -> Option<Value> {
-    let re = Regex::new(r"var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;").ok()?;
+    let re = Regex::new(r"(?:var\s+)?ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;").ok()?;
     serde_json::from_str(re.captures(html)?.get(1)?.as_str()).ok()
 }
 

@@ -105,6 +105,22 @@ fn escape_raw_newlines_in_json_strings(input: &str) -> Option<String> {
                 out.push_str("\\r");
                 changed = true;
             }
+            '\t' if in_string => {
+                out.push_str("\\t");
+                changed = true;
+            }
+            '\u{08}' if in_string => {
+                out.push_str("\\b");
+                changed = true;
+            }
+            '\u{0c}' if in_string => {
+                out.push_str("\\f");
+                changed = true;
+            }
+            ch if in_string && ch.is_control() => {
+                out.push_str(&format!("\\u{:04x}", ch as u32));
+                changed = true;
+            }
             _ => out.push(ch),
         }
     }

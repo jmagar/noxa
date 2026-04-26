@@ -7,7 +7,7 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
     name: "docker_hub",
     label: "Docker Hub Repository",
     description: "Extract repository metadata from Docker Hub.",
-    url_patterns: &["https://hub.docker.com/r/*"],
+    url_patterns: &["https://hub.docker.com/r/*", "https://hub.docker.com/_/*"],
 };
 
 pub fn matches(url: &str) -> bool {

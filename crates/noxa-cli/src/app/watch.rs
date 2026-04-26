@@ -128,7 +128,7 @@ const WATCH_ON_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 fn parse_on_change_command(cmd: &str) -> Result<Vec<String>, String> {
     let argv = shlex::split(cmd)
-        .ok_or_else(|| "failed to parse command: unterminated quote".to_string())?;
+        .ok_or_else(|| "failed to parse command: invalid shell-style quoting".to_string())?;
     if argv.is_empty() {
         return Err("failed to run command: command is empty".to_string());
     }

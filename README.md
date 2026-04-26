@@ -279,8 +279,9 @@ noxa --watch https://example.com
 # Custom check interval (seconds)
 noxa --watch --watch-interval 60 https://example.com
 
-# Run a command on change — diff JSON is piped to stdin
-noxa --watch --on-change "jq '.summary' >> changes.log" https://example.com
+# Run a command on change — diff JSON is piped to stdin.
+# Use sh -c when you need shell features such as redirection or pipes.
+noxa --watch --on-change "sh -c \"jq '.summary' >> changes.log\"" https://example.com
 
 # Combine with a webhook — POST diff payload on each change
 noxa --watch --webhook https://hooks.example.com/notify https://example.com
