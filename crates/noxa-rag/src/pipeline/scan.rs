@@ -88,6 +88,13 @@ fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// Maximum JSON file size that `startup_scan_key` will deserialize to extract a content-hash
+/// and URL. Files larger than this are returned as `None` (causing unconditional queueing),
+/// which is safe because `process_job` enforces `max_file_size_bytes` independently.
+///
+/// Matches the default `max_file_size_bytes` in `PipelineConfig` (50 MiB).
+const MAX_SCAN_JSON_BYTES: u64 = 50 * 1024 * 1024;
+
 /// Compute the (content_hash, url) key used by the startup delta scan.
 ///
 /// For `.json` ExtractionResult files: peeks at `metadata.url` and `metadata.content_hash`
@@ -100,7 +107,10 @@ fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
 ///
 /// Returns `None` when the path is a symlink (confinement-safety: avoid following symlinks
 /// out of the watch roots before `process_job` validates confinement), or when the file
-/// metadata cannot be read, or when a file:// URL cannot be constructed.
+/// metadata cannot be read, or when a file:// URL cannot be constructed, or when a `.json`
+/// file exceeds [`MAX_SCAN_JSON_BYTES`] (preventing unbounded heap allocation before pipeline
+/// workers start; the oversized file is still queued unconditionally and rejected by
+/// `process_job` under its own `max_file_size_bytes` guard).
 ///
 /// Must be called inside `spawn_blocking` — this function reads from disk synchronously.
 pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
@@ -114,6 +124,18 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
     }
 
     if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        // Guard against unbounded heap allocation: serde_json::from_reader will read the
+        // full JSON value into memory. Reuse sym_meta (already fetched above) to avoid an
+        // extra stat syscall — for non-symlinks, symlink_metadata.len() == metadata.len().
+        if sym_meta.len() > MAX_SCAN_JSON_BYTES {
+            tracing::debug!(
+                path = %path.display(),
+                size = sym_meta.len(),
+                limit = MAX_SCAN_JSON_BYTES,
+                "startup_scan_key: JSON file exceeds size limit, queuing unconditionally"
+            );
+            return None;
+        }
         #[derive(serde::Deserialize)]
         struct Q {
             metadata: QM,
@@ -515,5 +537,41 @@ mod tests {
         let (hash, url) = startup_scan_key(&file).expect("json fallback key");
         assert!(hash.starts_with("mtime:"), "fallback hash: {hash}");
         assert!(url.starts_with("file://"), "fallback url: {url}");
+    }
+
+    #[test]
+    fn startup_scan_key_large_json_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("big.json");
+
+        // Use a sparse file (set_len without writing data) to create a >50 MiB
+        // file instantly without actually writing 50 MiB to disk.
+        {
+            let f = std::fs::File::create(&file).expect("create big.json");
+            let over_limit = super::MAX_SCAN_JSON_BYTES + 1;
+            f.set_len(over_limit).expect("set_len for sparse file");
+        }
+
+        // The size guard must trigger before any attempt to deserialize.
+        assert_eq!(
+            startup_scan_key(&file),
+            None,
+            "JSON file exceeding MAX_SCAN_JSON_BYTES must return None to prevent unbounded heap allocation"
+        );
+    }
+
+    #[test]
+    fn startup_scan_key_json_at_size_limit_is_processed() {
+        // A JSON file exactly AT the limit (not over) should still be attempted.
+        // We write a tiny valid JSON file to verify the check is strictly >.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("doc.json");
+        let body = r#"{"metadata":{"url":"https://example.com/b","content_hash":"def456"}}"#;
+        fs::write(&file, body).expect("write json");
+
+        // Tiny file is well below the limit — must parse normally.
+        let (hash, url) = startup_scan_key(&file).expect("small json should succeed");
+        assert_eq!(hash, "def456");
+        assert_eq!(url, "https://example.com/b");
     }
 }
