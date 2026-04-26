@@ -112,11 +112,31 @@ impl FetchClient {
         Ok(result)
     }
 
+    #[instrument(skip(self), fields(url = %url, extractor = %extractor))]
+    pub async fn fetch_and_extract_vertical(
+        &self,
+        url: &str,
+        extractor: &str,
+        _options: &noxa_core::ExtractionOptions,
+    ) -> Result<noxa_core::ExtractionResult, FetchError> {
+        let data = crate::extractors::dispatch_by_name(self, extractor, url)
+            .await
+            .map_err(|error| FetchError::Build(error.to_string()))?;
+        let mut result = build_vertical_extraction_result(extractor, url, data);
+        result.metadata.fetched_at = Some(Utc::now().to_rfc3339());
+        Ok(result)
+    }
+
     async fn fetch_and_extract_inner(
         &self,
         url: &str,
         options: &noxa_core::ExtractionOptions,
     ) -> Result<noxa_core::ExtractionResult, FetchError> {
+        if let Some(result) = crate::extractors::dispatch_by_url(self, url).await {
+            let (extractor, data) = result?;
+            return Ok(build_vertical_extraction_result(extractor, url, data));
+        }
+
         if crate::reddit::is_reddit_url(url) {
             let json_url = crate::reddit::json_url(url);
             debug!("reddit detected, fetching {json_url}");
@@ -380,4 +400,77 @@ pub(super) fn pdf_to_extraction_result(
         vertical_data: None,
         structured_data: vec![],
     }
+}
+
+pub(super) fn build_vertical_extraction_result(
+    extractor: &str,
+    url: &str,
+    data: serde_json::Value,
+) -> noxa_core::ExtractionResult {
+    let title = string_field(&data, &["title", "name", "full_name", "business"])
+        .or_else(|| data.pointer("/post/title").and_then(|value| value.as_str()).map(ToString::to_string))
+        .or_else(|| data.pointer("/metadata/title").and_then(|value| value.as_str()).map(ToString::to_string));
+    let description = string_field(&data, &["description", "summary", "body", "abstract"])
+        .or_else(|| data.pointer("/metadata/description").and_then(|value| value.as_str()).map(ToString::to_string));
+    let pretty = serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string());
+    let heading = title.clone().unwrap_or_else(|| extractor.to_string());
+    let markdown = match description.as_deref() {
+        Some(description) if !description.is_empty() => {
+            format!("# {heading}\n\n{description}\n\n```json\n{pretty}\n```")
+        }
+        _ => format!("# {heading}\n\n```json\n{pretty}\n```"),
+    };
+    let plain_text = crate::document::strip_markdown_formatting(&markdown);
+    let word_count = plain_text.split_whitespace().count();
+
+    noxa_core::ExtractionResult {
+        metadata: noxa_core::Metadata {
+            title,
+            description,
+            author: string_field(&data, &["author", "author_name"]),
+            published_date: string_field(&data, &["published_at", "published", "created_at"]),
+            language: None,
+            url: Some(url.to_string()),
+            site_name: Some(extractor.to_string()),
+            image: string_field(&data, &["image_url", "thumbnail_url"]),
+            favicon: None,
+            word_count,
+            content_hash: None,
+            source_type: Some("web".into()),
+            file_path: None,
+            last_modified: string_field(&data, &["updated_at", "last_modified"]),
+            is_truncated: None,
+            technologies: Vec::new(),
+            seed_url: None,
+            crawl_depth: None,
+            search_query: None,
+            fetched_at: None,
+        },
+        content: noxa_core::Content {
+            markdown,
+            plain_text,
+            links: Vec::new(),
+            images: Vec::new(),
+            code_blocks: Vec::new(),
+            raw_html: None,
+        },
+        domain_data: None,
+        vertical_data: Some(noxa_core::VerticalData {
+            extractor: extractor.to_string(),
+            data,
+        }),
+        structured_data: vec![],
+    }
+}
+
+fn string_field(data: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        data.get(*key).and_then(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                .or_else(|| value.as_f64().map(|number| number.to_string()))
+        })
+    })
 }
