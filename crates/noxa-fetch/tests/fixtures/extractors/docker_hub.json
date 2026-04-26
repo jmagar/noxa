@@ -1,0 +1,13 @@
+{
+  "namespace": "library",
+  "name": "nginx",
+  "pull_count": 5000,
+  "star_count": 50,
+  "description": "Official NGINX image",
+  "full_description": "NGINX container image",
+  "last_updated": "2026-01-01T00:00:00Z",
+  "date_registered": "2020-01-01T00:00:00Z",
+  "is_private": false,
+  "status_description": "active",
+  "categories": [{ "name": "web", "slug": "web" }]
+}

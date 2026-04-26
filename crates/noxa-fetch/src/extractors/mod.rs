@@ -451,4 +451,147 @@ mod tests {
 
         assert_eq!(before, names.len(), "extractor names must be unique");
     }
+
+    pub mod developer {
+        use std::collections::BTreeMap;
+
+        use async_trait::async_trait;
+
+        use super::*;
+
+        struct FixtureHttp {
+            json: BTreeMap<&'static str, &'static str>,
+        }
+
+        impl FixtureHttp {
+            fn new(entries: &[(&'static str, &'static str)]) -> Self {
+                Self {
+                    json: entries.iter().copied().collect(),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl http::ExtractorHttp for FixtureHttp {
+            async fn get_text(&self, url: &str) -> Result<String, FetchError> {
+                self.json
+                    .get(url)
+                    .map(|body| (*body).to_string())
+                    .ok_or_else(|| FetchError::Build(format!("missing fixture for {url}")))
+            }
+
+            async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
+                let body = self.get_text(url).await?;
+                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+            }
+        }
+
+        #[test]
+        fn developer_matchers_accept_expected_urls() {
+            assert!(github_repo::matches("https://github.com/jmagar/noxa"));
+            assert!(github_pr::matches("https://github.com/jmagar/noxa/pull/12"));
+            assert!(github_issue::matches("https://github.com/jmagar/noxa/issues/34"));
+            assert!(github_release::matches(
+                "https://github.com/jmagar/noxa/releases/tag/v0.7.0"
+            ));
+            assert!(pypi::matches("https://pypi.org/project/requests/"));
+            assert!(npm::matches("https://www.npmjs.com/package/@types/node"));
+            assert!(crates_io::matches("https://crates.io/crates/serde"));
+            assert!(docker_hub::matches("https://hub.docker.com/_/nginx"));
+        }
+
+        #[test]
+        fn github_repo_does_not_preempt_more_specific_github_extractors() {
+            assert!(!github_repo::matches("https://github.com/jmagar/noxa/pull/12"));
+            assert!(!github_repo::matches("https://github.com/jmagar/noxa/issues/34"));
+            assert!(!github_repo::matches(
+                "https://github.com/jmagar/noxa/releases/tag/v0.7.0"
+            ));
+            assert!(!github_repo::matches("https://github.com/topics/rust"));
+        }
+
+        #[tokio::test]
+        async fn developer_extractors_parse_fixture_payloads() {
+            let client = FixtureHttp::new(&[
+                (
+                    "https://api.github.com/repos/jmagar/noxa",
+                    include_str!("../../tests/fixtures/extractors/github_repo.json"),
+                ),
+                (
+                    "https://api.github.com/repos/jmagar/noxa/pulls/12",
+                    include_str!("../../tests/fixtures/extractors/github_pr.json"),
+                ),
+                (
+                    "https://api.github.com/repos/jmagar/noxa/issues/34",
+                    include_str!("../../tests/fixtures/extractors/github_issue.json"),
+                ),
+                (
+                    "https://api.github.com/repos/jmagar/noxa/releases/tags/v0.7.0",
+                    include_str!("../../tests/fixtures/extractors/github_release.json"),
+                ),
+                (
+                    "https://pypi.org/pypi/requests/json",
+                    include_str!("../../tests/fixtures/extractors/pypi.json"),
+                ),
+                (
+                    "https://registry.npmjs.org/%40types%2Fnode",
+                    include_str!("../../tests/fixtures/extractors/npm_registry.json"),
+                ),
+                (
+                    "https://api.npmjs.org/downloads/point/last-week/%40types%2Fnode",
+                    include_str!("../../tests/fixtures/extractors/npm_downloads.json"),
+                ),
+                (
+                    "https://crates.io/api/v1/crates/serde",
+                    include_str!("../../tests/fixtures/extractors/crates_io.json"),
+                ),
+                (
+                    "https://hub.docker.com/v2/repositories/library/nginx",
+                    include_str!("../../tests/fixtures/extractors/docker_hub.json"),
+                ),
+            ]);
+
+            let repo = github_repo::extract(&client, "https://github.com/jmagar/noxa").await.unwrap();
+            assert_eq!(repo["full_name"], "jmagar/noxa");
+            assert_eq!(repo["stars"], 42);
+
+            let pr = github_pr::extract(&client, "https://github.com/jmagar/noxa/pull/12").await.unwrap();
+            assert_eq!(pr["number"], 12);
+            assert_eq!(pr["title"], "Port upstream extractors");
+
+            let issue =
+                github_issue::extract(&client, "https://github.com/jmagar/noxa/issues/34").await.unwrap();
+            assert_eq!(issue["number"], 34);
+            assert_eq!(issue["labels"][0], "bug");
+
+            let release = github_release::extract(
+                &client,
+                "https://github.com/jmagar/noxa/releases/tag/v0.7.0",
+            )
+            .await
+            .unwrap();
+            assert_eq!(release["tag_name"], "v0.7.0");
+            assert_eq!(release["total_downloads"], 7);
+
+            let pypi = pypi::extract(&client, "https://pypi.org/project/requests/").await.unwrap();
+            assert_eq!(pypi["name"], "requests");
+            assert_eq!(pypi["version"], "2.32.3");
+
+            let npm =
+                npm::extract(&client, "https://www.npmjs.com/package/@types/node").await.unwrap();
+            assert_eq!(npm["name"], "@types/node");
+            assert_eq!(npm["weekly_downloads"], 123456);
+
+            let crate_data =
+                crates_io::extract(&client, "https://crates.io/crates/serde").await.unwrap();
+            assert_eq!(crate_data["name"], "serde");
+            assert_eq!(crate_data["downloads"], 1000);
+
+            let docker = docker_hub::extract(&client, "https://hub.docker.com/_/nginx")
+                .await
+                .unwrap();
+            assert_eq!(docker["full_name"], "library/nginx");
+            assert_eq!(docker["pull_count"], 5000);
+        }
+    }
 }
