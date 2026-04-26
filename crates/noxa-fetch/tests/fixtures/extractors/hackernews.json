@@ -1,0 +1,24 @@
+{
+  "id": 123,
+  "type": "story",
+  "title": "Noxa extractor parity",
+  "url": "https://example.com/noxa",
+  "author": "pg",
+  "points": 100,
+  "text": null,
+  "created_at": "2026-01-01T00:00:00Z",
+  "created_at_i": 1767225600,
+  "children": [
+    {
+      "id": 124,
+      "type": "comment",
+      "author": "commenter",
+      "text": "Nice work",
+      "created_at": "2026-01-01T01:00:00Z",
+      "created_at_i": 1767229200,
+      "parent_id": 123,
+      "story_id": 123,
+      "children": []
+    }
+  ]
+}

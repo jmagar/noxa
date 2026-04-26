@@ -594,4 +594,119 @@ mod tests {
             assert_eq!(docker["pull_count"], 5000);
         }
     }
+
+    pub mod community {
+        use std::collections::BTreeMap;
+
+        use async_trait::async_trait;
+
+        use super::*;
+
+        struct FixtureHttp {
+            bodies: BTreeMap<&'static str, &'static str>,
+        }
+
+        impl FixtureHttp {
+            fn new(entries: &[(&'static str, &'static str)]) -> Self {
+                Self {
+                    bodies: entries.iter().copied().collect(),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl http::ExtractorHttp for FixtureHttp {
+            async fn get_text(&self, url: &str) -> Result<String, FetchError> {
+                self.bodies
+                    .get(url)
+                    .map(|body| (*body).to_string())
+                    .ok_or_else(|| FetchError::Build(format!("missing fixture for {url}")))
+            }
+
+            async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
+                let body = self.get_text(url).await?;
+                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+            }
+        }
+
+        #[test]
+        fn community_matchers_accept_expected_urls() {
+            assert!(arxiv::matches("https://arxiv.org/abs/2401.12345v2"));
+            assert!(hackernews::matches("https://news.ycombinator.com/item?id=123"));
+            assert!(dev_to::matches("https://dev.to/jmagar/porting-noxa"));
+            assert!(stackoverflow::matches(
+                "https://stackoverflow.com/questions/12345/how-to-test-rust"
+            ));
+            assert!(youtube_video::matches("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+            assert!(youtube_video::matches("https://youtu.be/dQw4w9WgXcQ"));
+        }
+
+        #[tokio::test]
+        async fn community_extractors_parse_fixture_payloads() {
+            let client = FixtureHttp::new(&[
+                (
+                    "https://export.arxiv.org/api/query?id_list=2401.12345",
+                    include_str!("../../tests/fixtures/extractors/arxiv.xml"),
+                ),
+                (
+                    "https://hn.algolia.com/api/v1/items/123",
+                    include_str!("../../tests/fixtures/extractors/hackernews.json"),
+                ),
+                (
+                    "https://dev.to/api/articles/jmagar/porting-noxa",
+                    include_str!("../../tests/fixtures/extractors/dev_to.json"),
+                ),
+                (
+                    "https://api.stackexchange.com/2.3/questions/12345?site=stackoverflow&filter=withbody",
+                    include_str!("../../tests/fixtures/extractors/stackoverflow_question.json"),
+                ),
+                (
+                    "https://api.stackexchange.com/2.3/questions/12345/answers?site=stackoverflow&filter=withbody&order=desc&sort=votes",
+                    include_str!("../../tests/fixtures/extractors/stackoverflow_answers.json"),
+                ),
+                (
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    include_str!("../../tests/fixtures/extractors/youtube_video.html"),
+                ),
+            ]);
+
+            let paper = arxiv::extract(&client, "https://arxiv.org/abs/2401.12345v2")
+                .await
+                .unwrap();
+            assert_eq!(paper["id"], "2401.12345");
+            assert_eq!(paper["title"], "A Test Paper");
+            assert_eq!(paper["authors"][0], "Ada Lovelace");
+
+            let hn = hackernews::extract(&client, "https://news.ycombinator.com/item?id=123")
+                .await
+                .unwrap();
+            assert_eq!(hn["post"]["id"], 123);
+            assert_eq!(hn["post"]["comment_count"], 1);
+
+            let article = dev_to::extract(&client, "https://dev.to/jmagar/porting-noxa")
+                .await
+                .unwrap();
+            assert_eq!(article["title"], "Porting Noxa");
+            assert_eq!(article["author"]["username"], "jmagar");
+
+            let question = stackoverflow::extract(
+                &client,
+                "https://stackoverflow.com/questions/12345/how-to-test-rust",
+            )
+            .await
+            .unwrap();
+            assert_eq!(question["question_id"], 12345);
+            assert_eq!(question["accepted_answer"]["answer_id"], 99);
+
+            let video = youtube_video::extract(
+                &client,
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            )
+            .await
+            .unwrap();
+            assert_eq!(video["video_id"], "dQw4w9WgXcQ");
+            assert_eq!(video["title"], "Test Video");
+            assert_eq!(video["view_count"], 1000);
+        }
+    }
 }

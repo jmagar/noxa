@@ -1,0 +1,23 @@
+{
+  "id": 1,
+  "title": "Porting Noxa",
+  "description": "Porting extractors",
+  "body_markdown": "# Porting Noxa\n\nBody.",
+  "canonical_url": "https://dev.to/jmagar/porting-noxa",
+  "published_at": "2026-01-01T00:00:00Z",
+  "edited_at": null,
+  "reading_time_minutes": 4,
+  "tag_list": ["rust", "scraping"],
+  "positive_reactions_count": 10,
+  "public_reactions_count": 12,
+  "comments_count": 2,
+  "page_views_count": 100,
+  "cover_image": "https://example.com/cover.png",
+  "user": {
+    "username": "jmagar",
+    "name": "Jacob",
+    "twitter_username": "jmagar",
+    "github_username": "jmagar",
+    "website_url": "https://example.com"
+  }
+}
