@@ -61,6 +61,68 @@ pub(crate) enum FormatProvenance {
     Generic,
 }
 
+impl FormatProvenance {
+    /// Apply format-specific fields onto `payload`. The payload must already
+    /// have its web fallback fields (seed_url, search_query, crawl_depth)
+    /// pre-initialised from `result.metadata.*` before this method is called.
+    /// Variant fields take precedence: a `Some(...)` from the variant
+    /// overwrites the pre-set metadata value; a `None` leaves it unchanged.
+    pub(crate) fn apply(&self, payload: &mut PointPayload) {
+        match self {
+            FormatProvenance::Web {
+                seed_url,
+                search_query,
+                crawl_depth,
+            } => {
+                if seed_url.is_some() {
+                    payload.seed_url = seed_url.clone();
+                }
+                if search_query.is_some() {
+                    payload.search_query = search_query.clone();
+                }
+                if crawl_depth.is_some() {
+                    payload.crawl_depth = *crawl_depth;
+                }
+            }
+            FormatProvenance::Email {
+                to,
+                message_id,
+                thread_id,
+                has_attachments,
+            } => {
+                payload.email_to = to.clone();
+                payload.email_message_id = message_id.clone();
+                payload.email_thread_id = thread_id.clone();
+                payload.email_has_attachments = *has_attachments;
+            }
+            FormatProvenance::Feed {
+                feed_url,
+                item_id,
+            } => {
+                payload.feed_url = feed_url.clone();
+                payload.feed_item_id = item_id.clone();
+            }
+            FormatProvenance::Subtitle {
+                start_s,
+                end_s,
+                source_file,
+            } => {
+                payload.subtitle_start_s = *start_s;
+                payload.subtitle_end_s = *end_s;
+                payload.subtitle_source_file = source_file.clone();
+            }
+            FormatProvenance::Presentation {
+                slide_count,
+                has_notes,
+            } => {
+                payload.pptx_slide_count = *slide_count;
+                payload.pptx_has_notes = *has_notes;
+            }
+            FormatProvenance::Generic => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct IngestionProvenance {
     pub external_id: Option<String>,
@@ -183,73 +245,11 @@ pub(crate) fn build_point_payload(
     url: &str,
     file_hash: Option<&str>,
 ) -> PointPayload {
-    // Default values for every format-specific field. Only the fields
-    // belonging to the active variant are overridden below; the rest stay
-    // at their type default (None / empty Vec), matching the old flat
-    // struct's behaviour where inactive fields were simply not set.
-    let mut seed_url: Option<String> = None;
-    let mut search_query: Option<String> = None;
-    let mut crawl_depth: Option<u32> = None;
-    let mut email_to: Vec<String> = Vec::new();
-    let mut email_message_id: Option<String> = None;
-    let mut email_thread_id: Option<String> = None;
-    let mut email_has_attachments: Option<bool> = None;
-    let mut feed_url: Option<String> = None;
-    let mut feed_item_id: Option<String> = None;
-    let mut pptx_slide_count: Option<u32> = None;
-    let mut pptx_has_notes: Option<bool> = None;
-    let mut subtitle_start_s: Option<f64> = None;
-    let mut subtitle_end_s: Option<f64> = None;
-    let mut subtitle_source_file: Option<String> = None;
-
-    match &provenance.format {
-        FormatProvenance::Web {
-            seed_url: s,
-            search_query: q,
-            crawl_depth: d,
-        } => {
-            seed_url = s.clone();
-            search_query = q.clone();
-            crawl_depth = *d;
-        }
-        FormatProvenance::Email {
-            to,
-            message_id,
-            thread_id,
-            has_attachments,
-        } => {
-            email_to = to.clone();
-            email_message_id = message_id.clone();
-            email_thread_id = thread_id.clone();
-            email_has_attachments = *has_attachments;
-        }
-        FormatProvenance::Feed {
-            feed_url: f,
-            item_id,
-        } => {
-            feed_url = f.clone();
-            feed_item_id = item_id.clone();
-        }
-        FormatProvenance::Subtitle {
-            start_s,
-            end_s,
-            source_file,
-        } => {
-            subtitle_start_s = *start_s;
-            subtitle_end_s = *end_s;
-            subtitle_source_file = source_file.clone();
-        }
-        FormatProvenance::Presentation {
-            slide_count,
-            has_notes,
-        } => {
-            pptx_slide_count = *slide_count;
-            pptx_has_notes = *has_notes;
-        }
-        FormatProvenance::Generic => {}
-    }
-
-    PointPayload {
+    // Pre-initialise web-provenance fields from result.metadata as fallbacks.
+    // FormatProvenance::apply() will override these when the active variant
+    // carries its own Some(...) values. Non-web variants leave these at the
+    // metadata default (which is typically None).
+    let mut payload = PointPayload {
         text: chunk.text.clone(),
         url: url.to_string(),
         domain: chunk.domain.clone(),
@@ -269,23 +269,26 @@ pub(crate) fn build_point_payload(
         git_branch,
         external_id: provenance.external_id.clone(),
         platform_url: provenance.platform_url.clone(),
-        seed_url: seed_url.or_else(|| result.metadata.seed_url.clone()),
-        search_query: search_query.or_else(|| result.metadata.search_query.clone()),
-        crawl_depth: crawl_depth.or(result.metadata.crawl_depth),
-        email_to,
-        email_message_id,
-        email_thread_id,
-        email_has_attachments,
-        feed_url,
-        feed_item_id,
-        pptx_slide_count,
-        pptx_has_notes,
-        subtitle_start_s,
-        subtitle_end_s,
-        subtitle_source_file,
+        seed_url: result.metadata.seed_url.clone(),
+        search_query: result.metadata.search_query.clone(),
+        crawl_depth: result.metadata.crawl_depth,
+        email_to: Vec::new(),
+        email_message_id: None,
+        email_thread_id: None,
+        email_has_attachments: None,
+        feed_url: None,
+        feed_item_id: None,
+        pptx_slide_count: None,
+        pptx_has_notes: None,
+        subtitle_start_s: None,
+        subtitle_end_s: None,
+        subtitle_source_file: None,
         section_header: chunk.section_header.clone(),
         file_hash: file_hash.map(str::to_owned),
-    }
+    };
+
+    provenance.format.apply(&mut payload);
+    payload
 }
 
 pub(crate) fn make_text_result(
