@@ -1,0 +1,19 @@
+{
+  "id": 1,
+  "title": "Shopify Widget",
+  "handle": "widget",
+  "vendor": "FixtureCo",
+  "product_type": "Gadgets",
+  "tags": ["fixture"],
+  "variants": [
+    {
+      "id": 11,
+      "title": "Default",
+      "price": "1999",
+      "available": true,
+      "sku": "WIDGET-1"
+    }
+  ],
+  "images": ["https://example.com/widget.jpg"],
+  "description": "A Shopify fixture widget."
+}

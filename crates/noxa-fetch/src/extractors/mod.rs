@@ -21,6 +21,7 @@ pub mod instagram_profile;
 pub mod linkedin_post;
 pub mod npm;
 pub mod pypi;
+mod product;
 pub mod reddit;
 pub mod shopify_collection;
 pub mod shopify_product;
@@ -895,6 +896,152 @@ mod tests {
             .expect_err("verify wall must not parse as reddit JSON");
 
             assert!(err.to_string().contains("verification"));
+        }
+    }
+
+    pub mod ecommerce {
+        use std::collections::BTreeMap;
+
+        use async_trait::async_trait;
+
+        use super::*;
+
+        struct FixtureHttp {
+            bodies: BTreeMap<&'static str, &'static str>,
+        }
+
+        impl FixtureHttp {
+            fn new(entries: &[(&'static str, &'static str)]) -> Self {
+                Self {
+                    bodies: entries.iter().copied().collect(),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl http::ExtractorHttp for FixtureHttp {
+            async fn get_text(&self, url: &str) -> Result<String, FetchError> {
+                self.bodies
+                    .get(url)
+                    .map(|body| (*body).to_string())
+                    .ok_or_else(|| FetchError::Build(format!("missing fixture for {url}")))
+            }
+
+            async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
+                let body = self.get_text(url).await?;
+                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+            }
+        }
+
+        #[tokio::test]
+        async fn ecommerce_matchers_cover_auto_and_explicit_only_groups() {
+            assert!(amazon_product::matches("https://www.amazon.com/dp/B000123"));
+            assert!(ebay_listing::matches("https://www.ebay.com/itm/123456"));
+            assert!(etsy_listing::matches("https://www.etsy.com/listing/123456/test"));
+            assert!(trustpilot_reviews::matches("https://www.trustpilot.com/review/example.com"));
+
+            assert!(shopify_product::matches("https://shop.example/products/widget"));
+            assert!(shopify_collection::matches("https://shop.example/collections/frontpage"));
+            assert!(ecommerce_product::matches("https://shop.example/products/widget"));
+            assert!(woocommerce_product::matches("https://store.example/product/widget"));
+
+            assert!(
+                dispatch_by_url(&FixtureHttp::new(&[]), "https://shop.example/products/widget")
+                    .await
+                    .is_none()
+            );
+            assert!(
+                dispatch_by_url(&FixtureHttp::new(&[]), "https://store.example/product/widget")
+                    .await
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn ecommerce_extractors_parse_fixture_payloads() {
+            let client = FixtureHttp::new(&[
+                (
+                    "https://www.amazon.com/dp/B000123",
+                    include_str!("../../tests/fixtures/extractors/product_page.html"),
+                ),
+                (
+                    "https://www.ebay.com/itm/123456",
+                    include_str!("../../tests/fixtures/extractors/product_page.html"),
+                ),
+                (
+                    "https://www.etsy.com/listing/123456/test",
+                    include_str!("../../tests/fixtures/extractors/product_page.html"),
+                ),
+                (
+                    "https://shop.example/products/widget",
+                    include_str!("../../tests/fixtures/extractors/product_page.html"),
+                ),
+                (
+                    "https://store.example/product/widget",
+                    include_str!("../../tests/fixtures/extractors/product_page.html"),
+                ),
+                (
+                    "https://shop.example/products/widget.js",
+                    include_str!("../../tests/fixtures/extractors/shopify_product.json"),
+                ),
+                (
+                    "https://shop.example/collections/frontpage/products.json",
+                    include_str!("../../tests/fixtures/extractors/shopify_collection.json"),
+                ),
+                (
+                    "https://www.trustpilot.com/review/example.com",
+                    include_str!("../../tests/fixtures/extractors/trustpilot.html"),
+                ),
+            ]);
+
+            let amazon = amazon_product::extract(&client, "https://www.amazon.com/dp/B000123")
+                .await
+                .unwrap();
+            assert_eq!(amazon["title"], "Fixture Widget");
+            assert_eq!(amazon["price"], "19.99");
+
+            let ebay = ebay_listing::extract(&client, "https://www.ebay.com/itm/123456")
+                .await
+                .unwrap();
+            assert_eq!(ebay["title"], "Fixture Widget");
+
+            let etsy = etsy_listing::extract(&client, "https://www.etsy.com/listing/123456/test")
+                .await
+                .unwrap();
+            assert_eq!(etsy["availability"], "InStock");
+
+            let generic = ecommerce_product::extract(&client, "https://shop.example/products/widget")
+                .await
+                .unwrap();
+            assert_eq!(generic["brand"], "FixtureCo");
+
+            let woo = woocommerce_product::extract(&client, "https://store.example/product/widget")
+                .await
+                .unwrap();
+            assert_eq!(woo["sku"], "WIDGET-1");
+
+            let shopify =
+                shopify_product::extract(&client, "https://shop.example/products/widget")
+                    .await
+                    .unwrap();
+            assert_eq!(shopify["title"], "Shopify Widget");
+
+            let collection = shopify_collection::extract(
+                &client,
+                "https://shop.example/collections/frontpage",
+            )
+            .await
+            .unwrap();
+            assert_eq!(collection["products"][0]["title"], "Shopify Widget");
+
+            let trustpilot = trustpilot_reviews::extract(
+                &client,
+                "https://www.trustpilot.com/review/example.com",
+            )
+            .await
+            .unwrap();
+            assert_eq!(trustpilot["business"], "Example Inc");
+            assert_eq!(trustpilot["reviews"][0]["rating"], 5);
         }
     }
 }

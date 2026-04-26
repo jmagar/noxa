@@ -1,6 +1,6 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use super::{ExtractorInfo, http::ExtractorHttp, stub_error};
+use super::{ExtractorInfo, http::ExtractorHttp};
 use crate::error::FetchError;
 
 pub const INFO: ExtractorInfo = ExtractorInfo {
@@ -14,6 +14,12 @@ pub fn matches(url: &str) -> bool {
     url.contains("/collections/")
 }
 
-pub async fn extract(_client: &dyn ExtractorHttp, _url: &str) -> Result<Value, FetchError> {
-    Err(stub_error(INFO.name))
+pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
+    let api_url = format!("{}/products.json", url.trim_end_matches('/'));
+    let collection = client.get_json(&api_url).await?;
+    Ok(json!({
+        "url": url,
+        "api_url": api_url,
+        "products": collection.get("products").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
