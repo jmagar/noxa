@@ -38,15 +38,22 @@ async fn check_response(
 
 #[async_trait]
 impl VectorStore for QdrantStore {
-    /// PUT /collections/{name}/points?wait=false — idempotent with deterministic
-    /// UUID v5 point IDs, so we do not block on WAL+index flush. This saves the
-    /// ~30ms RTT per upsert that `wait=true` imposes. Delete operations still
-    /// use `wait=true` because stale-chunk cleanup must observably complete
-    /// before the URL-lock is released.
+    /// PUT /collections/{name}/points?wait=true — we use wait=true here even
+    /// though the deterministic UUID v5 IDs make the upsert idempotent, because
+    /// `delete_stale_by_url` runs immediately after with `must_not: has_id
+    /// [new_ids]`. With wait=false, Qdrant returns `Acknowledged` once the
+    /// operation is written to WAL but *before* it is applied to segments.
+    /// The delete filter evaluates against current segment state, so new point
+    /// IDs that are WAL-only are not yet visible — meaning the `has_id` guard
+    /// could fail to protect them if they were somehow targeted. Qdrant's docs
+    /// do not guarantee that subsequent requests see wait=false WAL entries
+    /// before segment flush (no per-connection ordering guarantee is documented).
+    /// wait=true ensures the upserted points are committed to segments before
+    /// the delete filter runs, closing the race at the cost of ~30ms RTT.
     async fn upsert(&self, points: Vec<Point>) -> Result<usize, RagError> {
         let n = points.len();
         let url = format!(
-            "{}/collections/{}/points?wait=false",
+            "{}/collections/{}/points?wait=true",
             self.base_url, self.collection
         );
 
