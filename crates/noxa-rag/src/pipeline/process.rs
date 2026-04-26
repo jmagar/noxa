@@ -118,7 +118,7 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, ctx: &Wo
 pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<JobStats, RagError> {
     let job_start = std::time::Instant::now();
 
-    let t0 = std::time::Instant::now();
+    let io_t0 = std::time::Instant::now();
     // Canonicalize can fail for benign reasons — most commonly ENOENT when the
     // file was deleted between the watcher event and job execution. That's a
     // race, not a backend failure, so we must NOT return `Err` (which would
@@ -168,11 +168,12 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
         tracing::warn!(path = ?job.path, max_file_bytes, "file exceeded size limit after read (grow-after-stat), skipping");
         return Ok(JobStats::default());
     }
-    let parse_ms = t0.elapsed().as_millis() as u64;
+    let io_ms = io_t0.elapsed().as_millis() as u64;
 
     // Compute xxHash3 of raw bytes before file_bytes is moved into parse_file.
     let file_hash = format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&file_bytes));
 
+    let parse_t0 = std::time::Instant::now();
     let parsed = match parse::parse_file(&job.path, file_bytes).await {
         Ok(r) => r,
         Err(e) => {
@@ -181,6 +182,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             return Ok(JobStats::default());
         }
     };
+    let parse_ms = parse_t0.elapsed().as_millis() as u64;
     let mut result = parsed.extraction;
 
     if result.metadata.file_path.is_none() {
@@ -337,6 +339,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
                 chunks = upserted,
                 embed_tokens = total_tokens,
                 embed_tokens_per_sec,
+                io_ms,
                 parse_ms,
                 chunk_ms,
                 embed_ms,
@@ -363,6 +366,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
 
     Ok(JobStats {
         chunks: n_chunks,
+        io_ms,
         parse_ms,
         chunk_ms,
         embed_ms,

@@ -41,6 +41,7 @@ pub(super) fn spawn_heartbeat(
                         indexed        = snap.indexed,
                         failed         = snap.failed,
                         parse_failures = snap.parse_failures,
+                        io_ms          = snap.total_io_ms,
                         parse_ms       = snap.total_parse_ms,
                         chunk_ms       = snap.total_chunk_ms,
                         embed_ms       = snap.total_embed_ms,

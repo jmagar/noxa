@@ -24,6 +24,7 @@ struct CounterSnapshot {
     failed: usize,
     parse_failures: usize,
     total_chunks: usize,
+    total_io_ms: u64,
     total_parse_ms: u64,
     total_chunk_ms: u64,
     total_embed_ms: u64,
@@ -38,6 +39,9 @@ struct SessionCounters {
     /// broader process errors so the heartbeat can report them independently.
     parse_failures: std::sync::atomic::AtomicUsize,
     total_chunks: std::sync::atomic::AtomicUsize,
+    /// Total time spent on file I/O (canonicalize, open, read) across all jobs.
+    total_io_ms: std::sync::atomic::AtomicU64,
+    /// Total time spent in the parser (CPU-bound format decoding) across all jobs.
     total_parse_ms: std::sync::atomic::AtomicU64,
     total_chunk_ms: std::sync::atomic::AtomicU64,
     total_embed_ms: std::sync::atomic::AtomicU64,
@@ -52,6 +56,7 @@ impl SessionCounters {
             failed: self.files_failed.load(Relaxed),
             parse_failures: self.parse_failures.load(Relaxed),
             total_chunks: self.total_chunks.load(Relaxed),
+            total_io_ms: self.total_io_ms.load(Relaxed),
             total_parse_ms: self.total_parse_ms.load(Relaxed),
             total_chunk_ms: self.total_chunk_ms.load(Relaxed),
             total_embed_ms: self.total_embed_ms.load(Relaxed),
@@ -65,6 +70,7 @@ impl SessionCounters {
             self.files_indexed.fetch_add(1, Relaxed);
         }
         self.total_chunks.fetch_add(stats.chunks, Relaxed);
+        self.total_io_ms.fetch_add(stats.io_ms, Relaxed);
         self.total_parse_ms.fetch_add(stats.parse_ms, Relaxed);
         self.total_chunk_ms.fetch_add(stats.chunk_ms, Relaxed);
         self.total_embed_ms.fetch_add(stats.embed_ms, Relaxed);
@@ -111,6 +117,9 @@ enum PipelineJob {
 #[derive(Default)]
 struct JobStats {
     chunks: usize,
+    /// Time spent on file I/O (canonicalize, open, read) — does not include parse CPU time.
+    io_ms: u64,
+    /// Time spent in the parser (CPU-bound format decoding) — does not include file I/O.
     parse_ms: u64,
     chunk_ms: u64,
     embed_ms: u64,
