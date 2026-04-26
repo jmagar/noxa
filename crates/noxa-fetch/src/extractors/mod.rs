@@ -709,4 +709,117 @@ mod tests {
             assert_eq!(video["view_count"], 1000);
         }
     }
+
+    pub mod social {
+        use std::collections::BTreeMap;
+
+        use async_trait::async_trait;
+
+        use super::*;
+
+        struct FixtureHttp {
+            bodies: BTreeMap<&'static str, &'static str>,
+        }
+
+        impl FixtureHttp {
+            fn new(entries: &[(&'static str, &'static str)]) -> Self {
+                Self {
+                    bodies: entries.iter().copied().collect(),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl http::ExtractorHttp for FixtureHttp {
+            async fn get_text(&self, url: &str) -> Result<String, FetchError> {
+                self.bodies
+                    .get(url)
+                    .map(|body| (*body).to_string())
+                    .ok_or_else(|| FetchError::Build(format!("missing fixture for {url}")))
+            }
+
+            async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
+                let body = self.get_text(url).await?;
+                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+            }
+        }
+
+        #[test]
+        fn social_matchers_disambiguate_urls() {
+            assert!(huggingface_model::matches("https://huggingface.co/openai/whisper-large-v3"));
+            assert!(!huggingface_model::matches("https://huggingface.co/datasets/openai/gsm8k"));
+            assert!(huggingface_dataset::matches("https://huggingface.co/datasets/openai/gsm8k"));
+            assert!(instagram_post::matches("https://www.instagram.com/p/ABC123/"));
+            assert!(instagram_post::matches("https://www.instagram.com/reel/ABC123/"));
+            assert!(!instagram_profile::matches("https://www.instagram.com/p/ABC123/"));
+            assert!(instagram_profile::matches("https://www.instagram.com/jmagar/"));
+            assert!(linkedin_post::matches(
+                "https://www.linkedin.com/feed/update/urn:li:activity:7452618583290892288"
+            ));
+        }
+
+        #[tokio::test]
+        async fn social_extractors_parse_fixture_payloads() {
+            let client = FixtureHttp::new(&[
+                (
+                    "https://huggingface.co/api/models/openai/whisper-large-v3",
+                    include_str!("../../tests/fixtures/extractors/huggingface_model.json"),
+                ),
+                (
+                    "https://huggingface.co/api/datasets/openai/gsm8k",
+                    include_str!("../../tests/fixtures/extractors/huggingface_dataset.json"),
+                ),
+                (
+                    "https://www.instagram.com/p/ABC123/embed/captioned/",
+                    include_str!("../../tests/fixtures/extractors/instagram_post.html"),
+                ),
+                (
+                    "https://www.instagram.com/api/v1/users/web_profile_info/?username=jmagar",
+                    include_str!("../../tests/fixtures/extractors/instagram_profile.json"),
+                ),
+                (
+                    "https://www.linkedin.com/embed/feed/update/urn:li:activity:7452618583290892288",
+                    include_str!("../../tests/fixtures/extractors/linkedin_post.html"),
+                ),
+            ]);
+
+            let model =
+                huggingface_model::extract(&client, "https://huggingface.co/openai/whisper-large-v3")
+                    .await
+                    .unwrap();
+            assert_eq!(model["model_id"], "openai/whisper-large-v3");
+            assert_eq!(model["file_count"], 1);
+
+            let dataset = huggingface_dataset::extract(
+                &client,
+                "https://huggingface.co/datasets/openai/gsm8k",
+            )
+            .await
+            .unwrap();
+            assert_eq!(dataset["id"], "openai/gsm8k");
+            assert_eq!(dataset["downloads"], 200);
+
+            let post = instagram_post::extract(&client, "https://www.instagram.com/p/ABC123/")
+                .await
+                .unwrap();
+            assert_eq!(post["shortcode"], "ABC123");
+            assert_eq!(post["author_username"], "jmagar");
+
+            let profile =
+                instagram_profile::extract(&client, "https://www.instagram.com/jmagar/")
+                    .await
+                    .unwrap();
+            assert_eq!(profile["username"], "jmagar");
+            assert_eq!(profile["recent_posts"][0]["shortcode"], "ABC123");
+
+            let linked = linkedin_post::extract(
+                &client,
+                "https://www.linkedin.com/feed/update/urn:li:activity:7452618583290892288",
+            )
+            .await
+            .unwrap();
+            assert_eq!(linked["urn"], "urn:li:activity:7452618583290892288");
+            assert_eq!(linked["author_name"], "Jacob Magar");
+        }
+    }
 }

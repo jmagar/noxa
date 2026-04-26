@@ -1,0 +1,21 @@
+{
+  "id": "openai/gsm8k",
+  "private": false,
+  "gated": false,
+  "downloads": 200,
+  "downloadsAllTime": 2000,
+  "likes": 20,
+  "tags": ["math"],
+  "createdAt": "2026-01-01T00:00:00Z",
+  "lastModified": "2026-01-02T00:00:00Z",
+  "sha": "def456",
+  "cardData": {
+    "license": "mit",
+    "language": ["en"],
+    "task_categories": ["question-answering"],
+    "size_categories": ["1K<n<10K"],
+    "annotations_creators": ["expert-generated"],
+    "configs": ["main"]
+  },
+  "siblings": [{ "rfilename": "README.md", "size": 456 }]
+}

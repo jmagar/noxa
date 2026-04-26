@@ -1,6 +1,7 @@
-use serde_json::Value;
+use regex::Regex;
+use serde_json::{Value, json};
 
-use super::{ExtractorInfo, host_matches, http::ExtractorHttp, stub_error};
+use super::{ExtractorInfo, http::ExtractorHttp};
 use crate::error::FetchError;
 
 pub const INFO: ExtractorInfo = ExtractorInfo {
@@ -11,9 +12,89 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
 };
 
 pub fn matches(url: &str) -> bool {
-    host_matches(url, "instagram.com") && (url.contains("/p/") || url.contains("/reel/"))
+    parse_shortcode(url).is_some()
 }
 
-pub async fn extract(_client: &dyn ExtractorHttp, _url: &str) -> Result<Value, FetchError> {
-    Err(stub_error(INFO.name))
+pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
+    let (kind, shortcode) = parse_shortcode(url).ok_or_else(|| {
+        FetchError::Build(format!("instagram_post: cannot parse shortcode from '{url}'"))
+    })?;
+    let embed_url = format!("https://www.instagram.com/p/{shortcode}/embed/captioned/");
+    let html = client.get_text(&embed_url).await?;
+
+    Ok(json!({
+        "url": url,
+        "embed_url": embed_url,
+        "shortcode": shortcode,
+        "kind": kind,
+        "data_completeness": "embed",
+        "author_username": parse_username(&html),
+        "caption": parse_caption(&html),
+        "thumbnail_url": parse_thumbnail(&html),
+        "canonical_url": format!("https://www.instagram.com/{}/{shortcode}/", path_segment_for(kind)),
+    }))
+}
+
+fn parse_shortcode(url: &str) -> Option<(&'static str, String)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    if host != "www.instagram.com" && host != "instagram.com" {
+        return None;
+    }
+    let segs: Vec<_> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let kind = match segs.first().copied()? {
+        "p" => "post",
+        "reel" | "reels" => "reel",
+        "tv" => "tv",
+        _ => return None,
+    };
+    Some((kind, segs.get(1)?.to_string()))
+}
+
+fn path_segment_for(kind: &str) -> &'static str {
+    match kind {
+        "reel" => "reel",
+        "tv" => "tv",
+        _ => "p",
+    }
+}
+
+fn parse_username(html: &str) -> Option<String> {
+    let re = Regex::new(r#"(?s)class="CaptionUsername"[^>]*>([^<]+)<"#).ok()?;
+    re.captures(html)
+        .and_then(|captures| captures.get(1))
+        .map(|value| html_decode(value.as_str().trim()))
+}
+
+fn parse_caption(html: &str) -> Option<String> {
+    let outer = Regex::new(r#"(?s)<div\s+class="Caption"[^>]*>(.*?)</div>"#).ok()?;
+    let block = outer.captures(html)?.get(1)?.as_str();
+    let user_re =
+        Regex::new(r#"(?s)<a[^>]*class="CaptionUsername"[^>]*>.*?</a>"#).ok()?;
+    let stripped = user_re.replace_all(block, "");
+    let tag_re = Regex::new(r"<[^>]+>").ok()?;
+    let text = tag_re.replace_all(&stripped, " ");
+    let decoded = html_decode(text.trim());
+    let cleaned = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn parse_thumbnail(html: &str) -> Option<String> {
+    let img_re = Regex::new(
+        r#"(?s)<img[^>]+class="[^"]*EmbeddedMediaImage[^"]*"[^>]+src="([^"]+)""#,
+    )
+    .ok()?;
+    img_re
+        .captures(html)
+        .and_then(|captures| captures.get(1))
+        .map(|value| html_decode(value.as_str()))
+}
+
+fn html_decode(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 }

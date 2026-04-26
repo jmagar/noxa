@@ -1,0 +1,23 @@
+{
+  "id": "openai/whisper-large-v3",
+  "modelId": "openai/whisper-large-v3",
+  "private": false,
+  "gated": false,
+  "downloads": 100,
+  "downloadsAllTime": 1000,
+  "likes": 10,
+  "library_name": "transformers",
+  "pipeline_tag": "automatic-speech-recognition",
+  "tags": ["transformers", "pytorch"],
+  "createdAt": "2026-01-01T00:00:00Z",
+  "lastModified": "2026-01-02T00:00:00Z",
+  "sha": "abc123",
+  "cardData": {
+    "license": "mit",
+    "language": ["en"],
+    "datasets": ["librispeech"],
+    "base_model": null,
+    "model_type": "whisper"
+  },
+  "siblings": [{ "rfilename": "config.json", "size": 123 }]
+}
