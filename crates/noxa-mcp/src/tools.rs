@@ -70,6 +70,8 @@ pub struct ScrapeParams {
     pub browser: Option<BrowserParam>,
     /// Cookies to send with the request (e.g. ["name=value", "session=abc123"])
     pub cookies: Option<Vec<String>>,
+    /// Optional vertical extractor name. Use the extractors tool to list valid values.
+    pub extractor: Option<String>,
 }
 
 impl ScrapeParams {
@@ -222,6 +224,17 @@ mod tests {
         .to_string();
 
         assert!(err.contains("unknown variant"));
+    }
+
+    #[test]
+    fn scrape_accepts_explicit_extractor() {
+        let params = serde_json::from_value::<ScrapeParams>(json!({
+            "url": "https://github.com/jmagar/noxa",
+            "extractor": "github_repo"
+        }))
+        .unwrap();
+
+        assert_eq!(params.extractor.as_deref(), Some("github_repo"));
     }
 
     #[test]

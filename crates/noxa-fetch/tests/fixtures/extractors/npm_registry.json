@@ -1,0 +1,21 @@
+{
+  "name": "@types/node",
+  "description": "TypeScript definitions for node",
+  "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+  "repository": { "url": "git+https://github.com/DefinitelyTyped/DefinitelyTyped.git" },
+  "keywords": ["node"],
+  "maintainers": [{ "name": "types", "email": "types@example.com" }],
+  "dist-tags": { "latest": "20.0.0" },
+  "versions": {
+    "20.0.0": {
+      "license": "MIT",
+      "dependencies": { "undici-types": "~5.0.0" },
+      "devDependencies": {},
+      "peerDependencies": {},
+      "deprecated": null
+    }
+  },
+  "time": {
+    "20.0.0": "2026-01-01T00:00:00.000Z"
+  }
+}

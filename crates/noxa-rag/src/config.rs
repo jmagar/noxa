@@ -74,9 +74,7 @@ fn normalize_source(config: &mut RagConfig) -> Result<(), RagError> {
                 ));
             }
             if !has_dirs && !has_legacy {
-                return Err(RagError::Config(
-                    "watch_dirs must not be empty".to_string(),
-                ));
+                return Err(RagError::Config("watch_dirs must not be empty".to_string()));
             }
             if has_legacy {
                 *watch_dirs = vec![watch_dir.take().unwrap()];
@@ -162,9 +160,7 @@ pub enum EmbedProviderConfig {
 }
 
 fn default_query_instruction() -> Option<String> {
-    Some(
-        "Given a web search query, retrieve relevant passages that answer the query".to_string(),
-    )
+    Some("Given a web search query, retrieve relevant passages that answer the query".to_string())
 }
 
 impl EmbedProviderConfig {
@@ -302,9 +298,9 @@ pub fn load_config(path: &Path) -> Result<RagConfig, RagError> {
     let root: TomlRoot = toml::from_str(&content)
         .map_err(|e| RagError::Config(format!("config parse error: {}", e)))?;
 
-    let raw = root.rag.ok_or_else(|| {
-        RagError::Config(format!("missing [rag] section in {}", path.display()))
-    })?;
+    let raw = root
+        .rag
+        .ok_or_else(|| RagError::Config(format!("missing [rag] section in {}", path.display())))?;
 
     // Resolve uuid_namespace: use the explicit value from config, or generate a
     // random one for this deployment. A random namespace means point IDs are

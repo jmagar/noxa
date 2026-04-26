@@ -126,15 +126,25 @@ pub(crate) async fn run_watch(
 
 const WATCH_ON_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+fn parse_on_change_command(cmd: &str) -> Result<Vec<String>, String> {
+    let argv = shlex::split(cmd)
+        .ok_or_else(|| "failed to parse command: invalid shell-style quoting".to_string())?;
+    if argv.is_empty() {
+        return Err("failed to run command: command is empty".to_string());
+    }
+    Ok(argv)
+}
+
 pub(crate) async fn run_on_change_command(
     cmd: &str,
     payload: &str,
     max_runtime: std::time::Duration,
 ) -> Result<(), String> {
-    let mut child = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .stdin(std::process::Stdio::piped())
+    let argv = parse_on_change_command(cmd)?;
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command.stdin(std::process::Stdio::piped());
+    let mut child = command
         .spawn()
         .map_err(|e| format!("failed to run command: {e}"))?;
 

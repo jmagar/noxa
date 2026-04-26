@@ -9,10 +9,19 @@ pub struct ExtractionResult {
     pub metadata: Metadata,
     pub content: Content,
     pub domain_data: Option<DomainData>,
+    /// Site-specific structured payload returned by a vertical extractor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_data: Option<VerticalData>,
     /// JSON-LD structured data extracted from `<script type="application/ld+json">` blocks.
     /// Contains Schema.org markup (Product, Article, BreadcrumbList, etc.) when present.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub structured_data: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerticalData {
+    pub extractor: String,
+    pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

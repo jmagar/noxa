@@ -70,10 +70,10 @@ where
                     let mut parts = line.split_whitespace();
                     method = parts.next().unwrap_or_default().to_string();
                     path = parts.next().unwrap_or_default().to_string();
-                } else if let Some((name, value)) = line.split_once(':') {
-                    if name.trim().eq_ignore_ascii_case("content-length") {
-                        content_length = value.trim().parse().unwrap_or(0);
-                    }
+                } else if let Some((name, value)) = line.split_once(':')
+                    && name.trim().eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse().unwrap_or(0);
                 }
             }
 
@@ -271,7 +271,7 @@ async fn build_vector_store_reconciles_existing_indexes_and_searches_with_metada
                         .to_string()
                     }
                 }
-                ("PUT", path) if path == "/collections/noxa-test/index" => "{}".to_string(),
+                ("PUT", "/collections/noxa-test/index") => "{}".to_string(),
                 ("POST", "/collections/noxa-test/points/search") => serde_json::json!({
                     "result": [
                         {
@@ -421,10 +421,10 @@ where
                     let mut parts = line.split_whitespace();
                     method = parts.next().unwrap_or_default().to_string();
                     path = parts.next().unwrap_or_default().to_string();
-                } else if let Some((name, value)) = line.split_once(':') {
-                    if name.trim().eq_ignore_ascii_case("content-length") {
-                        content_length = value.trim().parse().unwrap_or(0);
-                    }
+                } else if let Some((name, value)) = line.split_once(':')
+                    && name.trim().eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse().unwrap_or(0);
                 }
             }
 

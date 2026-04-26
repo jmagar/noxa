@@ -136,12 +136,12 @@ impl FilesystemContentStore {
             // --- Fast path: cache hit ---
             {
                 let guard = self.manifest_cache.0.lock().await;
-                if let Some(cache) = guard.cache.as_ref() {
-                    if cache.is_fresh() {
-                        let mut docs: Vec<StoredDoc> = cache.docs.values().cloned().collect();
-                        docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
-                        return Ok(docs);
-                    }
+                if let Some(cache) = guard.cache.as_ref()
+                    && cache.is_fresh()
+                {
+                    let mut docs: Vec<StoredDoc> = cache.docs.values().cloned().collect();
+                    docs.sort_by(|a, b| a.md_path.cmp(&b.md_path));
+                    return Ok(docs);
                 }
             }
 

@@ -12,9 +12,20 @@ pub(crate) async fn run_batch(
 
     let urls: Vec<&str> = entries.iter().map(|(u, _)| u.as_str()).collect();
     let options = build_extraction_options(resolved);
-    let results = client
-        .fetch_and_extract_batch_with_options(&urls, resolved.concurrency, &options)
-        .await;
+    let results = if let Some(ref extractor) = cli.extractor {
+        client
+            .fetch_and_extract_batch_vertical_with_options(
+                &urls,
+                resolved.concurrency,
+                extractor,
+                &options,
+            )
+            .await
+    } else {
+        client
+            .fetch_and_extract_batch_with_options(&urls, resolved.concurrency, &options)
+            .await
+    };
 
     let ok = results.iter().filter(|r| r.result.is_ok()).count();
     let errors = results.len() - ok;

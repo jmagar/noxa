@@ -89,10 +89,12 @@ impl QdrantStore {
     /// Reconcile the landed file-metadata indexes on an already-existing collection.
     pub(crate) async fn reconcile_landed_file_metadata_indexes(&self) -> Result<(), RagError> {
         let idx_url = format!("{}/collections/{}/index", self.base_url, self.collection);
-        for (field, schema_type) in BASE_COLLECTION_INDEXES
-            .iter()
-            .filter(|(field, _)| matches!(*field, "file_path" | "last_modified" | "git_branch" | "content_hash" | "section_header"))
-        {
+        for (field, schema_type) in BASE_COLLECTION_INDEXES.iter().filter(|(field, _)| {
+            matches!(
+                *field,
+                "file_path" | "last_modified" | "git_branch" | "content_hash" | "section_header"
+            )
+        }) {
             let idx_body = json!({ "field_name": field, "field_schema": schema_type });
             let r = self.client.put(&idx_url).json(&idx_body).send().await?;
             if !r.status().is_success() {

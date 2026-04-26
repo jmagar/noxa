@@ -220,6 +220,30 @@ impl NoxaMcp {
             .as_ref()
             .unwrap_or_else(|| self.fetch_client.as_ref());
 
+        if let Some(ref extractor) = params.extractor {
+            let options = noxa_core::ExtractionOptions {
+                include_selectors: include,
+                exclude_selectors: exclude,
+                only_main_content: main_only,
+                include_raw_html: false,
+            };
+            let extraction = client
+                .fetch_and_extract_vertical(&params.url, extractor, &options)
+                .await
+                .map_err(|error| Self::map_tool_error(NoxaMcpError::Fetch(error)))?;
+            self.persist_local_extraction(&params.url, &extraction)
+                .await
+                .map_err(Self::map_tool_error)?;
+            let output = match format {
+                ScrapeFormat::Llm => noxa_core::to_llm_text(&extraction, Some(&params.url)),
+                ScrapeFormat::Text => extraction.content.plain_text,
+                ScrapeFormat::Json => to_pretty_json(&extraction, "scrape vertical extraction")
+                    .map_err(Self::map_tool_error)?,
+                ScrapeFormat::Markdown => extraction.content.markdown,
+            };
+            return Ok(output);
+        }
+
         let formats = [format.as_str()];
         let result = cloud::smart_fetch(
             client,
@@ -474,6 +498,7 @@ impl NoxaMcp {
                         fetched_at: None,
                     },
                     domain_data: None,
+                    vertical_data: None,
                     structured_data: Vec::new(),
                 };
 
@@ -887,6 +912,13 @@ impl NoxaMcp {
         }
         self.search_after_validation(params).await
     }
+
+    /// List available vertical extractors for explicit scrape extraction.
+    #[tool]
+    async fn extractors(&self) -> ToolResult {
+        to_pretty_json(&noxa_fetch::extractors::list(), "extractor catalog")
+            .map_err(Self::map_tool_error)
+    }
 }
 
 #[tool_handler]
@@ -896,7 +928,7 @@ impl ServerHandler for NoxaMcp {
             .with_server_info(Implementation::new("noxa-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(String::from(
                 "Noxa MCP server -- web content extraction for AI agents. \
-                 Tools: scrape, crawl, map, batch, extract, summarize, diff, brand, research, search.",
+                 Tools: scrape, extractors, crawl, map, batch, extract, summarize, diff, brand, research, search.",
             ))
     }
 }
@@ -969,6 +1001,7 @@ mod tests {
                 format: Some(ScrapeFormat::Markdown),
                 browser: None,
                 cookies: None,
+                extractor: None,
                 include_selectors: None,
                 exclude_selectors: None,
                 only_main_content: None,
@@ -979,6 +1012,40 @@ mod tests {
         assert!(output.contains("persist me"));
         let stored = app.store.read(&url).await.unwrap();
         assert!(stored.is_some(), "scrape should persist a diff baseline");
+    }
+
+    #[tokio::test]
+    async fn scrape_after_validation_reports_unknown_vertical_extractor() {
+        let home = tempdir().unwrap();
+        let app = test_app(home.path(), None, None, None, None);
+        let err = app
+            .scrape_after_validation(ScrapeParams {
+                url: "https://example.com/article".to_string(),
+                format: Some(ScrapeFormat::Json),
+                browser: None,
+                cookies: None,
+                extractor: Some("missing_vertical".to_string()),
+                include_selectors: None,
+                exclude_selectors: None,
+                only_main_content: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("unknown vertical"));
+    }
+
+    #[tokio::test]
+    async fn extractors_tool_returns_full_catalog() {
+        let home = tempdir().unwrap();
+        let app = test_app(home.path(), None, None, None, None);
+
+        let output = app.extractors().await.unwrap();
+        let entries: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let entries = entries.as_array().unwrap();
+
+        assert_eq!(entries.len(), noxa_fetch::extractors::list().len());
+        assert!(entries.iter().any(|entry| entry["name"] == "github_repo"));
     }
 
     #[tokio::test]
@@ -1051,6 +1118,13 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_ollama_config_builds_non_empty_chain() {
+        let ollama = TestHttpServer::spawn(|request| {
+            if request.path == "/api/tags" {
+                return TestResponse::json(r#"{"models":[]}"#);
+            }
+            TestResponse::text(404, "missing", "text/plain")
+        })
+        .await;
         let home = tempdir().unwrap();
         let store_root = home.path().join("content");
         std::fs::create_dir_all(&store_root).unwrap();
@@ -1066,7 +1140,7 @@ mod tests {
             cloud_api_key: None,
             llm_provider: Some("ollama".into()),
             llm_model: Some("qwen3.5:9b".into()),
-            llm_base_url: Some("http://127.0.0.1:11434".into()),
+            llm_base_url: Some(ollama.url("")),
         };
 
         let chain = build_llm_chain(&config).await.unwrap();
@@ -1094,6 +1168,7 @@ mod tests {
             format: Some(ScrapeFormat::Markdown),
             browser: None,
             cookies: None,
+            extractor: None,
             include_selectors: None,
             exclude_selectors: None,
             only_main_content: None,

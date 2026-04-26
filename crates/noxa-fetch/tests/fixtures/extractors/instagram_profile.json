@@ -1,0 +1,45 @@
+{
+  "data": {
+    "user": {
+      "id": "123",
+      "username": "jmagar",
+      "full_name": "Jacob Magar",
+      "biography": "Building Noxa",
+      "bio_links": [],
+      "external_url": "https://example.com",
+      "category_name": "Software",
+      "profile_pic_url": "https://example.com/pic.jpg",
+      "profile_pic_url_hd": "https://example.com/pic-hd.jpg",
+      "is_verified": false,
+      "is_private": false,
+      "is_business_account": false,
+      "is_professional_account": true,
+      "edge_followed_by": { "count": 100 },
+      "edge_follow": { "count": 50 },
+      "edge_owner_to_timeline_media": {
+        "count": 1,
+        "edges": [
+          {
+            "node": {
+              "__typename": "GraphImage",
+              "shortcode": "ABC123",
+              "is_video": false,
+              "video_view_count": null,
+              "display_url": "https://example.com/display.jpg",
+              "thumbnail_src": "https://example.com/thumb.jpg",
+              "accessibility_caption": "alt text",
+              "taken_at_timestamp": 1767225600,
+              "product_type": "feed",
+              "dimensions": { "width": 1080, "height": 1080 },
+              "edge_media_preview_like": { "count": 10 },
+              "edge_media_to_comment": { "count": 2 },
+              "edge_media_to_caption": {
+                "edges": [{ "node": { "text": "Fixture caption" } }]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

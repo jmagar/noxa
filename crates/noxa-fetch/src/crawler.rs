@@ -21,6 +21,10 @@ use crate::client::{FetchClient, FetchConfig};
 use crate::error::FetchError;
 use crate::sitemap;
 
+const MAX_GLOB_PATTERN_LEN: usize = 512;
+const MAX_GLOB_WILDCARDS: usize = 64;
+const MAX_GLOBSTARS: usize = 4;
+
 /// Controls how extracted page bodies are retained in the aggregate `CrawlResult`.
 ///
 /// On large crawls the `Vec<PageResult>` can hold full extraction payloads for every
@@ -165,6 +169,9 @@ impl Crawler {
         let seed = Url::parse(seed_url).map_err(|_| FetchError::InvalidUrl(seed_url.into()))?;
         let seed_origin = origin_key(&seed);
 
+        validate_glob_patterns(&config.include_patterns)?;
+        validate_glob_patterns(&config.exclude_patterns)?;
+
         let client = FetchClient::new(config.fetch.clone())?;
 
         Ok(Self {
@@ -275,6 +282,9 @@ impl Crawler {
                     Ok(entries) => {
                         let before = frontier.len();
                         for entry in entries {
+                            if frontier.len() >= self.config.max_pages {
+                                break;
+                            }
                             if self.qualify_link(&entry.url, &visited).is_some() {
                                 let parsed = match Url::parse(&entry.url) {
                                     Ok(u) => u,
@@ -333,8 +343,16 @@ impl Crawler {
                 let extraction_options = Arc::clone(&extraction_options);
 
                 handles.push(tokio::spawn(async move {
-                    // Acquire permit — blocks if concurrency limit reached
-                    let _permit = permit.acquire().await.expect("semaphore closed");
+                    // Acquire permit — blocks if concurrency limit reached.
+                    let Ok(_permit) = permit.acquire().await else {
+                        return PageResult {
+                            url,
+                            depth,
+                            extraction: None,
+                            error: Some("crawl semaphore closed before request".to_string()),
+                            elapsed: Duration::ZERO,
+                        };
+                    };
                     tokio::time::sleep(delay).await;
 
                     let page_start = Instant::now();
@@ -374,6 +392,7 @@ impl Crawler {
 
             // Collect results and harvest links for the next depth level
             let mut next_frontier: Vec<(String, usize)> = Vec::new();
+            let mut next_seen: HashSet<String> = HashSet::new();
 
             for handle in handles {
                 let mut page = match handle.await {
@@ -395,7 +414,13 @@ impl Crawler {
                 {
                     for link in &extraction.content.links {
                         if let Some(candidate) = self.qualify_link(&link.href, &visited) {
-                            next_frontier.push((candidate, depth + 1));
+                            let remaining_capacity =
+                                self.config.max_pages.saturating_sub(pages.len());
+                            if next_frontier.len() < remaining_capacity
+                                && next_seen.insert(candidate.clone())
+                            {
+                                next_frontier.push((candidate, depth + 1));
+                            }
                         } else if self.is_excluded_by_pattern(&link.href) {
                             excluded += 1;
                         }
@@ -411,10 +436,10 @@ impl Crawler {
 
                 // When MetadataOnly, drop heavy content fields now that progress
                 // has been streamed and links have already been harvested above.
-                if self.config.body_retention == BodyRetention::MetadataOnly {
-                    if let Some(ref mut extraction) = page.extraction {
-                        clear_extraction_body_for_metadata_only(extraction);
-                    }
+                if self.config.body_retention == BodyRetention::MetadataOnly
+                    && let Some(ref mut extraction) = page.extraction
+                {
+                    clear_extraction_body_for_metadata_only(extraction);
                 }
 
                 pages.push(page);
@@ -531,6 +556,34 @@ impl Crawler {
 
         Some(normalized)
     }
+}
+
+fn validate_glob_patterns(patterns: &[String]) -> Result<(), FetchError> {
+    for pattern in patterns {
+        if let Err(reason) = validate_glob_pattern(pattern) {
+            return Err(FetchError::Build(format!(
+                "invalid crawl glob pattern {pattern:?}: {reason}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_glob_pattern(pattern: &str) -> Result<(), &'static str> {
+    if pattern.len() > MAX_GLOB_PATTERN_LEN {
+        return Err("too long");
+    }
+
+    let wildcard_count = pattern.bytes().filter(|b| *b == b'*' || *b == b'?').count();
+    if wildcard_count > MAX_GLOB_WILDCARDS {
+        return Err("too many wildcards");
+    }
+
+    if pattern.matches("**").count() > MAX_GLOBSTARS {
+        return Err("too many recursive wildcards");
+    }
+
+    Ok(())
 }
 
 /// Canonical origin string for comparing same-origin: "scheme://host[:port]".
@@ -733,6 +786,36 @@ mod tests {
         assert!(!glob_match("/blog*", "/blog/post")); // * doesn't cross /
     }
 
+    #[test]
+    fn crawler_new_rejects_oversized_glob_patterns() {
+        let config = CrawlConfig {
+            include_patterns: vec![format!("/{}", "a".repeat(600))],
+            ..Default::default()
+        };
+
+        let Err(err) = Crawler::new("https://example.com/", config) else {
+            panic!("oversized glob pattern should be rejected");
+        };
+
+        assert!(matches!(err, FetchError::Build(_)));
+        assert!(err.to_string().contains("glob pattern"));
+    }
+
+    #[test]
+    fn crawler_new_rejects_backtracking_heavy_glob_patterns() {
+        let config = CrawlConfig {
+            exclude_patterns: vec!["/**/**/**/**/**/**/**/**/**/target".to_string()],
+            ..Default::default()
+        };
+
+        let Err(err) = Crawler::new("https://example.com/", config) else {
+            panic!("backtracking-heavy glob pattern should be rejected");
+        };
+
+        assert!(matches!(err, FetchError::Build(_)));
+        assert!(err.to_string().contains("glob pattern"));
+    }
+
     // -- BodyRetention tests --
 
     /// Helper that builds a synthetic `PageResult` with non-empty content.
@@ -776,6 +859,7 @@ mod tests {
                     raw_html: Some("<h1>Hello</h1>".to_string()),
                 },
                 domain_data: None,
+                vertical_data: None,
                 structured_data: vec![],
             }),
             error: None,

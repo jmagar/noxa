@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use crate::browser::BrowserProfile;
 use crate::client::batch::collect_ordered;
-use crate::client::fetch::{is_pdf_content_type, pdf_to_extraction_result};
+use crate::client::fetch::{
+    build_vertical_extraction_result, is_pdf_content_type, pdf_to_extraction_result,
+};
 use crate::client::pool::{extract_host, pick_for_host};
 use crate::client::{
     BatchExtractResult, BatchResult, ClientPool, FetchClient, FetchConfig, FetchResult,
@@ -65,6 +67,27 @@ async fn test_collect_ordered_handles_gaps() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0], "first");
     assert_eq!(results[1], "third");
+}
+
+#[test]
+fn vertical_extraction_result_sets_vertical_payload_and_summary() {
+    let result = build_vertical_extraction_result(
+        "github_repo",
+        "https://github.com/jmagar/noxa",
+        serde_json::json!({
+            "title": "Noxa Repo",
+            "description": "Repository metadata",
+            "stars": 42
+        }),
+    );
+
+    assert_eq!(result.metadata.title.as_deref(), Some("Noxa Repo"));
+    assert_eq!(
+        result.vertical_data.as_ref().unwrap().extractor,
+        "github_repo"
+    );
+    assert_eq!(result.vertical_data.as_ref().unwrap().data["stars"], 42);
+    assert!(result.content.markdown.contains("Repository metadata"));
 }
 
 #[test]
@@ -281,6 +304,40 @@ async fn spawn_status_server(status: u16, body: &'static str) -> String {
     });
 
     format!("http://{addr}/")
+}
+
+#[cfg(test)]
+async fn spawn_raw_response_server(response: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf))
+                .await;
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    format!("http://{addr}/")
+}
+
+#[tokio::test]
+async fn fetch_rejects_oversized_html_response_from_content_length() {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        5 * 1024 * 1024 + 1
+    );
+    let url = spawn_raw_response_server(response).await;
+    let client = FetchClient::new(FetchConfig::default()).unwrap();
+
+    let result = client.fetch(&url).await;
+
+    assert!(matches!(result, Err(FetchError::Limit(_))));
 }
 
 #[tokio::test]

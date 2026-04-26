@@ -237,6 +237,7 @@ pub fn extract_linkedin_post(html: &str, url: &str) -> Option<ExtractionResult> 
             raw_html: None,
         },
         domain_data: None,
+        vertical_data: None,
         structured_data: vec![],
     })
 }

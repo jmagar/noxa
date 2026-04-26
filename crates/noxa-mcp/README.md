@@ -39,6 +39,7 @@ Startup now creates those directories up front and returns a typed error if init
 ## Tool Notes
 
 - `scrape`, `crawl`, and `batch` use validated format enums instead of free-form strings.
+- `scrape` accepts an optional `extractor` string for explicit vertical extraction; use the `extractors` tool to list the supported extractors.
 - `extract` requires exactly one of `schema` or `prompt`.
 - `search` returns snippets plus fetch errors for validated result URLs; it does not write to `stdout` outside MCP.
 - `diff` can bootstrap a missing local baseline when a local fetch succeeds.

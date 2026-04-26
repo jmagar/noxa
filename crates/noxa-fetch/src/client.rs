@@ -39,7 +39,10 @@ impl Default for FetchConfig {
             timeout: Duration::from_secs(12),
             follow_redirects: true,
             max_redirects: 10,
-            headers: HashMap::from([("Accept-Language".to_string(), "en-US,en;q=0.9".to_string())]),
+            headers: HashMap::from([
+                ("Accept-Language".to_string(), "en-US,en;q=0.9".to_string()),
+                ("x-ig-app-id".to_string(), "936619743392459".to_string()),
+            ]),
             pdf_mode: PdfMode::default(),
             store: None,
             ops_log: None,

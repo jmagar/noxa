@@ -58,12 +58,11 @@ pub(crate) fn acquire(name: &str) -> Option<SingletonGuard> {
     }
 
     // File already exists — check whether the owner is still alive.
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        if let Ok(pid) = contents.trim().parse::<u32>() {
-            if super::is_pid_running(pid) {
-                return None;
-            }
-        }
+    if let Ok(contents) = std::fs::read_to_string(&path)
+        && let Ok(pid) = contents.trim().parse::<u32>()
+        && super::is_pid_running(pid)
+    {
+        return None;
     }
 
     // Stale PID — overwrite and take ownership. The guard will clean up on

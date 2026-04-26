@@ -128,13 +128,12 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
         // through to the mtime+size key below (re-indexing on collision is acceptable).
         if let Ok(file) = std::fs::File::open(path) {
             let reader = std::io::BufReader::new(file);
-            if let Ok(q) = serde_json::from_reader::<_, Q>(reader) {
-                if let Some(hash) = q.metadata.content_hash
-                    && let Some(url) = q.metadata.url
-                    && !url.is_empty()
-                {
-                    return Some((hash, url));
-                }
+            if let Ok(q) = serde_json::from_reader::<_, Q>(reader)
+                && let Some(hash) = q.metadata.content_hash
+                && let Some(url) = q.metadata.url
+                && !url.is_empty()
+            {
+                return Some((hash, url));
             }
         }
         // Fall through to mtime+size if JSON parse failed, or url/content_hash missing.
@@ -173,7 +172,9 @@ pub(crate) fn path_is_within_any_watch_root(
     canonical_path: &Path,
     watch_roots: &[PathBuf],
 ) -> bool {
-    watch_roots.iter().any(|root| canonical_path.starts_with(root))
+    watch_roots
+        .iter()
+        .any(|root| canonical_path.starts_with(root))
 }
 
 /// Walk up the directory tree from `file_path` to find a `.git/HEAD` file.
@@ -195,7 +196,6 @@ pub(crate) fn detect_git_root_and_branch(file_path: &Path) -> Option<(PathBuf, S
         dir = dir.parent()?;
     }
 }
-
 
 fn git_head_path(git_entry: &Path) -> Option<PathBuf> {
     let metadata = std::fs::symlink_metadata(git_entry).ok()?;
@@ -336,8 +336,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root1 = tmp.path().join("root1");
         let root2 = tmp.path().join("root2");
-        tokio::fs::create_dir_all(&root1).await.expect("create root1");
-        tokio::fs::create_dir_all(&root2).await.expect("create root2");
+        tokio::fs::create_dir_all(&root1)
+            .await
+            .expect("create root1");
+        tokio::fs::create_dir_all(&root2)
+            .await
+            .expect("create root2");
 
         let file1 = root1.join("doc.json");
         tokio::fs::write(&file1, "{}").await.expect("write file1");
@@ -355,8 +359,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root1 = tmp.path().join("root1");
         let root2 = tmp.path().join("root2");
-        tokio::fs::create_dir_all(&root1).await.expect("create root1");
-        tokio::fs::create_dir_all(&root2).await.expect("create root2");
+        tokio::fs::create_dir_all(&root1)
+            .await
+            .expect("create root1");
+        tokio::fs::create_dir_all(&root2)
+            .await
+            .expect("create root2");
 
         let file2 = root2.join("doc.md");
         tokio::fs::write(&file2, "# hi").await.expect("write file2");
@@ -374,8 +382,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root1 = tmp.path().join("root1");
         let outside = tmp.path().join("outside");
-        tokio::fs::create_dir_all(&root1).await.expect("create root1");
-        tokio::fs::create_dir_all(&outside).await.expect("create outside");
+        tokio::fs::create_dir_all(&root1)
+            .await
+            .expect("create root1");
+        tokio::fs::create_dir_all(&outside)
+            .await
+            .expect("create outside");
 
         let outside_file = outside.join("secret.txt");
         tokio::fs::write(&outside_file, "data")
@@ -389,7 +401,10 @@ mod tests {
             .await
             .expect("watch roots");
 
-        assert!(!path_is_within_any_watch_root(&canonical_outside, &watch_roots));
+        assert!(!path_is_within_any_watch_root(
+            &canonical_outside,
+            &watch_roots
+        ));
     }
 
     #[test]
@@ -397,10 +412,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("foo.txt");
         fs::write(&file, "x").expect("write file");
-        assert_eq!(
-            detect_git_root_and_branch(&file).map(|(_, b)| b),
-            None
-        );
+        assert_eq!(detect_git_root_and_branch(&file).map(|(_, b)| b), None);
     }
 
     #[test]
@@ -424,10 +436,7 @@ mod tests {
         fs::write(git_dir.join("HEAD"), "abc123def456\n").expect("write HEAD");
         let file = tmp.path().join("foo.txt");
         fs::write(&file, "x").expect("write file");
-        assert_eq!(
-            detect_git_root_and_branch(&file).map(|(_, b)| b),
-            None
-        );
+        assert_eq!(detect_git_root_and_branch(&file).map(|(_, b)| b), None);
     }
 
     #[test]

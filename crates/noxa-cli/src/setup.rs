@@ -385,7 +385,7 @@ fn setup_mcp(theme: &ColorfulTheme, dir: &Path) {
     }
 
     println!(
-        "\x1b[34m[*]\x1b[0m Tools available via MCP: scrape, crawl, map, batch, extract, summarize, diff, brand, search, research"
+        "\x1b[34m[*]\x1b[0m Tools available via MCP: scrape, extractors, crawl, map, batch, extract, summarize, diff, brand, search, research"
     );
     println!();
 

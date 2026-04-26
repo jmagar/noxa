@@ -1,0 +1,32 @@
+<html>
+  <head>
+    <title>Fixture Widget</title>
+    <meta property="og:title" content="Fixture Widget">
+    <meta property="product:price:amount" content="19.99">
+    <meta property="product:price:currency" content="USD">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Product",
+        "name": "Fixture Widget",
+        "description": "A widget used by extractor tests.",
+        "sku": "WIDGET-1",
+        "brand": { "@type": "Brand", "name": "FixtureCo" },
+        "image": ["https://example.com/widget.jpg"],
+        "offers": {
+          "@type": "Offer",
+          "price": "19.99",
+          "priceCurrency": "USD",
+          "availability": "https://schema.org/InStock",
+          "url": "https://shop.example/products/widget"
+        },
+        "aggregateRating": {
+          "@type": "AggregateRating",
+          "ratingValue": "4.8",
+          "reviewCount": "12"
+        }
+      }
+    </script>
+  </head>
+  <body><h1>Fixture Widget</h1></body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "products": [
+    {
+      "id": 1,
+      "title": "Shopify Widget",
+      "handle": "widget",
+      "vendor": "FixtureCo",
+      "product_type": "Gadgets",
+      "tags": ["fixture"],
+      "variants": [{ "id": 11, "price": "1999", "available": true }],
+      "images": [
+        {
+          "id": 101,
+          "product_id": 1,
+          "position": 1,
+          "src": "https://example.com/widget.jpg"
+        }
+      ]
+    }
+  ]
+}

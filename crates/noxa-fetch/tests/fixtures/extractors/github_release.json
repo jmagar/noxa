@@ -1,0 +1,22 @@
+{
+  "tag_name": "v0.7.0",
+  "name": "Noxa 0.7.0",
+  "body": "Release notes",
+  "draft": false,
+  "prerelease": false,
+  "author": { "login": "jmagar" },
+  "created_at": "2026-04-01T00:00:00Z",
+  "published_at": "2026-04-02T00:00:00Z",
+  "html_url": "https://github.com/jmagar/noxa/releases/tag/v0.7.0",
+  "assets": [
+    {
+      "name": "noxa-linux.tar.gz",
+      "size": 10,
+      "download_count": 7,
+      "browser_download_url": "https://example.com/noxa-linux.tar.gz",
+      "content_type": "application/gzip",
+      "created_at": "2026-04-02T00:00:00Z",
+      "updated_at": "2026-04-02T00:00:00Z"
+    }
+  ]
+}

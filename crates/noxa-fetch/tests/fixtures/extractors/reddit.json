@@ -1,0 +1,33 @@
+[
+  {
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "title": "Rust release thread",
+            "selftext": "Rust 1.x is out now.",
+            "subreddit_name_prefixed": "r/rust",
+            "url_overridden_by_dest": "https://example.com/release",
+            "author": "ferris"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "author": "reader1",
+            "body": "Thanks for the update!",
+            "score": 42,
+            "replies": ""
+          }
+        }
+      ]
+    }
+  }
+]

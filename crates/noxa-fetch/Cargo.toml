@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
+async-trait = "0.1"
 # `wreq` release candidates currently expose the browser impersonation surface
 # this crate relies on. See `crates/noxa-fetch/README.md` for upgrade checks.
 wreq = { version = "6.0.0-rc.28", features = ["cookies", "gzip", "brotli", "zstd", "deflate"] }
@@ -23,6 +24,7 @@ url = "2"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 quick-xml = { version = "0.37", features = ["serde"] }
+regex = "1"
 serde_json.workspace = true
 calamine = "0.34"
 zip = "2"

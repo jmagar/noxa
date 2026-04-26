@@ -28,10 +28,7 @@ fn strip_css_at_rules(line: &str) -> String {
 
     let mut result = line.to_string();
     // Iteratively remove at-rule blocks with balanced brace handling
-    loop {
-        let Some(m) = CSS_AT_RE.find(&result) else {
-            break;
-        };
+    while let Some(m) = CSS_AT_RE.find(&result) {
         let start = m.start();
         // Find the matching closing brace after the at-rule header
         let after_header = m.end();

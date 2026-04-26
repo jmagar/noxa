@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use notify::{RecursiveMode, Watcher};
 use notify::event::{ModifyKind, RenameMode};
+use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use tokio::task::JoinHandle;
 
@@ -32,8 +32,8 @@ pub(super) fn send_job(
         return;
     }
     match tx.try_send(job) {
-        Ok(()) => return,
-        Err(async_channel::TrySendError::Closed(_)) => return,
+        Ok(()) => (),
+        Err(async_channel::TrySendError::Closed(_)) => (),
         Err(async_channel::TrySendError::Full(j)) => {
             tracing::warn!(
                 capacity = tx.capacity().unwrap_or(0),
@@ -62,9 +62,12 @@ pub(super) fn setup_watcher(
 ) -> Result<JoinHandle<()>, RagError> {
     let (notify_tx, notify_rx) = std::sync::mpsc::sync_channel::<DebounceEventResult>(256);
 
-    let mut debouncer =
-        new_debouncer(Duration::from_millis(debounce_ms), None, BoundedSender(notify_tx))
-            .map_err(|e| RagError::WatcherSetup(format!("failed to create fs watcher: {e}")))?;
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(debounce_ms),
+        None,
+        BoundedSender(notify_tx),
+    )
+    .map_err(|e| RagError::WatcherSetup(format!("failed to create fs watcher: {e}")))?;
 
     for watch_dir in watch_dirs {
         debouncer
@@ -132,8 +135,7 @@ pub(super) fn setup_watcher(
                                 );
                             }
                             for path in scan::collect_indexable_paths(&new_path) {
-                                let span =
-                                    tracing::info_span!("index_job", path = %path.display());
+                                let span = tracing::info_span!("index_job", path = %path.display());
                                 send_job(
                                     PipelineJob::Index(IndexJob { path, span }),
                                     &tx,
@@ -168,7 +170,11 @@ pub(super) fn setup_watcher(
                         }
 
                         // Create / Modify / Any — index all indexable paths.
-                        for path in event.paths.iter().flat_map(|p| scan::collect_indexable_paths(p)) {
+                        for path in event
+                            .paths
+                            .iter()
+                            .flat_map(|p| scan::collect_indexable_paths(p))
+                        {
                             let span = tracing::info_span!("index_job", path = %path.display());
                             send_job(PipelineJob::Index(IndexJob { path, span }), &tx, &shutdown);
                         }

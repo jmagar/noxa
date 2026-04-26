@@ -67,7 +67,10 @@ impl NoxaConfig {
         let noxa_config_env = std::env::var("NOXA_CONFIG").ok();
         let was_explicit = explicit_path.is_some() || noxa_config_env.is_some();
 
-        let path = if let Some(p) = explicit_path.map(PathBuf::from).or_else(|| noxa_config_env.map(PathBuf::from)) {
+        let path = if let Some(p) = explicit_path
+            .map(PathBuf::from)
+            .or_else(|| noxa_config_env.map(PathBuf::from))
+        {
             p
         } else {
             match find_config_file() {
@@ -88,7 +91,10 @@ impl NoxaConfig {
         let content = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("error: cannot read config file {}: {e}", display_name(&path));
+                eprintln!(
+                    "error: cannot read config file {}: {e}",
+                    display_name(&path)
+                );
                 std::process::exit(1);
             }
         };
@@ -100,7 +106,15 @@ impl NoxaConfig {
         let name = display_name(&path);
 
         // Detect secret-looking keys in raw TOML before parsing
-        let secret_keys = ["api_key", "proxy", "webhook", "llm_base_url", "password", "token", "secret"];
+        let secret_keys = [
+            "api_key",
+            "proxy",
+            "webhook",
+            "llm_base_url",
+            "password",
+            "token",
+            "secret",
+        ];
         let has_secrets = secret_keys.iter().any(|k| {
             // TOML syntax: `key = ` (with optional whitespace)
             content.contains(&format!("{k} =")) || content.contains(&format!("{k}="))
@@ -138,12 +152,12 @@ fn find_config_file() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("noxa.toml");
-            if p.exists() {
-                return Some(p);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let p = dir.join("noxa.toml");
+        if p.exists() {
+            return Some(p);
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
@@ -332,7 +346,8 @@ mod tests {
 
     #[test]
     fn test_noxa_config_deserialize_full() {
-        let cfg = from_toml(r#"
+        let cfg = from_toml(
+            r#"
             [cli]
             format = "llm"
             depth = 3
@@ -353,7 +368,8 @@ mod tests {
             pdf_mode = "fast"
             metadata = true
             verbose = false
-        "#);
+        "#,
+        );
         assert!(matches!(cfg.format, Some(crate::OutputFormat::Llm)));
         assert_eq!(cfg.depth, Some(3));
         assert_eq!(
@@ -372,33 +388,39 @@ mod tests {
 
     #[test]
     fn test_noxa_config_unknown_fields_ignored() {
-        let cfg = from_toml(r#"
+        let cfg = from_toml(
+            r#"
             [cli]
             depth = 2
             future_field = true
-        "#);
+        "#,
+        );
         assert_eq!(cfg.depth, Some(2));
     }
 
     #[test]
     fn test_noxa_config_output_dir_deserialize() {
-        let cfg = from_toml(r#"
+        let cfg = from_toml(
+            r#"
             [cli]
             output_dir = "out"
-        "#);
+        "#,
+        );
         assert_eq!(cfg.output_dir, Some(PathBuf::from("out")));
     }
 
     #[test]
     fn test_noxa_config_rag_section_ignored() {
         // [rag] section must not cause a parse error
-        let cfg = from_toml(r#"
+        let cfg = from_toml(
+            r#"
             [cli]
             depth = 5
 
             [rag]
             uuid_namespace = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
-        "#);
+        "#,
+        );
         assert_eq!(cfg.depth, Some(5));
     }
 
@@ -406,8 +428,10 @@ mod tests {
     fn test_resolve_uses_config_output_dir() {
         let cli = crate::Cli::parse_from(["noxa"]);
         let matches = crate::Cli::command().get_matches_from(["noxa"]);
-        let cfg = from_toml(r#"[cli]
-output_dir = "out""#);
+        let cfg = from_toml(
+            r#"[cli]
+output_dir = "out""#,
+        );
         let resolved = resolve(&cli, &matches, &cfg);
         assert_eq!(resolved.output_dir, Some(PathBuf::from("out")));
     }

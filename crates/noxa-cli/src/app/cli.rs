@@ -43,6 +43,14 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) stdin: bool,
 
+    /// Use a specific vertical extractor (see --list-extractors)
+    #[arg(long)]
+    pub(crate) extractor: Option<String>,
+
+    /// List available vertical extractors and exit
+    #[arg(long)]
+    pub(crate) list_extractors: bool,
+
     /// Include metadata in output (always included in JSON)
     #[arg(long)]
     pub(crate) metadata: bool,

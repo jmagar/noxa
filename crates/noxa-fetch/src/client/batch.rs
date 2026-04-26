@@ -68,6 +68,36 @@ impl FetchClient {
 
         collect_ordered(handles, urls.len()).await
     }
+
+    pub async fn fetch_and_extract_batch_vertical_with_options(
+        self: &Arc<Self>,
+        urls: &[&str],
+        concurrency: usize,
+        extractor: &str,
+        options: &noxa_core::ExtractionOptions,
+    ) -> Vec<BatchExtractResult> {
+        // Clamp to at least 1 — Semaphore::new(0) blocks all tasks forever.
+        let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
+        let mut handles = Vec::with_capacity(urls.len());
+
+        for (idx, url) in urls.iter().enumerate() {
+            let permit = Arc::clone(&semaphore);
+            let client = Arc::clone(self);
+            let url = url.to_string();
+            let extractor = extractor.to_string();
+            let opts = options.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = permit.acquire().await.expect("semaphore closed");
+                let result = client
+                    .fetch_and_extract_vertical(&url, &extractor, &opts)
+                    .await;
+                (idx, BatchExtractResult { url, result })
+            }));
+        }
+
+        collect_ordered(handles, urls.len()).await
+    }
 }
 
 pub(super) async fn collect_ordered<T>(

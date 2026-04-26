@@ -49,7 +49,7 @@ pub(super) fn extract_fonts(decls: &[css::CssDecl]) -> Vec<String> {
     }
 
     let mut fonts: Vec<(String, usize)> = freq.into_iter().collect();
-    fonts.sort_by(|a, b| b.1.cmp(&a.1));
+    fonts.sort_by_key(|font| std::cmp::Reverse(font.1));
     fonts.into_iter().map(|(name, _)| name).collect()
 }
 

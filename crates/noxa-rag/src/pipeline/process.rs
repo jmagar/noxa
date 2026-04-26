@@ -82,26 +82,26 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, ctx: &Wo
 
     let max_log_bytes = ctx.config.pipeline.failed_jobs_log_max_bytes;
     // Rotate if the log has grown past the cap.
-    if let Ok(meta) = tokio::fs::metadata(log_path).await {
-        if meta.len() >= max_log_bytes {
-            let mut rotated = log_path.to_path_buf();
-            rotated.as_mut_os_string().push(".1");
-            // Remove any existing backup first; rename fails on Windows if the
-            // destination already exists.
-            let _ = tokio::fs::remove_file(&rotated).await;
-            if let Err(e) = tokio::fs::rename(log_path, &rotated).await {
-                tracing::warn!(
-                    log = %log_path.display(),
-                    error = %e,
-                    "failed to rotate failed-jobs log; continuing with existing file"
-                );
-            } else {
-                tracing::info!(
-                    log = %log_path.display(),
-                    max_bytes = max_log_bytes,
-                    "rotated failed-jobs log"
-                );
-            }
+    if let Ok(meta) = tokio::fs::metadata(log_path).await
+        && meta.len() >= max_log_bytes
+    {
+        let mut rotated = log_path.to_path_buf();
+        rotated.as_mut_os_string().push(".1");
+        // Remove any existing backup first; rename fails on Windows if the
+        // destination already exists.
+        let _ = tokio::fs::remove_file(&rotated).await;
+        if let Err(e) = tokio::fs::rename(log_path, &rotated).await {
+            tracing::warn!(
+                log = %log_path.display(),
+                error = %e,
+                "failed to rotate failed-jobs log; continuing with existing file"
+            );
+        } else {
+            tracing::info!(
+                log = %log_path.display(),
+                max_bytes = max_log_bytes,
+                "rotated failed-jobs log"
+            );
         }
     }
 
@@ -116,10 +116,7 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, ctx: &Wo
     }
 }
 
-pub(crate) async fn process_job(
-    job: IndexJob,
-    ctx: &WorkerContext,
-) -> Result<JobStats, RagError> {
+pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<JobStats, RagError> {
     let job_start = std::time::Instant::now();
 
     let t0 = std::time::Instant::now();
@@ -263,11 +260,7 @@ pub(crate) async fn process_job(
         }
     };
     let embed_ms = t2.elapsed().as_millis() as u64;
-    let embed_tokens_per_sec = if embed_ms > 0 {
-        total_tokens * 1_000 / embed_ms
-    } else {
-        0
-    };
+    let embed_tokens_per_sec = (total_tokens * 1_000).checked_div(embed_ms).unwrap_or(0);
 
     if vectors.len() != chunks.len() {
         return Err(RagError::Embed {
@@ -283,7 +276,7 @@ pub(crate) async fn process_job(
     let n_chunks = chunks.len();
     let points: Vec<Point> = chunks
         .iter()
-        .zip(vectors.into_iter())
+        .zip(vectors)
         .enumerate()
         .map(|(i, (chunk, vector))| {
             let id = uuid::Uuid::new_v5(
@@ -295,7 +288,7 @@ pub(crate) async fn process_job(
                 vector,
                 payload: parse::build_point_payload(
                     chunk,
-                    &*result,
+                    &result,
                     git_branch.clone(),
                     &parsed.provenance,
                     &url,
@@ -364,7 +357,8 @@ pub(crate) async fn process_job(
 
     drop(_guard);
     drop(url_lock);
-    ctx.url_locks.remove_if(&url, |_, v| Arc::strong_count(v) == 1);
+    ctx.url_locks
+        .remove_if(&url, |_, v| Arc::strong_count(v) == 1);
 
     let upsert_ms = store_result?;
 
@@ -388,7 +382,9 @@ pub(crate) async fn process_delete_job(job: DeleteJob, store: &DynVectorStore) {
     let url = crate::url_util::normalize_url(&url);
     match store.delete_by_url(&url).await {
         Ok(()) => tracing::info!(url = %url, "deleted chunks for removed file"),
-        Err(e) => tracing::warn!(url = %url, error = %e, "failed to delete chunks for removed file"),
+        Err(e) => {
+            tracing::warn!(url = %url, error = %e, "failed to delete chunks for removed file")
+        }
     }
 }
 
@@ -403,7 +399,11 @@ mod tests {
 
     #[tokio::test]
     async fn validate_url_scheme_accepts_file_localhost_host() {
-        assert!(validate_url_scheme("file://localhost/tmp/foo.md").await.is_ok());
+        assert!(
+            validate_url_scheme("file://localhost/tmp/foo.md")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

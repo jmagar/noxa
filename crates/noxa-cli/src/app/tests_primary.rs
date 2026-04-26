@@ -36,6 +36,7 @@ mod tests {
                 raw_html: None,
             },
             domain_data: None,
+            vertical_data: None,
             structured_data: Vec::new(),
         }
     }
@@ -226,6 +227,40 @@ mod tests {
         assert_eq!(parsed.refresh.as_deref(), Some("docs.rust-lang.org"));
 
         assert!(Cli::try_parse_from(["noxa", "--refresh"]).is_err());
+    }
+
+    #[test]
+    fn extractor_flags_parse() {
+        let parsed = Cli::try_parse_from([
+            "noxa",
+            "--extractor",
+            "github_repo",
+            "https://github.com/jmagar/noxa",
+        ])
+        .unwrap();
+        assert_eq!(parsed.extractor.as_deref(), Some("github_repo"));
+
+        let parsed = Cli::try_parse_from(["noxa", "--list-extractors"]).unwrap();
+        assert!(parsed.list_extractors);
+    }
+
+    #[test]
+    fn extractor_catalog_text_output_lists_names_and_patterns() {
+        let output = format_extractor_catalog(&OutputFormat::Text);
+
+        assert!(output.contains("github_repo"));
+        assert!(output.contains("GitHub Repository"));
+        assert!(output.contains("https://github.com/*/*"));
+    }
+
+    #[test]
+    fn extractor_catalog_json_output_serializes_all_extractors() {
+        let output = format_extractor_catalog(&OutputFormat::Json);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let entries = value.as_array().unwrap();
+
+        assert_eq!(entries.len(), noxa_fetch::extractors::list().len());
+        assert!(entries.iter().any(|entry| entry["name"] == "substack_post"));
     }
 
     #[tokio::test]
@@ -466,7 +501,7 @@ mod tests {
         let output_path = dir.path().join("payload.json");
         let payload = r#"{"status":"changed"}"#;
         let quoted_output_path = output_path.to_string_lossy().replace('\'', "'\"'\"'");
-        let cmd = format!("cat > '{quoted_output_path}'");
+        let cmd = format!("tee '{quoted_output_path}'");
 
         run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))
             .await
@@ -474,6 +509,24 @@ mod tests {
 
         let written = tokio::fs::read_to_string(&output_path).await.unwrap();
         assert_eq!(written, payload);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_change_command_treats_shell_metacharacters_as_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let injected_path = dir.path().join("injected");
+        let payload = "{}";
+        let cmd = format!("printf ok ; touch {}", injected_path.display());
+
+        run_on_change_command(&cmd, payload, std::time::Duration::from_secs(1))
+            .await
+            .expect("on-change command should succeed");
+
+        assert!(
+            !injected_path.exists(),
+            "metacharacters in --on-change must not be evaluated by a shell"
+        );
     }
 
     #[cfg(unix)]

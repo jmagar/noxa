@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "question_id": 12345,
+      "title": "How to test Rust extractors?",
+      "body": "<p>How?</p>",
+      "tags": ["rust", "testing"],
+      "score": 5,
+      "view_count": 100,
+      "answer_count": 1,
+      "is_answered": true,
+      "accepted_answer_id": 99,
+      "creation_date": 1767225600,
+      "last_activity_date": 1767229200,
+      "owner": { "display_name": "asker", "reputation": 10 },
+      "link": "https://stackoverflow.com/questions/12345/how-to-test-rust"
+    }
+  ]
+}

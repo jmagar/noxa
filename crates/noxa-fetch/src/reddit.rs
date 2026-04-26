@@ -4,8 +4,15 @@ use noxa_core::{Content, ExtractionResult, Metadata};
 /// Reddit's new `shreddit` frontend only SSRs the post body — comments are
 /// loaded client-side. Appending `.json` to any Reddit URL returns the full
 /// comment tree as structured JSON, which we convert to clean markdown.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tracing::debug;
+
+const JSON_API_USER_AGENT: &str = "noxa bot/0.7 (+https://github.com/jmagar/noxa)";
+
+pub fn json_api_user_agent() -> &'static str {
+    JSON_API_USER_AGENT
+}
 
 /// Check if a URL points to a Reddit post/comment page.
 pub fn is_reddit_url(url: &str) -> bool {
@@ -30,6 +37,10 @@ pub fn json_url(url: &str) -> String {
 
 /// Convert Reddit JSON API response into an ExtractionResult.
 pub fn parse_reddit_json(json_bytes: &[u8], url: &str) -> Result<ExtractionResult, String> {
+    if is_reddit_verify_wall_html(json_bytes) {
+        return Err("reddit verification page returned from json endpoint".to_string());
+    }
+
     let listings: Vec<Listing> =
         serde_json::from_slice(json_bytes).map_err(|e| format!("reddit json parse: {e}"))?;
 
@@ -113,8 +124,74 @@ pub fn parse_reddit_json(json_bytes: &[u8], url: &str) -> Result<ExtractionResul
             raw_html: None,
         },
         domain_data: None,
+        vertical_data: None,
         structured_data: vec![],
     })
+}
+
+/// Convert Reddit JSON API response into a Reddit-specific vertical payload.
+pub fn parse_reddit_vertical_json(json_bytes: &[u8], url: &str) -> Result<Value, String> {
+    if is_reddit_verify_wall_html(json_bytes) {
+        return Err("reddit verification page returned from json endpoint".to_string());
+    }
+
+    let listings: Vec<Listing> =
+        serde_json::from_slice(json_bytes).map_err(|e| format!("reddit json parse: {e}"))?;
+    let post = listings
+        .first()
+        .and_then(|listing| {
+            listing
+                .data
+                .children
+                .iter()
+                .find(|child| child.kind == "t3")
+        })
+        .map(|child| {
+            let d = &child.data;
+            json!({
+                "title": d.title,
+                "author": d.author,
+                "subreddit": d.subreddit_name_prefixed,
+                "selftext": d.selftext,
+                "url": d.url_overridden_by_dest,
+                "score": d.score,
+                "permalink": d.permalink,
+                "created_utc": d.created_utc,
+                "num_comments": d.num_comments,
+            })
+        })
+        .unwrap_or_else(|| json!({}));
+
+    let comments = listings
+        .get(1)
+        .map(|listing| {
+            listing
+                .data
+                .children
+                .iter()
+                .filter_map(comment_to_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(json!({
+        "url": url,
+        "data_source": "reddit_json",
+        "post": post,
+        "comments": comments,
+    }))
+}
+
+pub fn is_reddit_verify_wall_html(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let lower = text.to_ascii_lowercase();
+
+    (lower.contains("<html") || lower.contains("<!doctype html"))
+        && (lower.contains("whoa there")
+            || lower.contains("not a robot")
+            || lower.contains("blocked")
+            || lower.contains("verify you are human")
+            || lower.contains("enable javascript"))
 }
 
 fn render_comment(thing: &Thing, depth: usize, out: &mut String) {
@@ -141,31 +218,60 @@ fn render_comment(thing: &Thing, depth: usize, out: &mut String) {
     }
 }
 
+fn comment_to_value(thing: &Thing) -> Option<Value> {
+    if thing.kind != "t1" {
+        return None;
+    }
+
+    let d = &thing.data;
+    let replies = match &d.replies {
+        Some(Replies::Listing(listing)) => listing
+            .data
+            .children
+            .iter()
+            .filter_map(comment_to_value)
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    Some(json!({
+        "author": d.author,
+        "body": d.body,
+        "score": d.score,
+        "permalink": d.permalink,
+        "created_utc": d.created_utc,
+        "replies": replies,
+    }))
+}
+
 // --- Reddit JSON types (minimal) ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Listing {
     data: ListingData,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ListingData {
     children: Vec<Thing>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Thing {
     kind: String,
     data: ThingData,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ThingData {
     // Post fields (t3)
     title: Option<String>,
     selftext: Option<String>,
     subreddit_name_prefixed: Option<String>,
     url_overridden_by_dest: Option<String>,
+    permalink: Option<String>,
+    created_utc: Option<f64>,
+    num_comments: Option<i64>,
     // Comment fields (t1)
     author: Option<String>,
     body: Option<String>,
@@ -174,7 +280,7 @@ struct ThingData {
 }
 
 /// Reddit replies can be either a nested Listing or an empty string.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 enum Replies {
     Listing(Listing),
@@ -238,5 +344,33 @@ mod tests {
             "plain_text should include comment text: {:?}",
             result.content.plain_text
         );
+    }
+
+    #[test]
+    fn parse_reddit_json_rejects_html_verify_page() {
+        let html = br#"<!doctype html>
+            <html>
+                <head><title>Reddit - Dive into anything</title></head>
+                <body>
+                    <h1>Whoa there, pardner!</h1>
+                    <p>We need to make sure you're not a robot.</p>
+                </body>
+            </html>"#;
+
+        let err = parse_reddit_json(
+            html,
+            "https://www.reddit.com/r/rust/comments/abc123/release_thread/",
+        )
+        .expect_err("verification HTML should not be treated as generic JSON parse failure");
+
+        assert!(err.contains("verification"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn reddit_json_user_agent_identifies_bot_contact() {
+        let ua = json_api_user_agent();
+
+        assert!(ua.contains("noxa"));
+        assert!(ua.contains("bot"));
     }
 }

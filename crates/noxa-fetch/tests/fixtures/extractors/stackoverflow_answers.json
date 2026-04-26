@@ -1,0 +1,13 @@
+{
+  "items": [
+    {
+      "answer_id": 99,
+      "is_accepted": true,
+      "score": 8,
+      "body": "<p>Use fixtures.</p>",
+      "creation_date": 1767229200,
+      "last_edit_date": null,
+      "owner": { "display_name": "answerer", "reputation": 20 }
+    }
+  ]
+}

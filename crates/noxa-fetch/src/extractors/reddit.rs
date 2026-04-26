@@ -1,0 +1,29 @@
+use serde_json::Value;
+
+use super::{ExtractorInfo, host_matches, http::ExtractorHttp};
+use crate::error::FetchError;
+
+pub const INFO: ExtractorInfo = ExtractorInfo {
+    name: "reddit",
+    label: "Reddit Post",
+    description: "Extract Reddit post and comment data.",
+    url_patterns: &["https://www.reddit.com/r/*/comments/*"],
+};
+
+pub fn matches(url: &str) -> bool {
+    host_matches(url, "reddit.com")
+        && url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .path_segments()
+                    .map(|mut segments| segments.any(|segment| segment == "comments"))
+            })
+            .unwrap_or(false)
+}
+
+pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
+    let json_url = crate::reddit::json_url(url);
+    let body = client.get_text(&json_url).await?;
+    crate::reddit::parse_reddit_vertical_json(body.as_bytes(), url).map_err(FetchError::BodyDecode)
+}
