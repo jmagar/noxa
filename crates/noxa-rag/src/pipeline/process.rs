@@ -21,29 +21,29 @@ use super::{DeleteJob, IndexJob, JobStats, WorkerContext};
 /// - All other schemes: rejected.
 pub(crate) async fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     if url.is_empty() {
-        return Err(RagError::Generic(
+        return Err(RagError::UrlValidation(
             "extraction result has no URL".to_string(),
         ));
     }
-    let parsed =
-        url::Url::parse(url).map_err(|e| RagError::Generic(format!("invalid URL {url:?}: {e}")))?;
+    let parsed = url::Url::parse(url)
+        .map_err(|e| RagError::UrlValidation(format!("invalid URL {url:?}: {e}")))?;
 
     match parsed.scheme() {
         "http" | "https" => {
             noxa_store::url_validation::validate_public_http_url(url)
                 .await
-                .map_err(|e| RagError::Generic(format!("URL {url:?} blocked: {e}")))?;
+                .map_err(|e| RagError::UrlValidation(format!("URL {url:?} blocked: {e}")))?;
         }
         "file" => match parsed.host_str() {
             None | Some("") | Some("localhost") => {}
             Some(host) => {
-                return Err(RagError::Generic(format!(
+                return Err(RagError::UrlValidation(format!(
                     "file:// URL with remote host {host:?} is not allowed (only local paths)"
                 )));
             }
         },
         other => {
-            return Err(RagError::Generic(format!(
+            return Err(RagError::UrlValidation(format!(
                 "URL scheme {other:?} is not allowed (only http/https/file)"
             )));
         }
@@ -146,6 +146,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"
         );
+        ctx.counters.record_failure();
         return Ok(JobStats::default());
     }
     let file = tokio::fs::File::open(&canonical).await?;
@@ -240,7 +241,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             crate::chunker::chunk(&result_for_chunk, &config_chunker, &tokenizer)
         })
         .await
-        .map_err(|e| RagError::Generic(format!("chunker panicked: {e}")))?
+        .map_err(|e| RagError::WorkerPanic(format!("chunker panicked: {e}")))?
     };
     if chunks.is_empty() {
         tracing::info!(url = %url, "no indexable content after chunking");

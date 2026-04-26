@@ -32,6 +32,10 @@ pub enum RagError {
     Json(#[from] serde_json::Error),
     #[error("parse error: {0}")]
     Parse(String),
+    #[error("url validation failed: {0}")]
+    UrlValidation(String),
+    #[error("worker panicked: {0}")]
+    WorkerPanic(String),
     #[error("error: {0}")]
     Generic(String),
 }
