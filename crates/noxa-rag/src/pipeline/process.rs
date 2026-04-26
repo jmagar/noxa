@@ -321,9 +321,16 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
     }
 
     let n_chunks = chunks.len();
+    // Build per-file metadata once; chunk loop clones from it instead of from
+    // result + provenance on every iteration (bead noxa-346).
+    let file_meta = parse::FileMetadata::from_result_and_provenance(
+        &result,
+        git_branch,
+        &parsed.provenance,
+    );
     let points: Vec<Point> = chunks
-        .iter()
-        .zip(vectors)
+        .into_iter()
+        .zip(vectors.into_iter())
         .enumerate()
         .map(|(i, (chunk, vector))| {
             let id = uuid::Uuid::new_v5(
@@ -335,9 +342,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
                 vector,
                 payload: parse::build_point_payload(
                     chunk,
-                    &result,
-                    git_branch.clone(),
-                    &parsed.provenance,
+                    &file_meta,
                     &url,
                     Some(&file_hash),
                 ),

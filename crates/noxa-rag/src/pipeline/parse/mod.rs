@@ -3,7 +3,7 @@ use std::path::Path;
 use noxa_core::types::ExtractionResult;
 
 use crate::error::RagError;
-use crate::types::PointPayload;
+use crate::types::{Chunk, PointPayload};
 
 mod binary;
 mod rich;
@@ -62,27 +62,16 @@ pub(crate) enum FormatProvenance {
 }
 
 impl FormatProvenance {
-    /// Apply format-specific fields onto `payload`. The payload must already
-    /// have its web fallback fields (seed_url, search_query, crawl_depth)
-    /// pre-initialised from `result.metadata.*` before this method is called.
-    /// Variant fields take precedence: a `Some(...)` from the variant
-    /// overwrites the pre-set metadata value; a `None` leaves it unchanged.
+    /// Apply format-specific fields onto `payload`.
+    ///
+    /// Web-variant web fields (seed_url, search_query, crawl_depth) are
+    /// pre-resolved in `FileMetadata::from_result_and_provenance` (variant
+    /// Some takes precedence over metadata fallback). This method therefore
+    /// only needs to handle non-web format variants.
     pub(crate) fn apply(&self, payload: &mut PointPayload) {
         match self {
-            FormatProvenance::Web {
-                seed_url,
-                search_query,
-                crawl_depth,
-            } => {
-                if seed_url.is_some() {
-                    payload.seed_url = seed_url.clone();
-                }
-                if search_query.is_some() {
-                    payload.search_query = search_query.clone();
-                }
-                if crawl_depth.is_some() {
-                    payload.crawl_depth = *crawl_depth;
-                }
+            FormatProvenance::Web { .. } => {
+                // Already resolved into FileMetadata — nothing to do here.
             }
             FormatProvenance::Email {
                 to,
@@ -128,6 +117,90 @@ pub(crate) struct IngestionProvenance {
     pub external_id: Option<String>,
     pub platform_url: Option<String>,
     pub format: FormatProvenance,
+}
+
+/// Per-file metadata that is identical for every chunk produced from the same
+/// document. Built once before the chunk loop via
+/// `FileMetadata::from_result_and_provenance` so the file-level fields are
+/// cloned once rather than once per chunk.
+///
+/// `file_hash` is NOT included here because it is computed separately in
+/// `process.rs` and passed directly to `build_point_payload`.
+pub(crate) struct FileMetadata {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub published_date: Option<String>,
+    pub language: Option<String>,
+    pub source_type: Option<String>,
+    pub content_hash: Option<String>,
+    pub technologies: Vec<String>,
+    pub is_truncated: Option<bool>,
+    pub file_path: Option<String>,
+    pub last_modified: Option<String>,
+    pub git_branch: Option<String>,
+    pub external_id: Option<String>,
+    pub platform_url: Option<String>,
+    /// Web-provenance: variant `Some` wins over metadata fallback.
+    pub seed_url: Option<String>,
+    pub search_query: Option<String>,
+    pub crawl_depth: Option<u32>,
+    /// Format variant — used by `build_point_payload` to apply non-web fields
+    /// (Email, Feed, Subtitle, Presentation). Stored here so `build_point_payload`
+    /// doesn't need to receive `&IngestionProvenance` separately.
+    pub format: FormatProvenance,
+}
+
+impl FileMetadata {
+    /// Build `FileMetadata` once per document. The merge rule for web-provenance
+    /// fields is: `FormatProvenance::Web { Some(x) }` takes precedence over
+    /// `result.metadata.*`; `None` in the variant falls back to `metadata.*`.
+    /// Non-web variants leave those fields at the metadata value (typically None).
+    pub(crate) fn from_result_and_provenance(
+        result: &ExtractionResult,
+        git_branch: Option<String>,
+        provenance: &IngestionProvenance,
+    ) -> Self {
+        let (seed_url, search_query, crawl_depth) = match &provenance.format {
+            FormatProvenance::Web {
+                seed_url,
+                search_query,
+                crawl_depth,
+            } => (
+                seed_url
+                    .clone()
+                    .or_else(|| result.metadata.seed_url.clone()),
+                search_query
+                    .clone()
+                    .or_else(|| result.metadata.search_query.clone()),
+                crawl_depth.or(result.metadata.crawl_depth),
+            ),
+            _ => (
+                result.metadata.seed_url.clone(),
+                result.metadata.search_query.clone(),
+                result.metadata.crawl_depth,
+            ),
+        };
+
+        Self {
+            title: result.metadata.title.clone(),
+            author: result.metadata.author.clone(),
+            published_date: result.metadata.published_date.clone(),
+            language: result.metadata.language.clone(),
+            source_type: result.metadata.source_type.clone(),
+            content_hash: result.metadata.content_hash.clone(),
+            technologies: result.metadata.technologies.clone(),
+            is_truncated: result.metadata.is_truncated,
+            file_path: result.metadata.file_path.clone(),
+            last_modified: result.metadata.last_modified.clone(),
+            git_branch,
+            external_id: provenance.external_id.clone(),
+            platform_url: provenance.platform_url.clone(),
+            seed_url,
+            search_query,
+            crawl_depth,
+            format: provenance.format.clone(),
+        }
+    }
 }
 
 pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError> {
@@ -238,40 +311,38 @@ pub(crate) fn extract_ingestion_provenance(value: &serde_json::Value) -> Ingesti
 }
 
 pub(crate) fn build_point_payload(
-    chunk: &crate::types::Chunk,
-    result: &ExtractionResult,
-    git_branch: Option<String>,
-    provenance: &IngestionProvenance,
+    chunk: Chunk,
+    file_meta: &FileMetadata,
     url: &str,
     file_hash: Option<&str>,
 ) -> PointPayload {
-    // Pre-initialise web-provenance fields from result.metadata as fallbacks.
-    // FormatProvenance::apply() will override these when the active variant
-    // carries its own Some(...) values. Non-web variants leave these at the
-    // metadata default (which is typically None).
     let mut payload = PointPayload {
-        text: chunk.text.clone(),
-        url: url.to_string(),
-        domain: chunk.domain.clone(),
+        // Per-chunk fields — moved out of chunk (no clone for text/domain/section_header).
+        text: chunk.text,
+        domain: chunk.domain,
         chunk_index: chunk.chunk_index,
         total_chunks: chunk.total_chunks,
         token_estimate: chunk.token_estimate,
-        title: result.metadata.title.clone(),
-        author: result.metadata.author.clone(),
-        published_date: result.metadata.published_date.clone(),
-        language: result.metadata.language.clone(),
-        source_type: result.metadata.source_type.clone(),
-        content_hash: result.metadata.content_hash.clone(),
-        technologies: result.metadata.technologies.clone(),
-        is_truncated: result.metadata.is_truncated,
-        file_path: result.metadata.file_path.clone(),
-        last_modified: result.metadata.last_modified.clone(),
-        git_branch,
-        external_id: provenance.external_id.clone(),
-        platform_url: provenance.platform_url.clone(),
-        seed_url: result.metadata.seed_url.clone(),
-        search_query: result.metadata.search_query.clone(),
-        crawl_depth: result.metadata.crawl_depth,
+        section_header: chunk.section_header,
+        // Per-file fields — cloned once from FileMetadata (built once per document).
+        url: url.to_string(),
+        title: file_meta.title.clone(),
+        author: file_meta.author.clone(),
+        published_date: file_meta.published_date.clone(),
+        language: file_meta.language.clone(),
+        source_type: file_meta.source_type.clone(),
+        content_hash: file_meta.content_hash.clone(),
+        technologies: file_meta.technologies.clone(),
+        is_truncated: file_meta.is_truncated,
+        file_path: file_meta.file_path.clone(),
+        last_modified: file_meta.last_modified.clone(),
+        git_branch: file_meta.git_branch.clone(),
+        external_id: file_meta.external_id.clone(),
+        platform_url: file_meta.platform_url.clone(),
+        seed_url: file_meta.seed_url.clone(),
+        search_query: file_meta.search_query.clone(),
+        crawl_depth: file_meta.crawl_depth,
+        // Format-variant fields default to empty/None; apply() fills them in.
         email_to: Vec::new(),
         email_message_id: None,
         email_thread_id: None,
@@ -283,11 +354,12 @@ pub(crate) fn build_point_payload(
         subtitle_start_s: None,
         subtitle_end_s: None,
         subtitle_source_file: None,
-        section_header: chunk.section_header.clone(),
         file_hash: file_hash.map(str::to_owned),
     };
 
-    provenance.format.apply(&mut payload);
+    // apply() now only handles non-web variants (Email, Feed, Subtitle, Presentation).
+    // Web-provenance fields were already resolved into FileMetadata once per document.
+    file_meta.format.apply(&mut payload);
     payload
 }
 
