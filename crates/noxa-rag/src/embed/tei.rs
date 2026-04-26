@@ -236,17 +236,28 @@ impl TeiProvider {
             }
 
             if should_retry(status_u16, attempt) {
-                let body = resp.text().await.unwrap_or_default();
-                let preview: String = body.chars().take(512).collect();
-                tracing::warn!(
-                    batch = batch_idx + 1,
-                    attempt = attempt + 1,
-                    max_attempts = MAX_RETRIES + 1,
-                    status = status_u16,
-                    delay_ms,
-                    body = preview,
-                    "TEI retry"
-                );
+                if self.auth_token.is_some() {
+                    tracing::warn!(
+                        batch = batch_idx + 1,
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES + 1,
+                        status = status_u16,
+                        delay_ms,
+                        "TEI retry (body omitted: auth token configured)"
+                    );
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    let preview: String = body.chars().take(512).collect();
+                    tracing::warn!(
+                        batch = batch_idx + 1,
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES + 1,
+                        status = status_u16,
+                        delay_ms,
+                        body = preview,
+                        "TEI retry"
+                    );
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 delay_ms = (delay_ms * 2).min(2_000);
                 continue;
