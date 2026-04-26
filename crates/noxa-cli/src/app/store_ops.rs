@@ -212,13 +212,11 @@ pub(crate) async fn run_grep(pattern: &str, store_root: std::path::PathBuf) -> R
 
 fn truncate_display(line: &str, max_chars: usize) -> String {
     let mut end = None;
-    let mut seen = 0usize;
-    for (idx, _) in line.char_indices() {
+    for (seen, (idx, _)) in line.char_indices().enumerate() {
         if seen == max_chars {
             end = Some(idx);
             break;
         }
-        seen += 1;
     }
     match end {
         Some(idx) => format!("{}...", &line[..idx]),

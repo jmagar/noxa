@@ -159,7 +159,10 @@ pub(crate) fn run_rag_start() {
              \n\
              \x1b[2m  log\x1b[0m     {}\n\
              \x1b[2m  status\x1b[0m  noxa --watch-rag\n",
-            dirs::home_dir().unwrap_or_default().join(DEFAULT_LOG).display(),
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(DEFAULT_LOG)
+                .display(),
         );
         return;
     }

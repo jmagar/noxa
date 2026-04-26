@@ -29,7 +29,11 @@ pub(crate) async fn run_crawl_watch() {
                 continue;
             }
             if let Ok(record) = read_crawl_status(&path) {
-                let key = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                let key = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 seen.insert(key.clone(), record.phase);
                 if record.phase == CrawlStatusPhase::Done {
                     finished.insert(key.clone());
@@ -67,7 +71,11 @@ pub(crate) async fn run_crawl_watch() {
                 Err(_) => continue,
             };
 
-            let key = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let key = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             keys_on_disk.insert(key.clone());
 
             if finished.contains(&key) {
@@ -106,7 +114,7 @@ pub(crate) async fn run_crawl_watch() {
                         let prev_pct = prev_error_pct.get(&key).copied().unwrap_or(0);
                         let cooldown_ok = error_last_alerted
                             .get(&key)
-                            .map_or(true, |t| t.elapsed() >= ALERT_COOLDOWN);
+                            .is_none_or(|t| t.elapsed() >= ALERT_COOLDOWN);
                         if pct >= ERROR_RATE_THRESHOLD && pct_rounded > prev_pct && cooldown_ok {
                             println!(
                                 "Crawl warning: {} — {}% error rate ({}/{} pages failed)",

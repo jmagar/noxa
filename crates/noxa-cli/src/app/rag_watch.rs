@@ -56,12 +56,20 @@ async fn check_failed_jobs(path: &std::path::Path, prev_size: &mut u64) -> Vec<S
         return vec![];
     };
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    if file.seek(std::io::SeekFrom::Start(*prev_size)).await.is_err() {
+    if file
+        .seek(std::io::SeekFrom::Start(*prev_size))
+        .await
+        .is_err()
+    {
         return vec![];
     }
     let mut buf = String::new();
     // Cap the read at 1 MiB so a runaway log file cannot balloon memory.
-    if AsyncReadExt::take(&mut file, 1 << 20).read_to_string(&mut buf).await.is_err() {
+    if AsyncReadExt::take(&mut file, 1 << 20)
+        .read_to_string(&mut buf)
+        .await
+        .is_err()
+    {
         return vec![];
     }
     // Advance by bytes actually consumed (may be < current_size when truncated).
@@ -92,7 +100,9 @@ fn check_service_alert(
             alerted.remove(key);
             println!("{online_msg}");
         } else {
-            let should_alert = alerted.get(key).map_or(true, |t| t.elapsed() >= ALERT_COOLDOWN);
+            let should_alert = alerted
+                .get(key)
+                .is_none_or(|t| t.elapsed() >= ALERT_COOLDOWN);
             if should_alert {
                 alerted.insert(key, Instant::now());
                 println!("{offline_msg}");
@@ -145,8 +155,10 @@ pub(crate) async fn run_rag_watch() {
         }
     }
 
-    let (mut tei_up, mut qdrant_up) =
-        tokio::join!(probe_http(&client, &tei_health), probe_http(&client, &qdrant_health));
+    let (mut tei_up, mut qdrant_up) = tokio::join!(
+        probe_http(&client, &tei_health),
+        probe_http(&client, &qdrant_health)
+    );
 
     if !tei_up {
         println!("TEI embeddings server is offline ({tei_url}) — RAG indexing will stall");
@@ -168,9 +180,11 @@ pub(crate) async fn run_rag_watch() {
 
     let mut offline_alerted: HashMap<&'static str, Instant> = HashMap::new();
 
-    let tei_offline = format!("TEI embeddings server is offline ({tei_url}) — RAG indexing will stall");
+    let tei_offline =
+        format!("TEI embeddings server is offline ({tei_url}) — RAG indexing will stall");
     let tei_online = format!("TEI embeddings server is back online ({tei_url})");
-    let qdrant_offline = format!("Qdrant is offline ({qdrant_url}) — RAG indexing and search will not work");
+    let qdrant_offline =
+        format!("Qdrant is offline ({qdrant_url}) — RAG indexing and search will not work");
     let qdrant_online = format!("Qdrant is back online ({qdrant_url})");
 
     loop {
@@ -200,33 +214,43 @@ pub(crate) async fn run_rag_watch() {
             daemon_running = daemon_now;
         }
 
-        let (tei_now, qdrant_now) =
-            tokio::join!(probe_http(&client, &tei_health), probe_http(&client, &qdrant_health));
+        let (tei_now, qdrant_now) = tokio::join!(
+            probe_http(&client, &tei_health),
+            probe_http(&client, &qdrant_health)
+        );
 
         tei_up = check_service_alert(
-            "tei", tei_up, tei_now, &tei_offline, &tei_online, &mut offline_alerted,
+            "tei",
+            tei_up,
+            tei_now,
+            &tei_offline,
+            &tei_online,
+            &mut offline_alerted,
         );
         qdrant_up = check_service_alert(
-            "qdrant", qdrant_up, qdrant_now, &qdrant_offline, &qdrant_online, &mut offline_alerted,
+            "qdrant",
+            qdrant_up,
+            qdrant_now,
+            &qdrant_offline,
+            &qdrant_online,
+            &mut offline_alerted,
         );
 
-        if qdrant_up {
-            if let Some(count) = get_qdrant_point_count(&client, &qdrant_url, &collection).await {
-                if count > last_point_count {
+        if qdrant_up
+            && let Some(count) = get_qdrant_point_count(&client, &qdrant_url, &collection).await
+        {
+            if count > last_point_count {
+                stable_polls = 0;
+            } else if count == last_point_count && count > announced_count {
+                stable_polls += 1;
+                if stable_polls >= STABLE_POLLS_REQUIRED {
+                    let delta = count - announced_count;
+                    println!("RAG indexing complete: {collection} — {count} points (+{delta} new)");
+                    announced_count = count;
                     stable_polls = 0;
-                } else if count == last_point_count && count > announced_count {
-                    stable_polls += 1;
-                    if stable_polls >= STABLE_POLLS_REQUIRED {
-                        let delta = count - announced_count;
-                        println!(
-                            "RAG indexing complete: {collection} — {count} points (+{delta} new)"
-                        );
-                        announced_count = count;
-                        stable_polls = 0;
-                    }
                 }
-                last_point_count = count;
             }
+            last_point_count = count;
         }
 
         for msg in check_failed_jobs(&failed_log, &mut failed_log_size).await {

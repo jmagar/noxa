@@ -76,9 +76,11 @@ pub(crate) use formatting::{
 };
 pub(crate) use llm::{has_llm_flags, run_batch_llm, run_llm};
 pub(crate) use logging::{build_ops_log, init_logging, init_mcp_logging, log_operation};
+#[cfg(test)]
+pub(crate) use printing::format_extractor_catalog;
 pub(crate) use printing::{
-    format_extractor_catalog, print_batch_output, print_cloud_output, print_crawl_output,
-    print_diff_output, print_extractor_catalog, print_map_output, print_output,
+    print_batch_output, print_cloud_output, print_crawl_output, print_diff_output,
+    print_extractor_catalog, print_map_output, print_output,
 };
 pub(crate) use rag_daemon::{run_rag_start, run_rag_stop};
 pub(crate) use rag_watch::run_rag_watch;

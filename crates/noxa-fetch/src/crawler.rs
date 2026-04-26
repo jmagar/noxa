@@ -436,10 +436,10 @@ impl Crawler {
 
                 // When MetadataOnly, drop heavy content fields now that progress
                 // has been streamed and links have already been harvested above.
-                if self.config.body_retention == BodyRetention::MetadataOnly {
-                    if let Some(ref mut extraction) = page.extraction {
-                        clear_extraction_body_for_metadata_only(extraction);
-                    }
+                if self.config.body_retention == BodyRetention::MetadataOnly
+                    && let Some(ref mut extraction) = page.extraction
+                {
+                    clear_extraction_body_for_metadata_only(extraction);
                 }
 
                 pages.push(page);
