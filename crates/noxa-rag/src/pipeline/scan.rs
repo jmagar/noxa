@@ -47,6 +47,19 @@ pub(crate) fn has_indexable_extension(path: &Path) -> bool {
 /// temp files that are gone by the time we process them.
 ///
 /// Deferred (no confirmed use case, would add new crate deps): .epub, .mbox
+///
+/// # Symlink safety (TOCTOU note)
+///
+/// `path.is_file()` follows symlinks: it returns `true` for a symlink whose target is a
+/// regular file. Callers that care about confinement must guard against this with an
+/// explicit `path.is_symlink()` check **before** calling `is_indexable`. See
+/// [`collect_indexable_paths_recursive`] for the canonical call-site pattern (lines 79–82).
+///
+/// This function itself does **not** skip symlinks — that would require two `stat` calls
+/// per entry and the function predates the confinement requirement. The authoritative
+/// defence-in-depth is the `canonicalize + starts_with(watch_root)` confinement check
+/// inside `process_job`, which runs unconditionally regardless of how the path was
+/// discovered.
 pub(crate) fn is_indexable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
