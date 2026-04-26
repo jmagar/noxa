@@ -62,7 +62,11 @@ fn parse_pr(url: &str) -> Option<(String, String, u64)> {
     if segs.len() < 4 || (segs[2] != "pull" && segs[2] != "pulls") {
         return None;
     }
-    Some((segs[0].to_string(), segs[1].to_string(), segs[3].parse().ok()?))
+    Some((
+        segs[0].to_string(),
+        segs[1].to_string(),
+        segs[3].parse().ok()?,
+    ))
 }
 
 fn names_array(value: Option<&Value>) -> Value {

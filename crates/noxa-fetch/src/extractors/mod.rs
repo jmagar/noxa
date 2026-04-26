@@ -20,8 +20,8 @@ pub mod instagram_post;
 pub mod instagram_profile;
 pub mod linkedin_post;
 pub mod npm;
-pub mod pypi;
 mod product;
+pub mod pypi;
 pub mod reddit;
 pub mod shopify_collection;
 pub mod shopify_product;
@@ -84,7 +84,11 @@ pub async fn dispatch_by_url(
     url: &str,
 ) -> Option<Result<(&'static str, Value), FetchError>> {
     if reddit::matches(url) {
-        return Some(reddit::extract(client, url).await.map(|v| (reddit::INFO.name, v)));
+        return Some(
+            reddit::extract(client, url)
+                .await
+                .map(|v| (reddit::INFO.name, v)),
+        );
     }
     if hackernews::matches(url) {
         return Some(
@@ -101,7 +105,11 @@ pub async fn dispatch_by_url(
         );
     }
     if pypi::matches(url) {
-        return Some(pypi::extract(client, url).await.map(|v| (pypi::INFO.name, v)));
+        return Some(
+            pypi::extract(client, url)
+                .await
+                .map(|v| (pypi::INFO.name, v)),
+        );
     }
     if npm::matches(url) {
         return Some(npm::extract(client, url).await.map(|v| (npm::INFO.name, v)));
@@ -149,7 +157,11 @@ pub async fn dispatch_by_url(
         );
     }
     if arxiv::matches(url) {
-        return Some(arxiv::extract(client, url).await.map(|v| (arxiv::INFO.name, v)));
+        return Some(
+            arxiv::extract(client, url)
+                .await
+                .map(|v| (arxiv::INFO.name, v)),
+        );
     }
     if docker_hub::matches(url) {
         return Some(
@@ -159,7 +171,11 @@ pub async fn dispatch_by_url(
         );
     }
     if dev_to::matches(url) {
-        return Some(dev_to::extract(client, url).await.map(|v| (dev_to::INFO.name, v)));
+        return Some(
+            dev_to::extract(client, url)
+                .await
+                .map(|v| (dev_to::INFO.name, v)),
+        );
     }
     if stackoverflow::matches(url) {
         return Some(
@@ -234,7 +250,10 @@ pub async fn dispatch_by_name(
 ) -> Result<Value, ExtractorDispatchError> {
     match name {
         n if n == reddit::INFO.name => {
-            run_or_mismatch(reddit::matches(url), n, url, || reddit::extract(client, url)).await
+            run_or_mismatch(reddit::matches(url), n, url, || {
+                reddit::extract(client, url)
+            })
+            .await
         }
         n if n == hackernews::INFO.name => {
             run_or_mismatch(hackernews::matches(url), n, url, || {
@@ -300,7 +319,10 @@ pub async fn dispatch_by_name(
             .await
         }
         n if n == dev_to::INFO.name => {
-            run_or_mismatch(dev_to::matches(url), n, url, || dev_to::extract(client, url)).await
+            run_or_mismatch(dev_to::matches(url), n, url, || {
+                dev_to::extract(client, url)
+            })
+            .await
         }
         n if n == stackoverflow::INFO.name => {
             run_or_mismatch(stackoverflow::matches(url), n, url, || {
@@ -426,10 +448,6 @@ fn host_matches(url: &str, suffix: &str) -> bool {
         .is_some_and(|host| host == suffix || host.ends_with(&format!(".{suffix}")))
 }
 
-fn stub_error(name: &str) -> FetchError {
-    FetchError::Build(format!("extractor not implemented: {name}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,7 +501,8 @@ mod tests {
 
             async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
                 let body = self.get_text(url).await?;
-                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+                serde_json::from_str(&body)
+                    .map_err(|error| FetchError::BodyDecode(error.to_string()))
             }
         }
 
@@ -491,7 +510,9 @@ mod tests {
         fn developer_matchers_accept_expected_urls() {
             assert!(github_repo::matches("https://github.com/jmagar/noxa"));
             assert!(github_pr::matches("https://github.com/jmagar/noxa/pull/12"));
-            assert!(github_issue::matches("https://github.com/jmagar/noxa/issues/34"));
+            assert!(github_issue::matches(
+                "https://github.com/jmagar/noxa/issues/34"
+            ));
             assert!(github_release::matches(
                 "https://github.com/jmagar/noxa/releases/tag/v0.7.0"
             ));
@@ -503,8 +524,12 @@ mod tests {
 
         #[test]
         fn github_repo_does_not_preempt_more_specific_github_extractors() {
-            assert!(!github_repo::matches("https://github.com/jmagar/noxa/pull/12"));
-            assert!(!github_repo::matches("https://github.com/jmagar/noxa/issues/34"));
+            assert!(!github_repo::matches(
+                "https://github.com/jmagar/noxa/pull/12"
+            ));
+            assert!(!github_repo::matches(
+                "https://github.com/jmagar/noxa/issues/34"
+            ));
             assert!(!github_repo::matches(
                 "https://github.com/jmagar/noxa/releases/tag/v0.7.0"
             ));
@@ -552,16 +577,21 @@ mod tests {
                 ),
             ]);
 
-            let repo = github_repo::extract(&client, "https://github.com/jmagar/noxa").await.unwrap();
+            let repo = github_repo::extract(&client, "https://github.com/jmagar/noxa")
+                .await
+                .unwrap();
             assert_eq!(repo["full_name"], "jmagar/noxa");
             assert_eq!(repo["stars"], 42);
 
-            let pr = github_pr::extract(&client, "https://github.com/jmagar/noxa/pull/12").await.unwrap();
+            let pr = github_pr::extract(&client, "https://github.com/jmagar/noxa/pull/12")
+                .await
+                .unwrap();
             assert_eq!(pr["number"], 12);
             assert_eq!(pr["title"], "Port upstream extractors");
 
-            let issue =
-                github_issue::extract(&client, "https://github.com/jmagar/noxa/issues/34").await.unwrap();
+            let issue = github_issue::extract(&client, "https://github.com/jmagar/noxa/issues/34")
+                .await
+                .unwrap();
             assert_eq!(issue["number"], 34);
             assert_eq!(issue["labels"][0], "bug");
 
@@ -574,17 +604,21 @@ mod tests {
             assert_eq!(release["tag_name"], "v0.7.0");
             assert_eq!(release["total_downloads"], 7);
 
-            let pypi = pypi::extract(&client, "https://pypi.org/project/requests/").await.unwrap();
+            let pypi = pypi::extract(&client, "https://pypi.org/project/requests/")
+                .await
+                .unwrap();
             assert_eq!(pypi["name"], "requests");
             assert_eq!(pypi["version"], "2.32.3");
 
-            let npm =
-                npm::extract(&client, "https://www.npmjs.com/package/@types/node").await.unwrap();
+            let npm = npm::extract(&client, "https://www.npmjs.com/package/@types/node")
+                .await
+                .unwrap();
             assert_eq!(npm["name"], "@types/node");
             assert_eq!(npm["weekly_downloads"], 123456);
 
-            let crate_data =
-                crates_io::extract(&client, "https://crates.io/crates/serde").await.unwrap();
+            let crate_data = crates_io::extract(&client, "https://crates.io/crates/serde")
+                .await
+                .unwrap();
             assert_eq!(crate_data["name"], "serde");
             assert_eq!(crate_data["downloads"], 1000);
 
@@ -626,19 +660,27 @@ mod tests {
 
             async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
                 let body = self.get_text(url).await?;
-                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+                serde_json::from_str(&body)
+                    .map_err(|error| FetchError::BodyDecode(error.to_string()))
             }
         }
 
         #[test]
         fn community_matchers_accept_expected_urls() {
             assert!(arxiv::matches("https://arxiv.org/abs/2401.12345v2"));
-            assert!(hackernews::matches("https://news.ycombinator.com/item?id=123"));
+            assert!(hackernews::matches(
+                "https://news.ycombinator.com/item?id=123"
+            ));
             assert!(dev_to::matches("https://dev.to/jmagar/porting-noxa"));
             assert!(stackoverflow::matches(
                 "https://stackoverflow.com/questions/12345/how-to-test-rust"
             ));
-            assert!(youtube_video::matches("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+            assert!(substack_post::matches(
+                "https://example.substack.com/p/porting-noxa"
+            ));
+            assert!(youtube_video::matches(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ));
             assert!(youtube_video::matches("https://youtu.be/dQw4w9WgXcQ"));
         }
 
@@ -664,6 +706,10 @@ mod tests {
                 (
                     "https://api.stackexchange.com/2.3/questions/12345/answers?site=stackoverflow&filter=withbody&order=desc&sort=votes",
                     include_str!("../../tests/fixtures/extractors/stackoverflow_answers.json"),
+                ),
+                (
+                    "https://example.substack.com/p/porting-noxa",
+                    include_str!("../../tests/fixtures/extractors/substack_post.html"),
                 ),
                 (
                     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -699,12 +745,19 @@ mod tests {
             assert_eq!(question["question_id"], 12345);
             assert_eq!(question["accepted_answer"]["answer_id"], 99);
 
-            let video = youtube_video::extract(
-                &client,
-                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            )
-            .await
-            .unwrap();
+            let post =
+                substack_post::extract(&client, "https://example.substack.com/p/porting-noxa")
+                    .await
+                    .unwrap();
+            assert_eq!(post["title"], "Porting Noxa Verticals");
+            assert_eq!(post["author"], "Ada Lovelace");
+            assert_eq!(post["published_at"], "2026-04-26T12:00:00Z");
+            assert!(post["body"].as_str().unwrap().contains("Extractor parity"));
+
+            let video =
+                youtube_video::extract(&client, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+                    .await
+                    .unwrap();
             assert_eq!(video["video_id"], "dQw4w9WgXcQ");
             assert_eq!(video["title"], "Test Video");
             assert_eq!(video["view_count"], 1000);
@@ -741,19 +794,34 @@ mod tests {
 
             async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
                 let body = self.get_text(url).await?;
-                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+                serde_json::from_str(&body)
+                    .map_err(|error| FetchError::BodyDecode(error.to_string()))
             }
         }
 
         #[test]
         fn social_matchers_disambiguate_urls() {
-            assert!(huggingface_model::matches("https://huggingface.co/openai/whisper-large-v3"));
-            assert!(!huggingface_model::matches("https://huggingface.co/datasets/openai/gsm8k"));
-            assert!(huggingface_dataset::matches("https://huggingface.co/datasets/openai/gsm8k"));
-            assert!(instagram_post::matches("https://www.instagram.com/p/ABC123/"));
-            assert!(instagram_post::matches("https://www.instagram.com/reel/ABC123/"));
-            assert!(!instagram_profile::matches("https://www.instagram.com/p/ABC123/"));
-            assert!(instagram_profile::matches("https://www.instagram.com/jmagar/"));
+            assert!(huggingface_model::matches(
+                "https://huggingface.co/openai/whisper-large-v3"
+            ));
+            assert!(!huggingface_model::matches(
+                "https://huggingface.co/datasets/openai/gsm8k"
+            ));
+            assert!(huggingface_dataset::matches(
+                "https://huggingface.co/datasets/openai/gsm8k"
+            ));
+            assert!(instagram_post::matches(
+                "https://www.instagram.com/p/ABC123/"
+            ));
+            assert!(instagram_post::matches(
+                "https://www.instagram.com/reel/ABC123/"
+            ));
+            assert!(!instagram_profile::matches(
+                "https://www.instagram.com/p/ABC123/"
+            ));
+            assert!(instagram_profile::matches(
+                "https://www.instagram.com/jmagar/"
+            ));
             assert!(linkedin_post::matches(
                 "https://www.linkedin.com/feed/update/urn:li:activity:7452618583290892288"
             ));
@@ -784,10 +852,12 @@ mod tests {
                 ),
             ]);
 
-            let model =
-                huggingface_model::extract(&client, "https://huggingface.co/openai/whisper-large-v3")
-                    .await
-                    .unwrap();
+            let model = huggingface_model::extract(
+                &client,
+                "https://huggingface.co/openai/whisper-large-v3",
+            )
+            .await
+            .unwrap();
             assert_eq!(model["model_id"], "openai/whisper-large-v3");
             assert_eq!(model["file_count"], 1);
 
@@ -806,10 +876,9 @@ mod tests {
             assert_eq!(post["shortcode"], "ABC123");
             assert_eq!(post["author_username"], "jmagar");
 
-            let profile =
-                instagram_profile::extract(&client, "https://www.instagram.com/jmagar/")
-                    .await
-                    .unwrap();
+            let profile = instagram_profile::extract(&client, "https://www.instagram.com/jmagar/")
+                .await
+                .unwrap();
             assert_eq!(profile["username"], "jmagar");
             assert_eq!(profile["recent_posts"][0]["shortcode"], "ABC123");
 
@@ -846,7 +915,8 @@ mod tests {
 
             async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
                 let body = self.get_text(url).await?;
-                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+                serde_json::from_str(&body)
+                    .map_err(|error| FetchError::BodyDecode(error.to_string()))
             }
         }
 
@@ -929,7 +999,8 @@ mod tests {
 
             async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
                 let body = self.get_text(url).await?;
-                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+                serde_json::from_str(&body)
+                    .map_err(|error| FetchError::BodyDecode(error.to_string()))
             }
         }
 
@@ -937,23 +1008,41 @@ mod tests {
         async fn ecommerce_matchers_cover_auto_and_explicit_only_groups() {
             assert!(amazon_product::matches("https://www.amazon.com/dp/B000123"));
             assert!(ebay_listing::matches("https://www.ebay.com/itm/123456"));
-            assert!(etsy_listing::matches("https://www.etsy.com/listing/123456/test"));
-            assert!(trustpilot_reviews::matches("https://www.trustpilot.com/review/example.com"));
+            assert!(etsy_listing::matches(
+                "https://www.etsy.com/listing/123456/test"
+            ));
+            assert!(trustpilot_reviews::matches(
+                "https://www.trustpilot.com/review/example.com"
+            ));
 
-            assert!(shopify_product::matches("https://shop.example/products/widget"));
-            assert!(shopify_collection::matches("https://shop.example/collections/frontpage"));
-            assert!(ecommerce_product::matches("https://shop.example/products/widget"));
-            assert!(woocommerce_product::matches("https://store.example/product/widget"));
+            assert!(shopify_product::matches(
+                "https://shop.example/products/widget"
+            ));
+            assert!(shopify_collection::matches(
+                "https://shop.example/collections/frontpage"
+            ));
+            assert!(ecommerce_product::matches(
+                "https://shop.example/products/widget"
+            ));
+            assert!(woocommerce_product::matches(
+                "https://store.example/product/widget"
+            ));
 
             assert!(
-                dispatch_by_url(&FixtureHttp::new(&[]), "https://shop.example/products/widget")
-                    .await
-                    .is_none()
+                dispatch_by_url(
+                    &FixtureHttp::new(&[]),
+                    "https://shop.example/products/widget"
+                )
+                .await
+                .is_none()
             );
             assert!(
-                dispatch_by_url(&FixtureHttp::new(&[]), "https://store.example/product/widget")
-                    .await
-                    .is_none()
+                dispatch_by_url(
+                    &FixtureHttp::new(&[]),
+                    "https://store.example/product/widget"
+                )
+                .await
+                .is_none()
             );
         }
 
@@ -1010,9 +1099,10 @@ mod tests {
                 .unwrap();
             assert_eq!(etsy["availability"], "InStock");
 
-            let generic = ecommerce_product::extract(&client, "https://shop.example/products/widget")
-                .await
-                .unwrap();
+            let generic =
+                ecommerce_product::extract(&client, "https://shop.example/products/widget")
+                    .await
+                    .unwrap();
             assert_eq!(generic["brand"], "FixtureCo");
 
             let woo = woocommerce_product::extract(&client, "https://store.example/product/widget")
@@ -1020,18 +1110,15 @@ mod tests {
                 .unwrap();
             assert_eq!(woo["sku"], "WIDGET-1");
 
-            let shopify =
-                shopify_product::extract(&client, "https://shop.example/products/widget")
-                    .await
-                    .unwrap();
+            let shopify = shopify_product::extract(&client, "https://shop.example/products/widget")
+                .await
+                .unwrap();
             assert_eq!(shopify["title"], "Shopify Widget");
 
-            let collection = shopify_collection::extract(
-                &client,
-                "https://shop.example/collections/frontpage",
-            )
-            .await
-            .unwrap();
+            let collection =
+                shopify_collection::extract(&client, "https://shop.example/collections/frontpage")
+                    .await
+                    .unwrap();
             assert_eq!(collection["products"][0]["title"], "Shopify Widget");
 
             let trustpilot = trustpilot_reviews::extract(

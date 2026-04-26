@@ -8,7 +8,10 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
     name: "linkedin_post",
     label: "LinkedIn Post",
     description: "Extract post metadata from LinkedIn.",
-    url_patterns: &["https://www.linkedin.com/posts/*", "https://www.linkedin.com/feed/update/*"],
+    url_patterns: &[
+        "https://www.linkedin.com/posts/*",
+        "https://www.linkedin.com/feed/update/*",
+    ],
 };
 
 pub fn matches(url: &str) -> bool {
@@ -51,7 +54,9 @@ fn extract_urn(url: &str) -> Option<String> {
         if parts.next() == Some("urn")
             && parts.next() == Some("li")
             && parts.next().is_some()
-            && parts.next().is_some_and(|part| part.chars().all(|c| c.is_ascii_digit()))
+            && parts
+                .next()
+                .is_some_and(|part| part.chars().all(|c| c.is_ascii_digit()))
         {
             return Some(urn.to_string());
         }

@@ -61,6 +61,22 @@ fn parse_username_slug(url: &str) -> Option<(String, String)> {
 }
 
 const RESERVED_FIRST_SEGS: &[&str] = &[
-    "api", "tags", "search", "settings", "enter", "signup", "about", "privacy", "terms",
-    "contact", "sponsorships", "sponsors", "shop", "videos", "listings", "podcasts", "p", "t",
+    "api",
+    "tags",
+    "search",
+    "settings",
+    "enter",
+    "signup",
+    "about",
+    "privacy",
+    "terms",
+    "contact",
+    "sponsorships",
+    "sponsors",
+    "shop",
+    "videos",
+    "listings",
+    "podcasts",
+    "p",
+    "t",
 ];

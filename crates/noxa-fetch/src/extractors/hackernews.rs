@@ -50,7 +50,9 @@ pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, Fet
 fn parse_item_id(url: &str) -> Option<u64> {
     let parsed = url::Url::parse(url).ok()?;
     if parsed.host_str()? == "hn.algolia.com" {
-        return parsed.path_segments()?.find_map(|segment| segment.parse().ok());
+        return parsed
+            .path_segments()?
+            .find_map(|segment| segment.parse().ok());
     }
     parsed
         .query_pairs()

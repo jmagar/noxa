@@ -8,7 +8,10 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
     name: "instagram_post",
     label: "Instagram Post",
     description: "Extract post metadata from Instagram.",
-    url_patterns: &["https://www.instagram.com/p/*", "https://www.instagram.com/reel/*"],
+    url_patterns: &[
+        "https://www.instagram.com/p/*",
+        "https://www.instagram.com/reel/*",
+    ],
 };
 
 pub fn matches(url: &str) -> bool {
@@ -17,7 +20,9 @@ pub fn matches(url: &str) -> bool {
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
     let (kind, shortcode) = parse_shortcode(url).ok_or_else(|| {
-        FetchError::Build(format!("instagram_post: cannot parse shortcode from '{url}'"))
+        FetchError::Build(format!(
+            "instagram_post: cannot parse shortcode from '{url}'"
+        ))
     })?;
     let embed_url = format!("https://www.instagram.com/p/{shortcode}/embed/captioned/");
     let html = client.get_text(&embed_url).await?;
@@ -69,8 +74,7 @@ fn parse_username(html: &str) -> Option<String> {
 fn parse_caption(html: &str) -> Option<String> {
     let outer = Regex::new(r#"(?s)<div\s+class="Caption"[^>]*>(.*?)</div>"#).ok()?;
     let block = outer.captures(html)?.get(1)?.as_str();
-    let user_re =
-        Regex::new(r#"(?s)<a[^>]*class="CaptionUsername"[^>]*>.*?</a>"#).ok()?;
+    let user_re = Regex::new(r#"(?s)<a[^>]*class="CaptionUsername"[^>]*>.*?</a>"#).ok()?;
     let stripped = user_re.replace_all(block, "");
     let tag_re = Regex::new(r"<[^>]+>").ok()?;
     let text = tag_re.replace_all(&stripped, " ");
@@ -80,10 +84,9 @@ fn parse_caption(html: &str) -> Option<String> {
 }
 
 fn parse_thumbnail(html: &str) -> Option<String> {
-    let img_re = Regex::new(
-        r#"(?s)<img[^>]+class="[^"]*EmbeddedMediaImage[^"]*"[^>]+src="([^"]+)""#,
-    )
-    .ok()?;
+    let img_re =
+        Regex::new(r#"(?s)<img[^>]+class="[^"]*EmbeddedMediaImage[^"]*"[^>]+src="([^"]+)""#)
+            .ok()?;
     img_re
         .captures(html)
         .and_then(|captures| captures.get(1))

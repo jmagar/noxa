@@ -65,6 +65,19 @@ fn parse_owner_name(url: &str) -> Option<(String, String)> {
 }
 
 const RESERVED_NAMESPACES: &[&str] = &[
-    "datasets", "spaces", "blog", "docs", "api", "models", "papers", "pricing", "tasks",
-    "join", "login", "settings", "organizations", "new", "search",
+    "datasets",
+    "spaces",
+    "blog",
+    "docs",
+    "api",
+    "models",
+    "papers",
+    "pricing",
+    "tasks",
+    "join",
+    "login",
+    "settings",
+    "organizations",
+    "new",
+    "search",
 ];

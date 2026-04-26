@@ -27,7 +27,12 @@ pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, Fet
         .unwrap_or_default();
     let latest = versions
         .iter()
-        .find(|version| !version.get("yanked").and_then(Value::as_bool).unwrap_or(false))
+        .find(|version| {
+            !version
+                .get("yanked")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .or_else(|| versions.first());
 
     Ok(json!({

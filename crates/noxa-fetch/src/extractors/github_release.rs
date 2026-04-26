@@ -58,5 +58,9 @@ fn parse_release(url: &str) -> Option<(String, String, String)> {
     if segs.len() < 5 || segs[2] != "releases" || segs[3] != "tag" {
         return None;
     }
-    Some((segs[0].to_string(), segs[1].to_string(), segs[4].to_string()))
+    Some((
+        segs[0].to_string(),
+        segs[1].to_string(),
+        segs[4].to_string(),
+    ))
 }

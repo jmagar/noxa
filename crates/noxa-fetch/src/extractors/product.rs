@@ -66,9 +66,9 @@ pub fn parse_trustpilot_page(url: &str, html: &str) -> Value {
 }
 
 fn json_ld_values(html: &str) -> Vec<Value> {
-    let Ok(re) = Regex::new(
-        r#"(?is)<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>"#,
-    ) else {
+    let Ok(re) =
+        Regex::new(r#"(?is)<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>"#)
+    else {
         return Vec::new();
     };
     re.captures_iter(html)
@@ -96,7 +96,10 @@ fn is_product(value: &Value) -> bool {
 }
 
 fn first_or_self(value: &Value) -> Option<&Value> {
-    value.as_array().and_then(|values| values.first()).or(Some(value))
+    value
+        .as_array()
+        .and_then(|values| values.first())
+        .or(Some(value))
 }
 
 fn first_or_array(value: &Value) -> Option<Vec<&Value>> {

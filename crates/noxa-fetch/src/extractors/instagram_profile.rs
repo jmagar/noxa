@@ -16,7 +16,9 @@ pub fn matches(url: &str) -> bool {
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
     let username = parse_username(url).ok_or_else(|| {
-        FetchError::Build(format!("instagram_profile: cannot parse username from '{url}'"))
+        FetchError::Build(format!(
+            "instagram_profile: cannot parse username from '{url}'"
+        ))
     })?;
     let api_url =
         format!("https://www.instagram.com/api/v1/users/web_profile_info/?username={username}");
@@ -70,9 +72,26 @@ fn parse_username(url: &str) -> Option<String> {
 }
 
 const RESERVED: &[&str] = &[
-    "p", "reel", "reels", "tv", "explore", "stories", "directory", "accounts", "about",
-    "developer", "press", "api", "ads", "blog", "fragments", "terms", "privacy", "session",
-    "login", "signup",
+    "p",
+    "reel",
+    "reels",
+    "tv",
+    "explore",
+    "stories",
+    "directory",
+    "accounts",
+    "about",
+    "developer",
+    "press",
+    "api",
+    "ads",
+    "blog",
+    "fragments",
+    "terms",
+    "privacy",
+    "session",
+    "login",
+    "signup",
 ];
 
 fn post_summary(node: &Value) -> Value {

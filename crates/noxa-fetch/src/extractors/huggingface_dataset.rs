@@ -16,7 +16,9 @@ pub fn matches(url: &str) -> bool {
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
     let dataset_path = parse_dataset_path(url).ok_or_else(|| {
-        FetchError::Build(format!("hf_dataset: cannot parse dataset path from '{url}'"))
+        FetchError::Build(format!(
+            "hf_dataset: cannot parse dataset path from '{url}'"
+        ))
     })?;
     let api_url = format!("https://huggingface.co/api/datasets/{dataset_path}");
     let dataset = client.get_json(&api_url).await?;

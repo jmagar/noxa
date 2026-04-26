@@ -84,21 +84,19 @@ fn parse_atom_entry(xml: &str) -> Option<AtomEntry> {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) => {
-                match element.local_name().as_ref() {
-                    b"entry" => in_entry = true,
-                    b"id" if in_entry && !in_author => current = Some("id"),
-                    b"title" if in_entry => current = Some("title"),
-                    b"summary" if in_entry => current = Some("summary"),
-                    b"published" if in_entry => current = Some("published"),
-                    b"updated" if in_entry => current = Some("updated"),
-                    b"author" if in_entry => in_author = true,
-                    b"name" if in_author => current = Some("author"),
-                    b"doi" if in_entry => current = Some("doi"),
-                    b"comment" if in_entry => current = Some("comment"),
-                    _ => {}
-                }
-            }
+            Ok(Event::Start(element)) => match element.local_name().as_ref() {
+                b"entry" => in_entry = true,
+                b"id" if in_entry && !in_author => current = Some("id"),
+                b"title" if in_entry => current = Some("title"),
+                b"summary" if in_entry => current = Some("summary"),
+                b"published" if in_entry => current = Some("published"),
+                b"updated" if in_entry => current = Some("updated"),
+                b"author" if in_entry => in_author = true,
+                b"name" if in_author => current = Some("author"),
+                b"doi" if in_entry => current = Some("doi"),
+                b"comment" if in_entry => current = Some("comment"),
+                _ => {}
+            },
             Ok(Event::Empty(element)) if in_entry => {
                 let mut term = None;
                 let mut href = None;

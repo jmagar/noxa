@@ -16,10 +16,13 @@ pub fn matches(url: &str) -> bool {
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
     let id = parse_question_id(url).ok_or_else(|| {
-        FetchError::Build(format!("stackoverflow: cannot parse question id from '{url}'"))
+        FetchError::Build(format!(
+            "stackoverflow: cannot parse question id from '{url}'"
+        ))
     })?;
-    let q_url =
-        format!("https://api.stackexchange.com/2.3/questions/{id}?site=stackoverflow&filter=withbody");
+    let q_url = format!(
+        "https://api.stackexchange.com/2.3/questions/{id}?site=stackoverflow&filter=withbody"
+    );
     let q_body = client.get_json(&q_url).await?;
     let question = q_body
         .get("items")
@@ -50,7 +53,12 @@ pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, Fet
         .collect();
     let accepted = answers
         .iter()
-        .find(|answer| answer.get("is_accepted").and_then(Value::as_bool).unwrap_or(false))
+        .find(|answer| {
+            answer
+                .get("is_accepted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .cloned();
 
     Ok(json!({

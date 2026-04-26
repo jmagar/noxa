@@ -67,7 +67,10 @@ fn parse_project(url: &str) -> Option<(String, Option<String>)> {
     if segs.len() < 2 || segs[0] != "project" {
         return None;
     }
-    Some((segs[1].to_string(), segs.get(2).map(|value| (*value).to_string())))
+    Some((
+        segs[1].to_string(),
+        segs.get(2).map(|value| (*value).to_string()),
+    ))
 }
 
 fn pick_license_classifier(classifiers: Option<&Value>) -> Option<String> {
