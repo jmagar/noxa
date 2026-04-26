@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use tokio::io::AsyncReadExt;
 
@@ -64,7 +63,7 @@ pub(crate) async fn validate_url_scheme(url: &str) -> Result<(), RagError> {
 async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, ctx: &WorkerContext) {
     // Increment the parse-failure counter regardless of whether a log path is
     // configured — this ensures the heartbeat metric is always accurate.
-    ctx.counters.parse_failures.fetch_add(1, Ordering::Relaxed);
+    ctx.counters.record_parse_failure();
 
     let Some(ref log_path) = ctx.config.pipeline.failed_jobs_log else {
         return;

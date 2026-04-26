@@ -75,6 +75,11 @@ impl SessionCounters {
         self.files_failed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+
+    fn record_parse_failure(&self) {
+        self.parse_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 struct IndexJob {
