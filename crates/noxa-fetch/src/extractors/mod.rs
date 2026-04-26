@@ -822,4 +822,79 @@ mod tests {
             assert_eq!(linked["author_name"], "Jacob Magar");
         }
     }
+
+    pub mod reddit_vertical {
+        use std::collections::BTreeMap;
+
+        use async_trait::async_trait;
+
+        use super::*;
+
+        struct FixtureHttp {
+            bodies: BTreeMap<&'static str, &'static str>,
+        }
+
+        #[async_trait]
+        impl http::ExtractorHttp for FixtureHttp {
+            async fn get_text(&self, url: &str) -> Result<String, FetchError> {
+                self.bodies
+                    .get(url)
+                    .map(|body| (*body).to_string())
+                    .ok_or_else(|| FetchError::Build(format!("missing fixture for {url}")))
+            }
+
+            async fn get_json(&self, url: &str) -> Result<Value, FetchError> {
+                let body = self.get_text(url).await?;
+                serde_json::from_str(&body).map_err(|error| FetchError::BodyDecode(error.to_string()))
+            }
+        }
+
+        #[tokio::test]
+        async fn reddit_vertical_uses_hardened_json_parser() {
+            let client = FixtureHttp {
+                bodies: [(
+                    "https://www.reddit.com/r/rust/comments/abc123/release_thread.json",
+                    include_str!("../../tests/fixtures/extractors/reddit.json"),
+                )]
+                .into_iter()
+                .collect(),
+            };
+
+            let value = reddit::extract(
+                &client,
+                "https://www.reddit.com/r/rust/comments/abc123/release_thread/",
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(value["metadata"]["title"], "Rust release thread");
+            assert!(
+                value["content"]["plain_text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Thanks for the update!")
+            );
+        }
+
+        #[tokio::test]
+        async fn reddit_vertical_rejects_verify_wall_html() {
+            let client = FixtureHttp {
+                bodies: [(
+                    "https://www.reddit.com/r/rust/comments/abc123/release_thread.json",
+                    "<html><body>Whoa there, verify you are human</body></html>",
+                )]
+                .into_iter()
+                .collect(),
+            };
+
+            let err = reddit::extract(
+                &client,
+                "https://www.reddit.com/r/rust/comments/abc123/release_thread/",
+            )
+            .await
+            .expect_err("verify wall must not parse as reddit JSON");
+
+            assert!(err.to_string().contains("verification"));
+        }
+    }
 }
