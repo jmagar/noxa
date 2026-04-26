@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use tokio::io::AsyncReadExt;
 
 use crate::error::RagError;
@@ -10,6 +11,29 @@ use crate::types::Point;
 use super::parse;
 use super::scan;
 use super::{DeleteJob, IndexJob, JobStats, WorkerContext};
+
+/// Walk up from `path`'s parent checking each ancestor directory against `cache`.
+///
+/// Returns `Some(branch)` on a cache hit (where the inner `Option<String>` is the stored
+/// branch value — `None` means "not in a git repo"), or `None` when no ancestor is cached.
+///
+/// O(depth) DashMap lookups; typical repo depth ≤ 5, so this avoids a `spawn_blocking`
+/// dispatch for every file after the first in each git repository.
+fn find_cached_branch(
+    path: &Path,
+    cache: &DashMap<PathBuf, Option<String>>,
+) -> Option<Option<String>> {
+    let mut dir = path.parent()?;
+    loop {
+        if let Some(entry) = cache.get(dir) {
+            return Some(entry.clone());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return None,
+        }
+    }
+}
 
 /// Validate that `url` is a permitted indexing target.
 ///
@@ -195,18 +219,39 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
         result.metadata.last_modified =
             Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
-    let git_branch = {
-        let path = job.path.clone();
+    let git_branch = if let Some(cached) =
+        find_cached_branch(&canonical, &ctx.git_branch_cache)
+    {
+        // Cache hit — no spawn_blocking needed. `canonical` ancestors were walked
+        // synchronously in async context (pure in-memory DashMap lookups, no I/O).
+        cached
+    } else {
+        // Cache miss — dispatch to a blocking thread to read .git/HEAD from disk.
+        // Store the result keyed by the canonical git root so future files in the
+        // same repo hit the pre-check without spawning.
+        let canonical_clone = canonical.clone();
         let cache = ctx.git_branch_cache.clone();
         tokio::task::spawn_blocking(move || {
-            // Walk up to find the git root first so we can use it as a stable cache key.
-            if let Some((git_root, branch)) = scan::detect_git_root_and_branch(&path) {
+            if let Some((git_root, branch)) = scan::detect_git_root_and_branch(&canonical_clone) {
+                // Canonicalize the git root so subsequent lookups via `canonical`
+                // ancestors always match, regardless of symlinks or path normalization.
+                let key = std::fs::canonicalize(&git_root).unwrap_or(git_root);
                 cache
-                    .entry(git_root)
+                    .entry(key)
                     .or_insert_with(|| Some(branch.clone()))
                     .clone()
             } else {
-                None
+                // Cache the miss so we don't re-stat .git for every file outside a repo.
+                let key = std::fs::canonicalize(
+                    canonical_clone.parent().unwrap_or(&canonical_clone),
+                )
+                .unwrap_or_else(|_| {
+                    canonical_clone
+                        .parent()
+                        .unwrap_or(&canonical_clone)
+                        .to_path_buf()
+                });
+                cache.entry(key).or_insert(None).clone()
             }
         })
         .await
