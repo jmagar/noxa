@@ -58,6 +58,23 @@ impl SessionCounters {
             total_upsert_ms: self.total_upsert_ms.load(Relaxed),
         }
     }
+
+    fn record_success(&self, stats: &JobStats) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if stats.chunks > 0 {
+            self.files_indexed.fetch_add(1, Relaxed);
+        }
+        self.total_chunks.fetch_add(stats.chunks, Relaxed);
+        self.total_parse_ms.fetch_add(stats.parse_ms, Relaxed);
+        self.total_chunk_ms.fetch_add(stats.chunk_ms, Relaxed);
+        self.total_embed_ms.fetch_add(stats.embed_ms, Relaxed);
+        self.total_upsert_ms.fetch_add(stats.upsert_ms, Relaxed);
+    }
+
+    fn record_failure(&self) {
+        self.files_failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 struct IndexJob {
@@ -112,6 +129,27 @@ struct WorkerContext {
     counters: Arc<SessionCounters>,
     failed_jobs_log_lock: Arc<tokio::sync::Mutex<()>>,
     shutdown: CancellationToken,
+}
+
+impl WorkerContext {
+    fn from_pipeline(pipeline: &Pipeline) -> Self {
+        Self {
+            embed: pipeline.embed.clone(),
+            store: pipeline.store.clone(),
+            tokenizer: pipeline.tokenizer.clone(),
+            config: pipeline.config.clone(),
+            url_locks: pipeline.url_locks.clone(),
+            git_branch_cache: pipeline.git_branch_cache.clone(),
+            watch_roots: pipeline
+                .watch_roots
+                .get()
+                .expect("watch_roots set before spawn_workers")
+                .clone(),
+            counters: pipeline.counters.clone(),
+            failed_jobs_log_lock: pipeline.failed_jobs_log_lock.clone(),
+            shutdown: pipeline.shutdown.clone(),
+        }
+    }
 }
 
 pub struct Pipeline {

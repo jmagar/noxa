@@ -35,7 +35,10 @@ pub(super) fn send_job(
         Ok(()) => return,
         Err(async_channel::TrySendError::Closed(_)) => return,
         Err(async_channel::TrySendError::Full(j)) => {
-            tracing::warn!("job queue saturated (256/256), backing off — embed/upsert catching up");
+            tracing::warn!(
+                capacity = tx.capacity().unwrap_or(0),
+                "job queue saturated, backing off — embed/upsert catching up"
+            );
             // Park the blocking thread on the channel's condvar until a slot opens.
             // Zero CPU overhead vs. the previous 10ms-sleep spin. Safe to call from
             // spawn_blocking. Returns Err only when all receivers are dropped (shutdown
@@ -83,12 +86,12 @@ pub(super) fn setup_watcher(
         // Keep debouncer alive for the duration of the bridge.
         let _debouncer = debouncer;
 
-        // Returns true iff `path`'s parent can be canonicalized within a watch dir.
-        // Used to guard delete events — the deleted file itself cannot be canonicalized.
+        // Guard for delete events — canonicalize the parent (deleted file itself
+        // cannot be canonicalized) and reuse the shared confinement check.
         let is_delete_path_confined = |path: &std::path::Path| -> bool {
             path.parent()
                 .and_then(|p| p.canonicalize().ok())
-                .map(|canon| watch_dirs_owned.iter().any(|d| canon.starts_with(d)))
+                .map(|canon| scan::path_is_within_any_watch_root(&canon, &watch_dirs_owned))
                 .unwrap_or(false)
         };
 

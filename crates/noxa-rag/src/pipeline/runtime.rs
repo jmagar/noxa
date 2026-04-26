@@ -34,8 +34,11 @@ async fn drain_and_report(
     }
 
     let snap = pipeline.counters.snapshot();
-    let avg_embed_ms = if snap.indexed > 0 { snap.total_embed_ms / snap.indexed as u64 } else { 0 };
-    let avg_upsert_ms = if snap.indexed > 0 { snap.total_upsert_ms / snap.indexed as u64 } else { 0 };
+    let avg = |total: u64| -> u64 {
+        if snap.indexed > 0 { total / snap.indexed as u64 } else { 0 }
+    };
+    let avg_embed_ms = avg(snap.total_embed_ms);
+    let avg_upsert_ms = avg(snap.total_upsert_ms);
     tracing::info!(
         indexed        = snap.indexed,
         failed         = snap.failed,
@@ -51,7 +54,6 @@ async fn drain_and_report(
 }
 
 pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
-    // --- validate config & extract source params ---
     let (watch_dirs, debounce_ms) = match &pipeline.config.source {
         SourceConfig::FsWatcher {
             watch_dirs,
@@ -79,13 +81,10 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         .set(Arc::new(scan::canonical_watch_roots(&watch_dirs).await?))
         .ok();
 
-    // --- channel (MPMC: every worker gets its own Receiver clone) ---
     let (tx, rx) = async_channel::bounded(pipeline.config.pipeline.job_queue_capacity);
 
-    // --- spawn workers ---
     let worker_handles = spawn_workers(pipeline, rx);
 
-    // --- setup fs watcher + blocking bridge ---
     let bridge_handle = setup_watcher(
         &watch_dirs,
         debounce_ms,
@@ -93,7 +92,6 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         pipeline.shutdown.clone(),
     )?;
 
-    // --- startup delta scan ---
     let startup_handle = spawn_startup_scan(
         tx.clone(),
         pipeline.store.clone(),
@@ -102,7 +100,6 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         pipeline.config.pipeline.startup_scan_concurrency,
     );
 
-    // --- heartbeat (also sweeps stale url_locks every 60s) ---
     let heartbeat_handle = spawn_heartbeat(
         pipeline.counters.clone(),
         pipeline.url_locks.clone(),
@@ -110,17 +107,13 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         session_start,
     );
 
-    // --- wait for shutdown signal ---
     pipeline.shutdown.cancelled().await;
     tracing::info!("shutdown signal received, draining pipeline");
 
     // Drop tx BEFORE awaiting workers so their recv loops see channel closed.
     drop(tx);
 
-    let _ = bridge_handle.await;
-    let _ = heartbeat_handle.await;
-    let _ = startup_handle.await;
+    let _ = tokio::join!(bridge_handle, heartbeat_handle, startup_handle);
 
-    // --- drain workers + log final metrics ---
     drain_and_report(worker_handles, pipeline, session_start).await
 }
