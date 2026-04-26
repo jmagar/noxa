@@ -71,14 +71,14 @@ pub struct PointPayload {
     /// Git branch detected from .git/HEAD walk-up (file:// sources only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
-    // ── Ingestion-provenance fields from IngestionContext ───────────────────
+    // ── Ingestion-provenance fields ─────────────────────────────────────────
     /// Opaque platform id: 'linkding:42', 'memos:7' (Wave 3+).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
     /// Native platform UI URL (Wave 3+).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_url: Option<String>,
-    // ── Web-provenance fields from IngestionContext ─────────────────────────
+    // ── Web-provenance fields ────────────────────────────────────────────────
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,62 +211,6 @@ pub struct SearchMetadataFilter {
     pub hnsw_ef: Option<usize>,
 }
 
-/// RAG-pipeline provenance carried alongside ExtractionResult through ingestion.
-///
-/// These fields have no meaning to noxa-fetch, noxa-mcp, or WASM consumers — they
-/// live here in noxa-rag, not in noxa-core. At upsert time both Metadata and
-/// IngestionContext are serialized into PointPayload.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct IngestionContext {
-    /// Matches Metadata.source_type: 'web' | 'file' | 'mcp' | 'notebook' | 'email'
-    pub source_type: String,
-    /// SHA-256 hex digest — duplicated from Metadata.content_hash for fast access.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-    // Platform fields — populated when MCP sources land in Wave 3.
-    /// Opaque platform identifier: 'linkding:42', 'memos:7', 'paperless:15'.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_id: Option<String>,
-    /// Native UI URL (not the canonical content URL).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_url: Option<String>,
-    // AI session fields — populated when AI session sources land.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_tool: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    // Web provenance — populated by noxa-fetch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub search_query: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crawl_depth: Option<u32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub email_to: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email_message_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email_thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email_has_attachments: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feed_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feed_item_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pptx_slide_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pptx_has_notes: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subtitle_start_s: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subtitle_end_s: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subtitle_source_file: Option<String>,
-}
 
 #[cfg(test)]
 mod tests {
