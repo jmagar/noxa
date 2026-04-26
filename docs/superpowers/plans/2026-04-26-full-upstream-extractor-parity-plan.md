@@ -30,7 +30,7 @@
 - Modify `crates/noxa-cli/src/app/printing.rs`: print catalog and vertical summaries.
 - Modify `crates/noxa-mcp/src/tools.rs`: add `extractor` to `ScrapeParams`.
 - Modify `crates/noxa-mcp/src/server.rs` and/or `server/content_tools.rs`: add `extractors` tool and explicit scrape dispatch.
-- Modify `crates/noxa-fetch/Cargo.toml`: add dependencies needed by ported extractor code, expected `regex = "1"` and possibly `reqwest` only if upstream API code cannot reuse `wreq`.
+- Modify `crates/noxa-fetch/Cargo.toml`: add dependencies needed by ported extractor code, expected `async-trait = "0.1"` and `regex = "1"`, and possibly `reqwest` only if upstream API code cannot reuse `wreq`.
 
 ## Task 1: Add Vertical Output Model
 
@@ -195,7 +195,7 @@ Use a mock `ExtractorHttp` that maps expected API URLs to fixture JSON. Assert s
 
 - [ ] **Step 3: Run tests to verify failure**
 
-Run: `cargo test -p noxa-fetch github_repo pypi npm crates_io docker_hub -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::developer -- --nocapture`
 
 Expected: failures from unimplemented extractors.
 
@@ -205,7 +205,7 @@ Use upstream extractor files as the behavioral source, but adapt crate names and
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo test -p noxa-fetch github_ pypi npm crates_io docker_hub -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::developer -- --nocapture`
 
 Expected: PASS.
 
@@ -240,7 +240,7 @@ Cover canonical URL forms:
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p noxa-fetch arxiv hackernews dev_to stackoverflow youtube_video -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::community -- --nocapture`
 
 Expected: failures from unimplemented extractors.
 
@@ -250,7 +250,7 @@ Prefer upstream API endpoints where present. Keep HTML parsing fixture-driven an
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p noxa-fetch arxiv hackernews dev_to stackoverflow youtube_video -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::community -- --nocapture`
 
 Expected: PASS.
 
@@ -280,7 +280,7 @@ Assert HuggingFace model/dataset disambiguation and Instagram profile/post disam
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p noxa-fetch huggingface instagram linkedin_post -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::social -- --nocapture`
 
 Expected: failures from unimplemented extractors.
 
@@ -290,7 +290,7 @@ Keep the existing LinkedIn generic fallback intact. `linkedin_post` should popul
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p noxa-fetch huggingface instagram linkedin_post -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::social -- --nocapture`
 
 Expected: PASS.
 
@@ -363,7 +363,7 @@ Assert:
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p noxa-fetch amazon_product ebay_listing ecommerce_product etsy_listing shopify trustpilot woocommerce -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::ecommerce -- --nocapture`
 
 Expected: failures from unimplemented extractors.
 
@@ -373,7 +373,7 @@ Preserve upstream anti-bot handling where present. Block/verification pages must
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p noxa-fetch amazon_product ebay_listing ecommerce_product etsy_listing shopify trustpilot woocommerce -- --nocapture`
+Run: `cargo test -p noxa-fetch extractors::ecommerce -- --nocapture`
 
 Expected: PASS.
 
