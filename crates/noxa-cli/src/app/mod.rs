@@ -29,12 +29,12 @@ mod cli;
 mod crawl;
 mod crawl_status;
 mod crawl_watch;
+mod diff_brand;
+mod entry;
 mod rag_daemon;
 mod rag_watch;
 mod store_watch;
 mod watch_singleton;
-mod diff_brand;
-mod entry;
 mod fetching {
     pub(crate) mod config;
     pub(crate) mod extract;
@@ -58,11 +58,8 @@ mod watch;
 pub(crate) use batch::run_batch;
 pub(crate) use cli::{Browser, Cli, OutputFormat, PdfModeArg};
 pub(crate) use crawl::{run_crawl, run_map, spawn_crawl_background};
-pub(crate) use crawl_watch::run_crawl_watch;
-pub(crate) use rag_daemon::{run_rag_start, run_rag_stop};
-pub(crate) use rag_watch::run_rag_watch;
-pub(crate) use store_watch::run_store_watch;
 pub(crate) use crawl_status::*;
+pub(crate) use crawl_watch::run_crawl_watch;
 pub(crate) use diff_brand::{run_brand, run_diff};
 pub(crate) use entry::run;
 pub(crate) use fetching::config::{
@@ -80,13 +77,16 @@ pub(crate) use formatting::{
 pub(crate) use llm::{has_llm_flags, run_batch_llm, run_llm};
 pub(crate) use logging::{build_ops_log, init_logging, init_mcp_logging, log_operation};
 pub(crate) use printing::{
-    print_batch_output, print_cloud_output, print_crawl_output, print_diff_output,
-    print_map_output, print_output,
+    format_extractor_catalog, print_batch_output, print_cloud_output, print_crawl_output,
+    print_diff_output, print_extractor_catalog, print_map_output, print_output,
 };
+pub(crate) use rag_daemon::{run_rag_start, run_rag_stop};
+pub(crate) use rag_watch::run_rag_watch;
 pub(crate) use refresh::{run_refresh, run_status};
 pub(crate) use research::run_research;
 pub(crate) use retrieve::run_retrieve;
 pub(crate) use store_ops::{run_grep, run_list, run_search};
+pub(crate) use store_watch::run_store_watch;
 pub(crate) use watch::{fire_webhook, run_watch};
 
 #[cfg(test)]

@@ -124,6 +124,13 @@ impl FetchClient {
             .map_err(|error| FetchError::Build(error.to_string()))?;
         let mut result = build_vertical_extraction_result(extractor, url, data);
         result.metadata.fetched_at = Some(Utc::now().to_rfc3339());
+
+        if let Some(ref store) = self.store
+            && let Err(error) = store.write(url, &result).await
+        {
+            warn!(url, error = %error, "content store write failed");
+        }
+
         Ok(result)
     }
 
@@ -408,10 +415,22 @@ pub(super) fn build_vertical_extraction_result(
     data: serde_json::Value,
 ) -> noxa_core::ExtractionResult {
     let title = string_field(&data, &["title", "name", "full_name", "business"])
-        .or_else(|| data.pointer("/post/title").and_then(|value| value.as_str()).map(ToString::to_string))
-        .or_else(|| data.pointer("/metadata/title").and_then(|value| value.as_str()).map(ToString::to_string));
-    let description = string_field(&data, &["description", "summary", "body", "abstract"])
-        .or_else(|| data.pointer("/metadata/description").and_then(|value| value.as_str()).map(ToString::to_string));
+        .or_else(|| {
+            data.pointer("/post/title")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            data.pointer("/metadata/title")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        });
+    let description =
+        string_field(&data, &["description", "summary", "body", "abstract"]).or_else(|| {
+            data.pointer("/metadata/description")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        });
     let pretty = serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string());
     let heading = title.clone().unwrap_or_else(|| extractor.to_string());
     let markdown = match description.as_deref() {

@@ -6,6 +6,9 @@ pub(crate) async fn fetch_and_extract(
 ) -> Result<FetchOutput, String> {
     // Local sources: read and extract as HTML
     if cli.stdin {
+        if cli.extractor.is_some() {
+            return Err("--extractor cannot be combined with --stdin".to_string());
+        }
         let mut buf = String::new();
         io::stdin()
             .read_to_string(&mut buf)
@@ -17,6 +20,9 @@ pub(crate) async fn fetch_and_extract(
     }
 
     if let Some(ref path) = cli.file {
+        if cli.extractor.is_some() {
+            return Err("--extractor cannot be combined with --file".to_string());
+        }
         let html =
             std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
         let options = build_extraction_options(resolved);
@@ -47,6 +53,9 @@ pub(crate) async fn fetch_and_extract(
 
     // --cloud: skip local, go straight to cloud API
     if cli.cloud {
+        if cli.extractor.is_some() {
+            return Err("--extractor cannot be combined with --cloud".to_string());
+        }
         let c = cloud_client.ok_or("--cloud requires NOXA_API_KEY (set via env or --api-key)")?;
         let options = build_extraction_options(resolved);
         let resp = c
@@ -65,10 +74,18 @@ pub(crate) async fn fetch_and_extract(
     let client = FetchClient::new(build_fetch_config(cli, resolved))
         .map_err(|e| format!("client error: {e}"))?;
     let options = build_extraction_options(resolved);
-    let result = client
-        .fetch_and_extract_with_options(url, &options)
-        .await
-        .map_err(|e| format!("fetch error: {e}"))?;
+    let result = if let Some(ref extractor) = cli.extractor {
+        client
+            .fetch_and_extract_vertical(url, extractor, &options)
+            .await
+    } else {
+        client.fetch_and_extract_with_options(url, &options).await
+    }
+    .map_err(|e| format!("fetch error: {e}"))?;
+
+    if cli.extractor.is_some() {
+        return Ok(FetchOutput::Local(Box::new(result)));
+    }
 
     // Check if we should fall back to cloud
     let reason = detect_empty(&result);

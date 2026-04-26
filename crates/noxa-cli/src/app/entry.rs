@@ -34,7 +34,10 @@ pub(crate) async fn run() {
         return;
     }
 
-    match (std::env::args().nth(1).as_deref(), std::env::args().nth(2).as_deref()) {
+    match (
+        std::env::args().nth(1).as_deref(),
+        std::env::args().nth(2).as_deref(),
+    ) {
         (Some("rag"), Some("start")) => {
             run_rag_start();
             return;
@@ -65,6 +68,16 @@ pub(crate) async fn run() {
     let resolved = config::resolve(&cli, &matches, &cfg);
 
     init_logging(resolved.verbose);
+
+    if cli.list_extractors {
+        print_extractor_catalog(&resolved.format);
+        return;
+    }
+
+    if let Some(reason) = unsupported_extractor_mode(&cli, &resolved) {
+        eprintln!("error: --extractor {reason}");
+        process::exit(1);
+    }
 
     // Validate webhook URL early so any SSRF attempt is rejected before operations run.
     if let Some(ref webhook_url) = cli.webhook
@@ -291,4 +304,42 @@ pub(crate) async fn run() {
             process::exit(1);
         }
     }
+}
+
+fn unsupported_extractor_mode(
+    cli: &Cli,
+    resolved: &config::ResolvedConfig,
+) -> Option<&'static str> {
+    cli.extractor.as_ref()?;
+
+    if cli.stdin || cli.file.is_some() {
+        return Some("cannot be combined with --stdin or --file");
+    }
+    if cli.cloud {
+        return Some("cannot be combined with --cloud");
+    }
+    if resolved.raw_html {
+        return Some("cannot be combined with --raw-html");
+    }
+    if has_llm_flags(cli) {
+        return Some("cannot be combined with LLM extraction flags");
+    }
+    if cli.crawl || cli.map || cli.watch || cli.diff_with.is_some() || cli.brand {
+        return Some("only applies to single URL and batch scraping");
+    }
+    if cli.research.is_some()
+        || cli.search.is_some()
+        || cli.grep.is_some()
+        || cli.list.is_some()
+        || cli.status.is_some()
+        || cli.refresh.is_some()
+        || cli.retrieve.is_some()
+        || cli.watch_crawls
+        || cli.watch_rag
+        || cli.watch_store
+    {
+        return Some("cannot be combined with this command mode");
+    }
+
+    None
 }

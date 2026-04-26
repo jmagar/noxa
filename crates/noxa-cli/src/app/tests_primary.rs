@@ -229,6 +229,40 @@ mod tests {
         assert!(Cli::try_parse_from(["noxa", "--refresh"]).is_err());
     }
 
+    #[test]
+    fn extractor_flags_parse() {
+        let parsed = Cli::try_parse_from([
+            "noxa",
+            "--extractor",
+            "github_repo",
+            "https://github.com/jmagar/noxa",
+        ])
+        .unwrap();
+        assert_eq!(parsed.extractor.as_deref(), Some("github_repo"));
+
+        let parsed = Cli::try_parse_from(["noxa", "--list-extractors"]).unwrap();
+        assert!(parsed.list_extractors);
+    }
+
+    #[test]
+    fn extractor_catalog_text_output_lists_names_and_patterns() {
+        let output = format_extractor_catalog(&OutputFormat::Text);
+
+        assert!(output.contains("github_repo"));
+        assert!(output.contains("GitHub Repository"));
+        assert!(output.contains("https://github.com/*/*"));
+    }
+
+    #[test]
+    fn extractor_catalog_json_output_serializes_all_extractors() {
+        let output = format_extractor_catalog(&OutputFormat::Json);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let entries = value.as_array().unwrap();
+
+        assert_eq!(entries.len(), 28);
+        assert!(entries.iter().any(|entry| entry["name"] == "substack_post"));
+    }
+
     #[tokio::test]
     async fn list_domain_urls_is_domain_scoped() {
         let dir = tempfile::tempdir().unwrap();

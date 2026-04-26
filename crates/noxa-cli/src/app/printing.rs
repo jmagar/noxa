@@ -4,6 +4,35 @@ pub(crate) fn print_output(result: &ExtractionResult, format: &OutputFormat, sho
     println!("{}", format_output(result, format, show_metadata));
 }
 
+pub(crate) fn print_extractor_catalog(format: &OutputFormat) {
+    println!("{}", format_extractor_catalog(format));
+}
+
+pub(crate) fn format_extractor_catalog(format: &OutputFormat) -> String {
+    let extractors = noxa_fetch::extractors::list();
+    match format {
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(&extractors).expect("serialization failed")
+        }
+        _ => {
+            let mut out = String::new();
+            for extractor in extractors {
+                out.push_str(extractor.name);
+                out.push_str(" - ");
+                out.push_str(extractor.label);
+                out.push('\n');
+                out.push_str("  ");
+                out.push_str(extractor.description);
+                out.push('\n');
+                out.push_str("  patterns: ");
+                out.push_str(&extractor.url_patterns.join(", "));
+                out.push_str("\n\n");
+            }
+            out.trim_end().to_string()
+        }
+    }
+}
+
 /// Print cloud API response in the requested format.
 pub(crate) fn print_cloud_output(resp: &serde_json::Value, format: &OutputFormat) {
     match format {
