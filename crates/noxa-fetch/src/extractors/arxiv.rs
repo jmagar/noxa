@@ -98,16 +98,37 @@ fn parse_atom_entry(xml: &str) -> Option<AtomEntry> {
                 _ => {}
             },
             Ok(Event::Empty(element)) if in_entry => {
-                let mut term = None;
-                let mut href = None;
-                let mut rel = None;
-                let mut content_type = None;
+                let mut term: Option<String> = None;
+                let mut href: Option<String> = None;
+                let mut rel: Option<String> = None;
+                let mut content_type: Option<String> = None;
+                let decoder = reader.decoder();
                 for attr in element.attributes().flatten() {
                     match attr.key.as_ref() {
-                        b"term" => term = attr.unescape_value().ok().map(|v| v.to_string()),
-                        b"href" => href = attr.unescape_value().ok().map(|v| v.to_string()),
-                        b"rel" => rel = attr.unescape_value().ok().map(|v| v.to_string()),
-                        b"type" => content_type = attr.unescape_value().ok().map(|v| v.to_string()),
+                        b"term" => {
+                            term = attr
+                                .decode_and_unescape_value(decoder)
+                                .ok()
+                                .map(|v| v.to_string())
+                        }
+                        b"href" => {
+                            href = attr
+                                .decode_and_unescape_value(decoder)
+                                .ok()
+                                .map(|v| v.to_string())
+                        }
+                        b"rel" => {
+                            rel = attr
+                                .decode_and_unescape_value(decoder)
+                                .ok()
+                                .map(|v| v.to_string())
+                        }
+                        b"type" => {
+                            content_type = attr
+                                .decode_and_unescape_value(decoder)
+                                .ok()
+                                .map(|v| v.to_string())
+                        }
                         _ => {}
                     }
                 }
