@@ -32,6 +32,10 @@ pub(crate) fn parse_office_zip_file(
     // stream (NOT the attacker-controlled central directory size field). This defends
     // against zip bombs that lie about entry.size() in the central directory.
     const MAX_DOCX_EXTRACTED_BYTES: u64 = 50 * 1024 * 1024;
+    // Per-entry and cumulative measured caps for ODT/PPTX.
+    // Named separately from the DOCX constants so each format's limit is explicit.
+    const MAX_ODT_PPTX_PER_ENTRY_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB per XML entry
+    const MAX_ODT_PPTX_TOTAL_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB cumulative
 
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)
@@ -117,17 +121,23 @@ pub(crate) fn parse_office_zip_file(
     let mut text_parts: Vec<String> = Vec::new();
     let mut slide_count = 0u32;
     let mut has_notes = false;
+    // Authoritative measured total for ODT/PPTX decompressed bytes.
+    // This is incremented from the actual read count, NOT the advisory entry.size().
+    let mut odt_pptx_measured_total: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| RagError::Parse(format!("{ext} entry {i}: {e}")))?;
+
+        // Advisory pre-checks using the central directory declared size.
+        // These are fast-path guards only — the central directory is attacker-controlled
+        // so they must be backed up by the measured read below.
         total_uncompressed_size = total_uncompressed_size.saturating_add(entry.size());
         if total_uncompressed_size > MAX_TOTAL_UNCOMPRESSED_SIZE {
             return Err(RagError::Parse(format!(
                 "{ext}: archive expands to more than 250 MiB — possible zip bomb"
             )));
         }
-
         if entry.size() > MAX_ENTRY_SIZE {
             return Err(RagError::Parse(format!(
                 "{ext}: entry '{}' decompresses to {} bytes (max 100 MiB) — possible zip bomb",
@@ -150,10 +160,27 @@ pub(crate) fn parse_office_zip_file(
             continue;
         }
 
+        // Authoritative measured guard: cap the actual decompression stream.
+        // A crafted file can declare a tiny entry.size() in the central directory
+        // while the actual decompressed content expands to gigabytes. We read at most
+        // (cap + 1) bytes so we can distinguish "exactly at budget" from "overran".
+        let remaining = MAX_ODT_PPTX_TOTAL_BYTES.saturating_sub(odt_pptx_measured_total);
+        let per_entry_cap = MAX_ODT_PPTX_PER_ENTRY_BYTES.min(remaining);
+        let read_cap = per_entry_cap.saturating_add(1);
         let mut xml_buf = String::new();
-        entry
+        (&mut entry)
+            .take(read_cap)
             .read_to_string(&mut xml_buf)
             .map_err(|e| RagError::Parse(format!("{ext} read '{name}': {e}")))?;
+        let read_bytes = xml_buf.len() as u64;
+        if read_bytes > per_entry_cap {
+            return Err(RagError::Parse(format!(
+                "{ext}: entry '{name}' exceeds decompression limit ({} MiB per entry, {} MiB total) — possible zip bomb",
+                MAX_ODT_PPTX_PER_ENTRY_BYTES / (1024 * 1024),
+                MAX_ODT_PPTX_TOTAL_BYTES / (1024 * 1024),
+            )));
+        }
+        odt_pptx_measured_total = odt_pptx_measured_total.saturating_add(read_bytes);
 
         let fragment = super::extract_xml_text(&xml_buf).unwrap_or_else(|_| xml_buf.clone());
         if !fragment.trim().is_empty() {
@@ -180,4 +207,162 @@ pub(crate) fn parse_office_zip_file(
         extraction,
         provenance,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an in-memory zip archive with a single entry.
+    /// `entry_name`: path inside the zip (e.g. "content.xml")
+    /// `content`: raw bytes to store (Deflated, which compresses repeated data heavily)
+    fn make_zip_with_entry(entry_name: &str, content: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let buf = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(buf);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file(entry_name, options).expect("start_file");
+        writer.write_all(content).expect("write_all");
+        writer.finish().expect("finish").into_inner()
+    }
+
+    /// Verify that the DOCX guard is untouched: the existing DOCX path compiles and
+    /// the entry-count bomb check fires correctly (the measured guard is tested by DOCX's
+    /// own test suite; we just ensure structural integrity here).
+    #[test]
+    fn docx_entry_count_bomb_rejected() {
+        // Build a zip with MAX_ENTRIES+1 (1001) empty entries as a DOCX.
+        use std::io::Write;
+        let buf = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(buf);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for i in 0..1001usize {
+            writer
+                .start_file(format!("file{i}.txt"), options)
+                .expect("start_file");
+            writer.write_all(b"").expect("write_all");
+        }
+        let bytes = writer.finish().expect("finish").into_inner();
+
+        let result = parse_office_zip_file(
+            &bytes,
+            "file:///test.docx".to_string(),
+            "test".to_string(),
+            "docx",
+        );
+        assert!(
+            result.is_err(),
+            "expected error for zip with 1001 entries, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("zip bomb") || msg.contains("entries"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// Core regression for noxa-5gf: an ODT file whose single content.xml entry
+    /// expands to more than MAX_ODT_PPTX_PER_ENTRY_BYTES (10 MiB) must be rejected
+    /// via the *measured* decompression guard — even if the advisory entry.size()
+    /// value in the central directory declares a small size.
+    ///
+    /// We use a highly compressible XML payload (11 MiB of repeated ASCII) so the
+    /// in-memory zip is only ~40 KiB but decompresses beyond the 10 MiB cap.
+    #[test]
+    fn odt_decompression_bomb_rejected_by_measured_guard() {
+        // 11 MiB of valid-ish XML content — highly compressible.
+        const BOMB_SIZE: usize = 11 * 1024 * 1024;
+        let xml_content: String = std::iter::repeat("<text:p>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</text:p>\n")
+            .flat_map(|s| s.chars())
+            .take(BOMB_SIZE)
+            .collect();
+
+        // The zip crate writes the actual uncompressed size into the central directory,
+        // so entry.size() will be 11 MiB. The advisory check (MAX_ENTRY_SIZE = 100 MiB)
+        // would NOT fire here — only the measured per-entry cap (10 MiB) fires.
+        let zip_bytes = make_zip_with_entry("content.xml", xml_content.as_bytes());
+
+        let result = parse_office_zip_file(
+            &zip_bytes,
+            "file:///test.odt".to_string(),
+            "Test Document".to_string(),
+            "odt",
+        );
+
+        assert!(
+            result.is_err(),
+            "expected Err for ODT entry exceeding 10 MiB measured cap, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("zip bomb") || msg.contains("decompression limit"),
+            "expected zip bomb error message, got: {msg}"
+        );
+    }
+
+    /// Verify the cumulative measured cap fires when multiple entries each stay
+    /// under the per-entry cap but together exceed MAX_ODT_PPTX_TOTAL_BYTES (50 MiB).
+    #[test]
+    fn odt_cumulative_decompression_bomb_rejected() {
+        // 6 entries × 9 MiB each = 54 MiB total > 50 MiB limit.
+        // Each 9 MiB entry is under the 10 MiB per-entry cap, but cumulative > 50 MiB.
+        const ENTRIES: usize = 6;
+        const ENTRY_SIZE: usize = 9 * 1024 * 1024;
+
+        use std::io::Write;
+        let buf = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(buf);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        let xml_chunk: String = std::iter::repeat("<text:p>BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB</text:p>\n")
+            .flat_map(|s| s.chars())
+            .take(ENTRY_SIZE)
+            .collect();
+
+        for i in 0..ENTRIES {
+            // All entries contain "content" in the name to pass the target_prefix filter.
+            writer
+                .start_file(format!("content{i}.xml"), options)
+                .expect("start_file");
+            writer
+                .write_all(xml_chunk.as_bytes())
+                .expect("write_all");
+        }
+        let zip_bytes = writer.finish().expect("finish").into_inner();
+
+        let result = parse_office_zip_file(
+            &zip_bytes,
+            "file:///test.odt".to_string(),
+            "Test Document".to_string(),
+            "odt",
+        );
+
+        assert!(
+            result.is_err(),
+            "expected Err for cumulative ODT entries exceeding 50 MiB measured cap, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("zip bomb") || msg.contains("decompression limit"),
+            "expected zip bomb error message, got: {msg}"
+        );
+    }
+
+    /// A legitimate small ODT must parse successfully.
+    #[test]
+    fn odt_small_legitimate_file_parses_ok() {
+        let xml_content = r#"<?xml version="1.0"?><office:document-content xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"><office:body><office:text><text:p>Hello world</text:p></office:text></office:body></office:document-content>"#;
+        let zip_bytes = make_zip_with_entry("content.xml", xml_content.as_bytes());
+
+        let result = parse_office_zip_file(
+            &zip_bytes,
+            "file:///test.odt".to_string(),
+            "Test".to_string(),
+            "odt",
+        );
+        assert!(result.is_ok(), "expected Ok for small ODT, got: {result:?}");
+    }
 }
