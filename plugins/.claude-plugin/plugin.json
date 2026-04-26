@@ -25,15 +25,6 @@
         "web-crawler",
         "web-extraction"
     ],
-    "skills": "./skills/",
-    "commands": "./commands/",
-    "agents": "./agents/",
-    "hooks": {},
     "mcpServers": "./.mcp.json",
-    "outputStyles": "./output-styles/",
-    "lspServers": {},
-    "monitors": "./monitors/monitors.json",
-    "userConfig": {},
-    "channels": [],
-    "dependencies": []
+    "monitors": "./monitors/monitors.json"
 }
