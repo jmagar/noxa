@@ -10,6 +10,14 @@ use crate::store::{DynVectorStore, HashExistsResult};
 use super::scan;
 use super::{IndexJob, PipelineJob};
 
+/// Number of paths batched into a single `spawn_blocking` call during startup scan.
+///
+/// With ~few µs per `startup_scan_key` call, a batch of 256 completes in the low-ms range,
+/// keeping cancellation latency bounded while amortizing per-task scheduler overhead across
+/// 256 paths instead of 1. At 10 000 files this produces ≈40 batches — comfortably spread
+/// across `scan_concurrency` blocking workers.
+const STARTUP_SCAN_BATCH: usize = 256;
+
 pub(super) fn spawn_startup_scan(
     tx: async_channel::Sender<PipelineJob>,
     store: DynVectorStore,
@@ -46,8 +54,17 @@ pub(super) fn spawn_startup_scan(
         let skipped = Arc::new(AtomicUsize::new(0));
         let backend_errors = Arc::new(AtomicUsize::new(0));
 
-        stream::iter(paths)
-            .for_each_concurrent(scan_concurrency, |path| {
+        // Batch paths into groups of STARTUP_SCAN_BATCH before dispatching to the blocking
+        // thread pool. This reduces per-task scheduler overhead from O(N) spawn_blocking calls
+        // (one per file) to O(N / STARTUP_SCAN_BATCH) calls, saving ~2–5µs per file on large
+        // startup scans while keeping cancellation latency bounded to one batch worth of work.
+        let batches: Vec<Vec<PathBuf>> = paths
+            .chunks(STARTUP_SCAN_BATCH)
+            .map(|c| c.to_vec())
+            .collect();
+
+        stream::iter(batches)
+            .for_each_concurrent(scan_concurrency, |batch| {
                 let tx = tx.clone();
                 let store = store.clone();
                 let shutdown = shutdown.clone();
@@ -60,60 +77,80 @@ pub(super) fn spawn_startup_scan(
                         return;
                     }
 
-                    let path2 = path.clone();
-                    let hash_and_url =
-                        tokio::task::spawn_blocking(move || scan::startup_scan_key(&path2))
-                            .await
-                            .ok()
-                            .flatten();
-
-                    let (hash, url) = match hash_and_url {
-                        Some(t) => t,
-                        None => {
-                            tracing::debug!(
-                                path = %path.display(),
-                                "startup scan: no url/hash, queuing"
-                            );
-                            let span =
-                                tracing::info_span!("index_job", path = %path.display());
-                            tokio::select! {
-                                _ = tx.send(PipelineJob::Index(IndexJob { path, span })) => {}
-                                _ = shutdown.cancelled() => {}
+                    // Compute startup_scan_key for every path in the batch inside a single
+                    // blocking task, returning (PathBuf, Option<(hash, url)>) per path.
+                    let keys: Vec<(PathBuf, Option<(String, String)>)> =
+                        match tokio::task::spawn_blocking(move || {
+                            batch
+                                .into_iter()
+                                .map(|p| {
+                                    let k = scan::startup_scan_key(&p);
+                                    (p, k)
+                                })
+                                .collect()
+                        })
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::error!(error = %e, "startup scan: batch spawn_blocking panicked");
+                                return;
                             }
-                            queued.fetch_add(1, Ordering::Relaxed);
+                        };
+
+                    for (path, hash_and_url) in keys {
+                        if shutdown.is_cancelled() {
                             return;
                         }
-                    };
 
-                    match store.url_with_file_hash_exists_checked(&url, &hash).await {
-                        HashExistsResult::Exists => {
-                            skipped.fetch_add(1, Ordering::Relaxed);
-                            tracing::debug!(
-                                path = %path.display(),
-                                url = %url,
-                                "startup scan: already indexed, skipping"
-                            );
-                        }
-                        HashExistsResult::NotIndexed => {
-                            let span =
-                                tracing::info_span!("index_job", path = %path.display());
-                            tokio::select! {
-                                _ = tx.send(PipelineJob::Index(IndexJob { path, span })) => {}
-                                _ = shutdown.cancelled() => {}
+                        let (hash, url) = match hash_and_url {
+                            Some(t) => t,
+                            None => {
+                                tracing::debug!(
+                                    path = %path.display(),
+                                    "startup scan: no url/hash, queuing"
+                                );
+                                let span =
+                                    tracing::info_span!("index_job", path = %path.display());
+                                tokio::select! {
+                                    _ = tx.send(PipelineJob::Index(IndexJob { path, span })) => {}
+                                    _ = shutdown.cancelled() => {}
+                                }
+                                queued.fetch_add(1, Ordering::Relaxed);
+                                continue;
                             }
-                            queued.fetch_add(1, Ordering::Relaxed);
-                        }
-                        HashExistsResult::BackendError(ref msg) => {
-                            // Do NOT re-queue on backend failure — a degraded Qdrant endpoint
-                            // must not trigger a full reindex storm.  The file will be
-                            // re-evaluated on next startup once the backend recovers.
-                            backend_errors.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!(
-                                path = %path.display(),
-                                url = %url,
-                                error = %msg,
-                                "startup scan: backend error during delta check — skipping requeue to avoid reindex storm"
-                            );
+                        };
+
+                        match store.url_with_file_hash_exists_checked(&url, &hash).await {
+                            HashExistsResult::Exists => {
+                                skipped.fetch_add(1, Ordering::Relaxed);
+                                tracing::debug!(
+                                    path = %path.display(),
+                                    url = %url,
+                                    "startup scan: already indexed, skipping"
+                                );
+                            }
+                            HashExistsResult::NotIndexed => {
+                                let span =
+                                    tracing::info_span!("index_job", path = %path.display());
+                                tokio::select! {
+                                    _ = tx.send(PipelineJob::Index(IndexJob { path, span })) => {}
+                                    _ = shutdown.cancelled() => {}
+                                }
+                                queued.fetch_add(1, Ordering::Relaxed);
+                            }
+                            HashExistsResult::BackendError(ref msg) => {
+                                // Do NOT re-queue on backend failure — a degraded Qdrant endpoint
+                                // must not trigger a full reindex storm.  The file will be
+                                // re-evaluated on next startup once the backend recovers.
+                                backend_errors.fetch_add(1, Ordering::Relaxed);
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    url = %url,
+                                    error = %msg,
+                                    "startup scan: backend error during delta check — skipping requeue to avoid reindex storm"
+                                );
+                            }
                         }
                     }
                 }
