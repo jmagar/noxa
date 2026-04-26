@@ -137,7 +137,7 @@ struct WorkerContext {
 }
 
 impl WorkerContext {
-    fn from_pipeline(pipeline: &Pipeline) -> Self {
+    fn from_pipeline(pipeline: &Pipeline, watch_roots: Arc<Vec<PathBuf>>) -> Self {
         Self {
             embed: pipeline.embed.clone(),
             store: pipeline.store.clone(),
@@ -145,11 +145,7 @@ impl WorkerContext {
             config: pipeline.config.clone(),
             url_locks: pipeline.url_locks.clone(),
             git_branch_cache: pipeline.git_branch_cache.clone(),
-            watch_roots: pipeline
-                .watch_roots
-                .get()
-                .expect("watch_roots set before spawn_workers")
-                .clone(),
+            watch_roots,
             counters: pipeline.counters.clone(),
             failed_jobs_log_lock: pipeline.failed_jobs_log_lock.clone(),
             shutdown: pipeline.shutdown.clone(),
@@ -174,9 +170,6 @@ pub struct Pipeline {
     /// Serialises failed-jobs log rotation: check-size → rotate → append must be atomic
     /// across concurrent workers to avoid double-rename races.
     failed_jobs_log_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Canonicalized watch roots, set once during `run()` before workers are spawned.
-    /// Workers access this directly instead of receiving it as a spawn parameter.
-    watch_roots: std::sync::OnceLock<Arc<Vec<PathBuf>>>,
 }
 
 impl Pipeline {
@@ -197,7 +190,6 @@ impl Pipeline {
             git_branch_cache: Arc::new(DashMap::new()),
             counters: Arc::new(SessionCounters::default()),
             failed_jobs_log_lock: Arc::new(tokio::sync::Mutex::new(())),
-            watch_roots: std::sync::OnceLock::new(),
         }
     }
 

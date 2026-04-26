@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
@@ -7,8 +10,9 @@ use super::{Pipeline, PipelineJob, WorkerContext};
 pub(super) fn spawn_workers(
     pipeline: &Pipeline,
     rx: async_channel::Receiver<PipelineJob>,
+    watch_roots: Arc<Vec<PathBuf>>,
 ) -> Vec<JoinHandle<()>> {
-    let ctx = WorkerContext::from_pipeline(pipeline);
+    let ctx = WorkerContext::from_pipeline(pipeline, watch_roots);
     let mut handles = Vec::with_capacity(pipeline.config.pipeline.embed_concurrency);
 
     for worker_id in 0..pipeline.config.pipeline.embed_concurrency {
