@@ -123,6 +123,7 @@ pub fn parse_reddit_json(json_bytes: &[u8], url: &str) -> Result<ExtractionResul
             raw_html: None,
         },
         domain_data: None,
+        vertical_data: None,
         structured_data: vec![],
     })
 }

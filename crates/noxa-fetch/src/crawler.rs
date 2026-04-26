@@ -859,6 +859,7 @@ mod tests {
                     raw_html: Some("<h1>Hello</h1>".to_string()),
                 },
                 domain_data: None,
+                vertical_data: None,
                 structured_data: vec![],
             }),
             error: None,

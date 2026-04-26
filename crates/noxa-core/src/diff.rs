@@ -240,6 +240,7 @@ mod tests {
             domain_data: Some(DomainData {
                 domain_type: DomainType::Generic,
             }),
+            vertical_data: None,
             structured_data: vec![],
         }
     }

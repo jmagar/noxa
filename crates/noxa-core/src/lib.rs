@@ -36,6 +36,7 @@ pub use error::ExtractError;
 pub use llm::to_llm_text;
 pub use types::{
     CodeBlock, Content, DomainData, ExtractionOptions, ExtractionResult, Image, Link, Metadata,
+    VerticalData,
 };
 
 use scraper::Html;
@@ -186,6 +187,7 @@ fn extract_with_options_inner(
                 raw_html: None,
             },
             domain_data,
+            vertical_data: None,
             structured_data,
         });
     }
@@ -284,6 +286,7 @@ fn extract_with_options_inner(
         metadata: meta,
         content,
         domain_data,
+        vertical_data: None,
         structured_data,
     })
 }
@@ -378,6 +381,19 @@ mod tests {
         assert!(json.contains("content"));
         // raw_html should be absent (skip_serializing_if)
         assert!(!json.contains("raw_html"));
+    }
+
+    #[test]
+    fn extraction_result_serializes_vertical_data_when_present() {
+        let mut result = extract("<html><body><p>Test</p></body></html>", None).unwrap();
+        result.vertical_data = Some(VerticalData {
+            extractor: "github_repo".to_string(),
+            data: serde_json::json!({ "repo": "noxa" }),
+        });
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["vertical_data"]["extractor"], "github_repo");
+        assert_eq!(json["vertical_data"]["data"]["repo"], "noxa");
     }
 
     #[test]

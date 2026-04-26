@@ -474,6 +474,7 @@ impl NoxaMcp {
                         fetched_at: None,
                     },
                     domain_data: None,
+                    vertical_data: None,
                     structured_data: Vec::new(),
                 };
 

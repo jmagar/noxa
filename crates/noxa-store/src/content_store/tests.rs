@@ -37,6 +37,7 @@ fn make_extraction_with_url(markdown: &str, url: &str, title: &str) -> noxa_core
             raw_html: None,
         },
         domain_data: None,
+        vertical_data: None,
         structured_data: vec![],
     }
 }
@@ -74,6 +75,7 @@ fn make_extraction(markdown: &str) -> noxa_core::ExtractionResult {
             raw_html: None,
         },
         domain_data: None,
+        vertical_data: None,
         structured_data: vec![],
     }
 }

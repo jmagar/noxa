@@ -198,6 +198,7 @@ fn sample_extraction_with_metadata() -> noxa_core::ExtractionResult {
             raw_html: None,
         },
         domain_data: None,
+        vertical_data: None,
         structured_data: Vec::new(),
     }
 }
