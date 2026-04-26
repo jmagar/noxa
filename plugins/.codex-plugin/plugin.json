@@ -1,6 +1,6 @@
 {
     "name": "noxa",
-    "version": "0.7.0",
+    "version": "0.7.1",
     "description": "Noxa plugin for web scraping, extraction, crawling, search, and research workflows.",
     "author": {
         "name": "Jacob Magar",
