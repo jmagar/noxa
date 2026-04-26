@@ -127,7 +127,7 @@ struct WorkerContext {
     embed: DynEmbedProvider,
     store: DynVectorStore,
     tokenizer: Arc<Tokenizer>,
-    config: RagConfig,
+    config: Arc<RagConfig>,
     url_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     git_branch_cache: Arc<DashMap<PathBuf, Option<String>>>,
     watch_roots: Arc<Vec<PathBuf>>,
@@ -158,7 +158,7 @@ impl WorkerContext {
 }
 
 pub struct Pipeline {
-    config: RagConfig,
+    config: Arc<RagConfig>,
     embed: DynEmbedProvider,
     store: DynVectorStore,
     tokenizer: Arc<Tokenizer>,
@@ -188,7 +188,7 @@ impl Pipeline {
         shutdown: CancellationToken,
     ) -> Self {
         Self {
-            config,
+            config: Arc::new(config),
             embed,
             store,
             tokenizer,
