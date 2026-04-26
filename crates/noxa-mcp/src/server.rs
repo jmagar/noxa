@@ -1118,6 +1118,13 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_ollama_config_builds_non_empty_chain() {
+        let ollama = TestHttpServer::spawn(|request| {
+            if request.path == "/api/tags" {
+                return TestResponse::json(r#"{"models":[]}"#);
+            }
+            TestResponse::text(404, "missing", "text/plain")
+        })
+        .await;
         let home = tempdir().unwrap();
         let store_root = home.path().join("content");
         std::fs::create_dir_all(&store_root).unwrap();
@@ -1133,7 +1140,7 @@ mod tests {
             cloud_api_key: None,
             llm_provider: Some("ollama".into()),
             llm_model: Some("qwen3.5:9b".into()),
-            llm_base_url: Some("http://127.0.0.1:11434".into()),
+            llm_base_url: Some(ollama.url("")),
         };
 
         let chain = build_llm_chain(&config).await.unwrap();

@@ -260,11 +260,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
         }
     };
     let embed_ms = t2.elapsed().as_millis() as u64;
-    let embed_tokens_per_sec = if embed_ms > 0 {
-        total_tokens * 1_000 / embed_ms
-    } else {
-        0
-    };
+    let embed_tokens_per_sec = (total_tokens * 1_000).checked_div(embed_ms).unwrap_or(0);
 
     if vectors.len() != chunks.len() {
         return Err(RagError::Embed {
@@ -280,7 +276,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
     let n_chunks = chunks.len();
     let points: Vec<Point> = chunks
         .iter()
-        .zip(vectors.into_iter())
+        .zip(vectors)
         .enumerate()
         .map(|(i, (chunk, vector))| {
             let id = uuid::Uuid::new_v5(
