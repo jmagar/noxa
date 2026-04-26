@@ -87,7 +87,9 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
         "txt" => Ok(parse_plain_text_file(bytes, file_url, title)),
         "yaml" | "yml" | "toml" => Ok(parse_plain_text_file(bytes, file_url, title)),
         "log" => Ok(parse_log_file(bytes, file_url, title)),
-        "html" | "htm" => parse_html_file(bytes, file_url).await,
+        "html" | "htm" => {
+            spawn_blocking_parse("HTML", move || parse_html_file(bytes, file_url)).await
+        }
         "ipynb" => {
             spawn_blocking_parse("ipynb", move || parse_ipynb_file(&bytes, file_url, title)).await
         }

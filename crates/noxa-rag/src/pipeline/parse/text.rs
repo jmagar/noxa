@@ -110,24 +110,15 @@ pub(crate) fn parse_log_file(bytes: Vec<u8>, file_url: String, title: String) ->
     }
 }
 
-pub(crate) async fn parse_html_file(
+pub(crate) fn parse_html_file(
     bytes: Vec<u8>,
     file_url: String,
 ) -> Result<ParsedFile, RagError> {
     let html = String::from_utf8_lossy(&bytes).into_owned();
-    let url_for_extract = file_url.clone();
-    let extraction = tokio::task::spawn_blocking(
-        move || -> Result<noxa_core::types::ExtractionResult, RagError> {
-            let mut r = noxa_core::extract(&html, Some(&url_for_extract))
-                .map_err(|e| RagError::Parse(format!("HTML extract: {e}")))?;
-            r.metadata.url = Some(url_for_extract);
-            r.metadata.source_type = Some("file".to_string());
-            Ok(r)
-        },
-    )
-    .await
-    .map_err(|e| RagError::Parse(format!("HTML spawn_blocking: {e}")))??;
-
+    let mut extraction = noxa_core::extract(&html, Some(&file_url))
+        .map_err(|e| RagError::Parse(format!("HTML extract: {e}")))?;
+    extraction.metadata.url = Some(file_url);
+    extraction.metadata.source_type = Some("file".to_string());
     Ok(ParsedFile {
         extraction,
         provenance: IngestionProvenance::default(),
