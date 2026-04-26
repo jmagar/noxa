@@ -168,6 +168,24 @@ noxa https://example.com -f llm         # Token-optimized for LLMs (67% fewer to
 noxa example.com
 ```
 
+### Vertical Extractors
+
+Use site-specific extractors when you want structured payloads for known verticals such as GitHub, package registries, arXiv, YouTube, Reddit, Hugging Face, social posts, Substack, and ecommerce pages.
+
+```bash
+# List all 28 built-in extractors
+noxa --list-extractors
+noxa --list-extractors -f json
+
+# Force a specific extractor for one URL
+noxa --extractor github_repo https://github.com/jmagar/noxa -f json
+
+# Works with batch mode too
+noxa --extractor npm --urls-file npm-packages.txt -f json
+```
+
+Safe extractors auto-dispatch for matching URLs. Broad page extractors such as `substack_post`, `shopify_product`, `shopify_collection`, `ecommerce_product`, and `woocommerce_product` are explicit-only to avoid changing generic page extraction unexpectedly.
+
 ### Content Filtering
 
 ```bash
@@ -538,13 +556,13 @@ noxa ships as a Claude Code plugin that adds a skill (auto-activates on scrape/c
 
 The plugin provides:
 - **`noxa` skill** — auto-activates when you ask to scrape, crawl, extract, search, watch, or summarize URLs; covers all flag combinations and common recipes
-- **MCP server** — all 10 tools available directly to Claude (`scrape`, `crawl`, `map`, `batch`, `extract`, `summarize`, `diff`, `brand`, `search`, `research`)
+- **MCP server** — all 11 tools available directly to Claude (`scrape`, `extractors`, `crawl`, `map`, `batch`, `extract`, `summarize`, `diff`, `brand`, `search`, `research`)
 
 Requires `noxa` on PATH. Run `noxa setup` after installing to configure everything.
 
 ---
 
-## MCP Server — 10 tools for AI agents
+## MCP Server — 11 tools for AI agents
 
 <a href="https://glama.ai/mcp/servers/jmagar/noxa"><img src="https://glama.ai/mcp/servers/jmagar/noxa/badge" alt="noxa MCP server" /></a>
 
@@ -573,7 +591,8 @@ Then in Claude: *"Scrape the top 5 results for 'web scraping tools' and compare 
 
 | Tool | Description | Requires API key? |
 |------|-------------|:-:|
-| `scrape` | Extract content from any URL | No |
+| `scrape` | Extract content from any URL; accepts optional `extractor` for vertical extraction | No |
+| `extractors` | List available vertical extractors | No |
 | `crawl` | Recursive site crawl | No |
 | `map` | Discover URLs from sitemaps | No |
 | `batch` | Parallel multi-URL extraction | No |
@@ -584,7 +603,7 @@ Then in Claude: *"Scrape the top 5 results for 'web scraping tools' and compare 
 | `search` | Web search + scrape results | `SEARXNG_URL`: No, cloud: Yes |
 | `research` | Deep multi-source research | Yes |
 
-9 of 10 tools work locally — no account, no API key, fully private.
+10 of 11 tools work locally — no account, no API key, fully private.
 
 ---
 
@@ -605,6 +624,13 @@ Then in Claude: *"Scrape the top 5 results for 'web scraping tools' and compare 
 noxa URL --include "article, .content"       # CSS selector include
 noxa URL --exclude "nav, footer, .sidebar"    # CSS selector exclude
 noxa URL --only-main-content                  # Auto-detect main content
+```
+
+### Vertical extractors
+
+```bash
+noxa --list-extractors                        # Show all 28 extractors
+noxa URL --extractor github_repo -f json       # Force a named extractor
 ```
 
 ### Crawling
@@ -719,7 +745,7 @@ noxa/
     noxa-fetch    HTTP client + TLS fingerprinting (wreq/BoringSSL). Crawler. Batch ops.
     noxa-llm      LLM provider chain (Gemini CLI -> OpenAI -> Ollama -> Anthropic)
     noxa-pdf      PDF text extraction
-    noxa-mcp      MCP server (10 tools for AI agents)  → run via: noxa mcp
+    noxa-mcp      MCP server (11 tools for AI agents)  → run via: noxa mcp
     noxa-rag      RAG pipeline (TEI embeddings + Qdrant vector store)  → binary: noxa-rag-daemon
     noxa-cli      CLI binary  → binary: noxa
 ```

@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 - **`--refresh <domain>`**: re-fetch every cached document for one stored domain through the existing content-store write path. Refresh stays domain-scoped, validates sidecar URLs with the async URL validator, and does not imply a whole-store sweep.
+- **Full vertical extractor catalog**: 28 site-specific extractors now ship in `noxa-fetch`, with `vertical_data` in `ExtractionResult`, safe URL auto-dispatch, and explicit-only broad page extractors for Substack, Shopify, generic ecommerce, and WooCommerce.
+- **CLI vertical extractor controls**: `--list-extractors` prints the catalog and `--extractor <name>` forces a vertical extractor for single URL or batch scraping.
+- **MCP vertical extractor controls**: the `scrape` tool accepts an optional `extractor` parameter, and the new `extractors` tool returns the full extractor catalog.
 
 ### Changed
 - **`--status` now uses a typed crawl-status model**: background crawl status supports `running`, `done`, `stale`, and `never-started`, normalizes scheme-bearing inputs consistently, and uses cross-platform liveness checks (`/proc` on Linux, `kill(pid, 0)` elsewhere).
