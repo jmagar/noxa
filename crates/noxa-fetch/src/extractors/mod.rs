@@ -83,13 +83,6 @@ pub async fn dispatch_by_url(
     client: &dyn ExtractorHttp,
     url: &str,
 ) -> Option<Result<(&'static str, Value), FetchError>> {
-    if reddit::matches(url) {
-        return Some(
-            reddit::extract(client, url)
-                .await
-                .map(|v| (reddit::INFO.name, v)),
-        );
-    }
     if hackernews::matches(url) {
         return Some(
             hackernews::extract(client, url)
@@ -448,6 +441,13 @@ fn host_matches(url: &str, suffix: &str) -> bool {
         .is_some_and(|host| host == suffix || host.ends_with(&format!(".{suffix}")))
 }
 
+fn host_has_label(url: &str, label: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .is_some_and(|host| host.split('.').any(|part| part == label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,10 +678,16 @@ mod tests {
             assert!(substack_post::matches(
                 "https://example.substack.com/p/porting-noxa"
             ));
+            assert!(!substack_post::matches(
+                "https://example.com/p/porting-noxa"
+            ));
             assert!(youtube_video::matches(
                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
             ));
             assert!(youtube_video::matches("https://youtu.be/dQw4w9WgXcQ"));
+            assert!(youtube_video::matches(
+                "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"
+            ));
         }
 
         #[tokio::test]
@@ -938,13 +944,38 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(value["metadata"]["title"], "Rust release thread");
+            assert_eq!(value["post"]["title"], "Rust release thread");
             assert!(
-                value["content"]["plain_text"]
+                value["comments"][0]["body"]
                     .as_str()
                     .unwrap()
                     .contains("Thanks for the update!")
             );
+        }
+
+        #[tokio::test]
+        async fn reddit_vertical_returns_reddit_specific_payload() {
+            let client = FixtureHttp {
+                bodies: [(
+                    "https://www.reddit.com/r/rust/comments/abc123/release_thread.json",
+                    include_str!("../../tests/fixtures/extractors/reddit.json"),
+                )]
+                .into_iter()
+                .collect(),
+            };
+
+            let value = reddit::extract(
+                &client,
+                "https://www.reddit.com/r/rust/comments/abc123/release_thread/",
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(value["post"]["title"], "Rust release thread");
+            assert_eq!(value["post"]["author"], "ferris");
+            assert_eq!(value["comments"][0]["author"], "reader1");
+            assert!(value.get("metadata").is_none());
+            assert!(value.get("content").is_none());
         }
 
         #[tokio::test]
@@ -1007,7 +1038,11 @@ mod tests {
         #[tokio::test]
         async fn ecommerce_matchers_cover_auto_and_explicit_only_groups() {
             assert!(amazon_product::matches("https://www.amazon.com/dp/B000123"));
+            assert!(amazon_product::matches(
+                "https://www.amazon.co.uk/dp/B000123"
+            ));
             assert!(ebay_listing::matches("https://www.ebay.com/itm/123456"));
+            assert!(ebay_listing::matches("https://www.ebay.co.uk/itm/123456"));
             assert!(etsy_listing::matches(
                 "https://www.etsy.com/listing/123456/test"
             ));

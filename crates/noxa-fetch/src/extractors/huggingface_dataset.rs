@@ -34,7 +34,7 @@ pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, Fet
         "private": dataset.get("private").cloned(),
         "gated": dataset.get("gated").cloned(),
         "downloads": dataset.get("downloads").cloned(),
-        "downloads_30d": dataset.get("downloadsAllTime").cloned(),
+        "downloads_all_time": dataset.get("downloadsAllTime").cloned(),
         "likes": dataset.get("likes").cloned(),
         "tags": dataset.get("tags").cloned().unwrap_or_else(|| json!([])),
         "license": dataset.pointer("/cardData/license").cloned(),

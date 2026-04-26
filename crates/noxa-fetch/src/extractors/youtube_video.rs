@@ -62,7 +62,7 @@ fn parse_video_id(url: &str) -> Option<String> {
     if host == "youtu.be" {
         return parsed.path_segments()?.next().map(ToString::to_string);
     }
-    if host.ends_with("youtube.com") {
+    if host.ends_with("youtube.com") || host.ends_with("youtube-nocookie.com") {
         if parsed.path() == "/watch" {
             return parsed
                 .query_pairs()

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{ExtractorInfo, host_matches, http::ExtractorHttp, product};
+use super::{ExtractorInfo, host_has_label, http::ExtractorHttp, product};
 use crate::error::FetchError;
 
 pub const INFO: ExtractorInfo = ExtractorInfo {
@@ -11,7 +11,7 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
 };
 
 pub fn matches(url: &str) -> bool {
-    host_matches(url, "ebay.com") && url.contains("/itm/")
+    host_has_label(url, "ebay") && url.contains("/itm/")
 }
 
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {

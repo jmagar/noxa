@@ -17,8 +17,5 @@ pub fn matches(url: &str) -> bool {
 pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, FetchError> {
     let json_url = crate::reddit::json_url(url);
     let body = client.get_text(&json_url).await?;
-    let extraction =
-        crate::reddit::parse_reddit_json(body.as_bytes(), url).map_err(FetchError::BodyDecode)?;
-
-    serde_json::to_value(extraction).map_err(|error| FetchError::BodyDecode(error.to_string()))
+    crate::reddit::parse_reddit_vertical_json(body.as_bytes(), url).map_err(FetchError::BodyDecode)
 }

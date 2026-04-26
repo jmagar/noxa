@@ -33,7 +33,7 @@ pub async fn extract(client: &dyn ExtractorHttp, url: &str) -> Result<Value, Fet
         "private": model.get("private").cloned(),
         "gated": model.get("gated").cloned(),
         "downloads": model.get("downloads").cloned(),
-        "downloads_30d": model.get("downloadsAllTime").cloned(),
+        "downloads_all_time": model.get("downloadsAllTime").cloned(),
         "likes": model.get("likes").cloned(),
         "library_name": model.get("library_name").cloned(),
         "pipeline_tag": model.get("pipeline_tag").cloned(),

@@ -139,11 +139,6 @@ impl FetchClient {
         url: &str,
         options: &noxa_core::ExtractionOptions,
     ) -> Result<noxa_core::ExtractionResult, FetchError> {
-        if let Some(result) = crate::extractors::dispatch_by_url(self, url).await {
-            let (extractor, data) = result?;
-            return Ok(build_vertical_extraction_result(extractor, url, data));
-        }
-
         if crate::reddit::is_reddit_url(url) {
             let json_url = crate::reddit::json_url(url);
             debug!("reddit detected, fetching {json_url}");
@@ -164,12 +159,25 @@ impl FetchClient {
                     ));
                 }
                 match crate::reddit::parse_reddit_json(bytes, url) {
-                    Ok(result) => return Ok(result),
+                    Ok(mut result) => {
+                        let data = crate::reddit::parse_reddit_vertical_json(bytes, url)
+                            .map_err(FetchError::BodyDecode)?;
+                        result.vertical_data = Some(noxa_core::VerticalData {
+                            extractor: crate::extractors::reddit::INFO.name.to_string(),
+                            data,
+                        });
+                        return Ok(result);
+                    }
                     Err(error) => {
                         warn!("reddit json fallback failed: {error}, falling back to HTML")
                     }
                 }
             }
+        }
+
+        if let Some(result) = crate::extractors::dispatch_by_url(self, url).await {
+            let (extractor, data) = result?;
+            return Ok(build_vertical_extraction_result(extractor, url, data));
         }
 
         let start = Instant::now();

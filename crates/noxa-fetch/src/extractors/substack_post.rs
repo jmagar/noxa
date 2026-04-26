@@ -8,7 +8,7 @@ pub const INFO: ExtractorInfo = ExtractorInfo {
     name: "substack_post",
     label: "Substack Post",
     description: "Extract post metadata from Substack publications.",
-    url_patterns: &["https://*.substack.com/p/*", "*/p/*"],
+    url_patterns: &["https://*.substack.com/p/*"],
 };
 
 pub fn matches(url: &str) -> bool {
@@ -19,7 +19,7 @@ pub fn matches(url: &str) -> bool {
             let has_post_path = parsed.path_segments().is_some_and(|mut segments| {
                 segments.next() == Some("p") && segments.next().is_some()
             });
-            Some(has_post_path && (host.ends_with(".substack.com") || host != "substack.com"))
+            Some(has_post_path && host.ends_with(".substack.com"))
         })
         .unwrap_or(false)
 }
