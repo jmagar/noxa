@@ -24,6 +24,7 @@ pub(super) fn spawn_startup_scan(
     shutdown: tokio_util::sync::CancellationToken,
     watch_dirs: Vec<PathBuf>,
     scan_concurrency: usize,
+    max_json_bytes: u64,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let paths = match tokio::task::spawn_blocking({
@@ -75,7 +76,7 @@ pub(super) fn spawn_startup_scan(
                             batch
                                 .into_iter()
                                 .map(|p| {
-                                    let k = scan::startup_scan_key(&p);
+                                    let k = scan::startup_scan_key(&p, max_json_bytes);
                                     (p, k)
                                 })
                                 .collect()
@@ -268,7 +269,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (tx, rx) = async_channel::bounded::<PipelineJob>(256);
 
-        let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), vec![watch_dir], 16);
+        let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), vec![watch_dir], 16, 50 * 1024 * 1024);
 
         handle.await.expect("startup scan panicked");
         drop(tx);

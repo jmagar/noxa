@@ -36,6 +36,9 @@ pub async fn write_bridge_document(
 
     let tmp_path = temp_output_path(&path);
     tokio::fs::write(&tmp_path, &serialized).await?;
+    // Remove destination before rename so the operation succeeds on Windows,
+    // where rename(src, dst) errors when dst already exists.
+    let _ = tokio::fs::remove_file(&path).await;
     tokio::fs::rename(&tmp_path, &path).await?;
     Ok(WriteStatus::Written)
 }

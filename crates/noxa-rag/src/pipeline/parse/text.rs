@@ -160,10 +160,12 @@ pub(crate) fn parse_jsonl_file(bytes: Vec<u8>, file_url: String, title: String) 
 /// attacks. Later versions of quick-xml may add limits, but we keep the scan
 /// regardless (defense-in-depth).
 pub(super) fn contains_xml_entity_expansion_risk(bytes: &[u8]) -> bool {
-    let scan_limit = bytes.len().min(8192);
-    let header = &bytes[..scan_limit];
-    let s = std::str::from_utf8(header).unwrap_or("");
-    s.contains("<!DOCTYPE") || s.contains("<!ENTITY")
+    let header = &bytes[..bytes.len().min(8192)];
+    // Scan raw bytes so non-UTF-8 sequences cannot silently suppress the guard.
+    // `from_utf8().unwrap_or("")` would return "" on any non-UTF-8 byte in the
+    // window, letting a <!DOCTYPE immediately following binary noise slip through.
+    header.windows(9).any(|w| w == b"<!DOCTYPE")
+        || header.windows(8).any(|w| w == b"<!ENTITY")
 }
 
 pub(crate) fn parse_xml_file(

@@ -102,6 +102,7 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         pipeline.shutdown.clone(),
         watch_dirs,
         pipeline.config.pipeline.startup_scan_concurrency,
+        pipeline.config.pipeline.max_file_size_bytes,
     );
 
     let heartbeat_handle = spawn_heartbeat(
