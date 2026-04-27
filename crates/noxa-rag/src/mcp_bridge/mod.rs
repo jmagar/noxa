@@ -6,18 +6,18 @@ use url::Url;
 
 use crate::RagError;
 
+mod bytestash;
 pub mod executor;
 mod io;
 mod linkding;
 mod memos;
-mod bytestash;
 mod paperless;
 
+pub use bytestash::normalize_bytestash_record;
 pub use executor::ProcessMcporterExecutor;
 pub use io::{relative_output_path, write_bridge_document};
 pub use linkding::normalize_linkding_record;
 pub use memos::normalize_memo_record;
-pub use bytestash::normalize_bytestash_record;
 pub use paperless::normalize_paperless_record;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +145,10 @@ pub(super) fn array_field<'a>(value: &'a Value, key: &str) -> Result<Vec<&'a Val
         .ok_or_else(|| RagError::Parse(format!("expected array field {key}")))
 }
 
-pub(super) fn required_base_url(config: &BridgeConfig, source: McpSource) -> Result<&str, RagError> {
+pub(super) fn required_base_url(
+    config: &BridgeConfig,
+    source: McpSource,
+) -> Result<&str, RagError> {
     config.platform_base_url.as_deref().ok_or_else(|| {
         RagError::Config(format!("{} requires --platform-base-url", source.as_str()))
     })

@@ -129,7 +129,6 @@ pub fn chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr as _;
 
     fn make_extraction_result(markdown: &str) -> ExtractionResult {
         crate::pipeline::parse::make_text_result(

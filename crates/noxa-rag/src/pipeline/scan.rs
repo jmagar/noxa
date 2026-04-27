@@ -579,7 +579,10 @@ mod tests {
 
         // Extend the file to exactly LIMIT bytes with null padding (sparse).
         {
-            let f = std::fs::OpenOptions::new().write(true).open(&file).expect("open");
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .expect("open");
             f.set_len(LIMIT).expect("set_len");
         }
 

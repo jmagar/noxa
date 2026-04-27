@@ -211,7 +211,6 @@ pub struct SearchMetadataFilter {
     pub hnsw_ef: Option<usize>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::SearchResult;

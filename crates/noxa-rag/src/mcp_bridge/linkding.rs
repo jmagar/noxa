@@ -6,10 +6,10 @@ use url::Url;
 use crate::RagError;
 
 use super::{
-    BridgeDocument, McpBridge, McpSource, McporterExecutor, SyncReport, WriteStatus,
-    array_field, as_u64_value, join_non_empty, optional_string, required_string, required_value,
-    string_array,
+    BridgeDocument, McpBridge, McpSource, McporterExecutor, SyncReport, WriteStatus, array_field,
+    as_u64_value,
     io::{build_extraction, write_bridge_document},
+    join_non_empty, optional_string, required_string, required_value, string_array,
 };
 
 impl<E> McpBridge<E>
@@ -52,7 +52,7 @@ where
                 }
             }
 
-            if data.get("next").is_none() || data.get("next").is_some_and(Value::is_null) {
+            if data.get("next").map_or(true, Value::is_null) {
                 break;
             }
             if new_records == 0 {

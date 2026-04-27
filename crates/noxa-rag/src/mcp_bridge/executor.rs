@@ -33,23 +33,39 @@ impl McporterExecutor for ProcessMcporterExecutor {
             "action": action,
             "params": params,
         });
-        let output = Command::new(&self.executable)
-            .arg("call")
-            .arg(&selector)
-            .arg("--args")
-            .arg(args.to_string())
-            .arg("--output")
-            .arg("json")
-            .output()
-            .await
-            .map_err(|e| RagError::Generic(format!("failed to execute mcporter: {e}")))?;
+        const MCPORTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let output = tokio::time::timeout(
+            MCPORTER_TIMEOUT,
+            Command::new(&self.executable)
+                .arg("call")
+                .arg(&selector)
+                .arg("--args")
+                .arg(args.to_string())
+                .arg("--output")
+                .arg("json")
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            RagError::Generic(format!(
+                "mcporter call {} {} timed out after {}s",
+                selector,
+                action,
+                MCPORTER_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| RagError::Generic(format!("failed to execute mcporter: {e}")))?;
 
         if !output.status.success() {
+            // Truncate stderr to avoid leaking arbitrarily large subprocess output.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let preview: String = stderr.chars().take(512).collect();
             return Err(RagError::Generic(format!(
                 "mcporter call {} {} failed: {}",
                 selector,
                 action,
-                String::from_utf8_lossy(&output.stderr).trim()
+                preview.trim()
             )));
         }
 

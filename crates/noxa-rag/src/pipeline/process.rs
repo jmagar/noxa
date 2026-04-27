@@ -219,9 +219,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
         result.metadata.last_modified =
             Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
-    let git_branch = if let Some(cached) =
-        find_cached_branch(&canonical, &ctx.git_branch_cache)
-    {
+    let git_branch = if let Some(cached) = find_cached_branch(&canonical, &ctx.git_branch_cache) {
         // Cache hit — no spawn_blocking needed. `canonical` ancestors were walked
         // synchronously in async context (pure in-memory DashMap lookups, no I/O).
         cached
@@ -242,15 +240,14 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
                     .clone()
             } else {
                 // Cache the miss so we don't re-stat .git for every file outside a repo.
-                let key = std::fs::canonicalize(
-                    canonical_clone.parent().unwrap_or(&canonical_clone),
-                )
-                .unwrap_or_else(|_| {
-                    canonical_clone
-                        .parent()
-                        .unwrap_or(&canonical_clone)
-                        .to_path_buf()
-                });
+                let key =
+                    std::fs::canonicalize(canonical_clone.parent().unwrap_or(&canonical_clone))
+                        .unwrap_or_else(|_| {
+                            canonical_clone
+                                .parent()
+                                .unwrap_or(&canonical_clone)
+                                .to_path_buf()
+                        });
                 cache.entry(key).or_insert(None).clone()
             }
         })
@@ -320,11 +317,8 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
     let n_chunks = chunks.len();
     // Build per-file metadata once; chunk loop clones from it instead of from
     // result + provenance on every iteration (bead noxa-346).
-    let file_meta = parse::FileMetadata::from_result_and_provenance(
-        &result,
-        git_branch,
-        &parsed.provenance,
-    );
+    let file_meta =
+        parse::FileMetadata::from_result_and_provenance(&result, git_branch, &parsed.provenance);
     let points: Vec<Point> = chunks
         .into_iter()
         .zip(vectors.into_iter())
@@ -337,12 +331,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             Point {
                 id,
                 vector,
-                payload: parse::build_point_payload(
-                    chunk,
-                    &file_meta,
-                    &url,
-                    Some(&file_hash),
-                ),
+                payload: parse::build_point_payload(chunk, &file_meta, &url, Some(&file_hash)),
             }
         })
         .collect();

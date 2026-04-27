@@ -269,7 +269,14 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (tx, rx) = async_channel::bounded::<PipelineJob>(256);
 
-        let handle = spawn_startup_scan(tx.clone(), store, shutdown.clone(), vec![watch_dir], 16, 50 * 1024 * 1024);
+        let handle = spawn_startup_scan(
+            tx.clone(),
+            store,
+            shutdown.clone(),
+            vec![watch_dir],
+            16,
+            50 * 1024 * 1024,
+        );
 
         handle.await.expect("startup scan panicked");
         drop(tx);

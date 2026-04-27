@@ -110,10 +110,7 @@ pub(crate) fn parse_log_file(bytes: Vec<u8>, file_url: String, title: String) ->
     }
 }
 
-pub(crate) fn parse_html_file(
-    bytes: Vec<u8>,
-    file_url: String,
-) -> Result<ParsedFile, RagError> {
+pub(crate) fn parse_html_file(bytes: Vec<u8>, file_url: String) -> Result<ParsedFile, RagError> {
     let html = String::from_utf8_lossy(&bytes).into_owned();
     let mut extraction = noxa_core::extract(&html, Some(&file_url))
         .map_err(|e| RagError::Parse(format!("HTML extract: {e}")))?;
@@ -164,8 +161,7 @@ pub(super) fn contains_xml_entity_expansion_risk(bytes: &[u8]) -> bool {
     // Scan raw bytes so non-UTF-8 sequences cannot silently suppress the guard.
     // `from_utf8().unwrap_or("")` would return "" on any non-UTF-8 byte in the
     // window, letting a <!DOCTYPE immediately following binary noise slip through.
-    header.windows(9).any(|w| w == b"<!DOCTYPE")
-        || header.windows(8).any(|w| w == b"<!ENTITY")
+    header.windows(9).any(|w| w == b"<!DOCTYPE") || header.windows(8).any(|w| w == b"<!ENTITY")
 }
 
 pub(crate) fn parse_xml_file(

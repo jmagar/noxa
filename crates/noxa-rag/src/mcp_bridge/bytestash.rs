@@ -3,10 +3,10 @@ use serde_json::Value;
 use crate::RagError;
 
 use super::{
-    BridgeDocument, McpBridge, McpSource, McporterExecutor, SyncReport, WriteStatus,
-    array_field, join_base_url, join_non_empty, optional_string, required_base_url,
-    required_string, string_array,
+    BridgeDocument, McpBridge, McpSource, McporterExecutor, SyncReport, WriteStatus, array_field,
     io::{build_extraction, write_bridge_document},
+    join_base_url, join_non_empty, optional_string, required_base_url, required_string,
+    string_array,
 };
 
 impl<E> McpBridge<E>

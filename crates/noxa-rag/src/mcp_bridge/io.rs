@@ -102,10 +102,9 @@ fn sanitize_component(value: &str) -> String {
 }
 
 fn stable_component_hash(value: &str) -> u64 {
-    use std::hash::{DefaultHasher, Hasher};
-    let mut hasher = DefaultHasher::new();
-    hasher.write(value.as_bytes());
-    hasher.finish()
+    // DefaultHasher is explicitly documented as not stable across Rust versions.
+    // Use xxh3_64 (already a workspace dep) for stable, deterministic filenames.
+    xxhash_rust::xxh3::xxh3_64(value.as_bytes())
 }
 
 fn temp_output_path(path: &Path) -> PathBuf {

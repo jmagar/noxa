@@ -139,11 +139,8 @@ async fn parse_file_json_keeps_crawler_provenance_in_point_payload() {
         section_header: None,
     };
 
-    let file_meta = FileMetadata::from_result_and_provenance(
-        &parsed.extraction,
-        None,
-        &parsed.provenance,
-    );
+    let file_meta =
+        FileMetadata::from_result_and_provenance(&parsed.extraction, None, &parsed.provenance);
     let payload = build_point_payload(chunk, &file_meta, &url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
@@ -210,11 +207,7 @@ fn sample_extraction_with_metadata() -> noxa_core::ExtractionResult {
 }
 
 fn sample_file_metadata(provenance: &IngestionProvenance) -> FileMetadata {
-    FileMetadata::from_result_and_provenance(
-        &sample_extraction_with_metadata(),
-        None,
-        provenance,
-    )
+    FileMetadata::from_result_and_provenance(&sample_extraction_with_metadata(), None, provenance)
 }
 
 /// Web variant: external_id/platform_url at the top level, plus seed_url
@@ -423,9 +416,10 @@ async fn parse_feed_rejects_entity_expansion() {
         <rss version=\"2.0\"><channel><title>&lol;</title></channel></rss>";
     std::fs::write(&path, payload).expect("write");
     let result = parse_file(&path, payload.to_vec()).await;
+    let msg = result.unwrap_err().to_string();
     assert!(
-        result.is_err(),
-        "expected Err for DOCTYPE/ENTITY feed, got Ok"
+        msg.contains("DOCTYPE") || msg.contains("ENTITY") || msg.contains("entity expansion"),
+        "expected entity-expansion rejection, got: {msg}"
     );
 }
 

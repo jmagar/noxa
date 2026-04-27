@@ -84,10 +84,7 @@ impl FormatProvenance {
                 payload.email_thread_id = thread_id.clone();
                 payload.email_has_attachments = *has_attachments;
             }
-            FormatProvenance::Feed {
-                feed_url,
-                item_id,
-            } => {
+            FormatProvenance::Feed { feed_url, item_id } => {
                 payload.feed_url = feed_url.clone();
                 payload.feed_item_id = item_id.clone();
             }

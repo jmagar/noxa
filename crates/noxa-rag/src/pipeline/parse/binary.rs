@@ -174,10 +174,20 @@ pub(crate) fn parse_office_zip_file(
             .map_err(|e| RagError::Parse(format!("{ext} read '{name}': {e}")))?;
         let read_bytes = xml_buf.len() as u64;
         if read_bytes > per_entry_cap {
+            // Distinguish which cap fired: per-entry or cumulative.
+            let reason = if per_entry_cap < MAX_ODT_PPTX_PER_ENTRY_BYTES {
+                format!(
+                    "cumulative budget ({} MiB total) reached",
+                    MAX_ODT_PPTX_TOTAL_BYTES / (1024 * 1024)
+                )
+            } else {
+                format!(
+                    "per-entry limit ({} MiB) exceeded",
+                    MAX_ODT_PPTX_PER_ENTRY_BYTES / (1024 * 1024)
+                )
+            };
             return Err(RagError::Parse(format!(
-                "{ext}: entry '{name}' exceeds decompression limit ({} MiB per entry, {} MiB total) — possible zip bomb",
-                MAX_ODT_PPTX_PER_ENTRY_BYTES / (1024 * 1024),
-                MAX_ODT_PPTX_TOTAL_BYTES / (1024 * 1024),
+                "{ext}: entry '{name}' — {reason} — possible zip bomb"
             )));
         }
         odt_pptx_measured_total = odt_pptx_measured_total.saturating_add(read_bytes);
@@ -327,9 +337,7 @@ mod tests {
             writer
                 .start_file(format!("content{i}.xml"), options)
                 .expect("start_file");
-            writer
-                .write_all(xml_chunk.as_bytes())
-                .expect("write_all");
+            writer.write_all(xml_chunk.as_bytes()).expect("write_all");
         }
         let zip_bytes = writer.finish().expect("finish").into_inner();
 
