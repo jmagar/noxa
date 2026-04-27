@@ -2,6 +2,7 @@ use crate::error::RagError;
 
 use super::{
     FormatProvenance, IngestionProvenance, ParsedFile, extract_xml_text, make_text_result,
+    text::contains_xml_entity_expansion_risk,
 };
 
 pub(crate) fn parse_feed_file(
@@ -9,6 +10,12 @@ pub(crate) fn parse_feed_file(
     file_url: String,
     title: String,
 ) -> Result<ParsedFile, RagError> {
+    if contains_xml_entity_expansion_risk(&bytes) {
+        return Err(RagError::Parse(
+            "XML entity expansion risk detected: file contains DOCTYPE/ENTITY declarations"
+                .to_string(),
+        ));
+    }
     let content = String::from_utf8_lossy(&bytes).into_owned();
     let (extraction, provenance) = parse_feed_text(&content, file_url, title)?;
     Ok(ParsedFile {
@@ -33,7 +40,7 @@ pub(crate) fn parse_subtitle_file(bytes: Vec<u8>, file_url: String, title: Strin
     let content = String::from_utf8_lossy(&bytes).into_owned();
     let text = strip_subtitle_timestamps(&content);
     let provenance = subtitle_provenance(&content);
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     ParsedFile {
         extraction: make_text_result(
             text.clone(),
@@ -94,7 +101,7 @@ fn parse_email_text(
                 .params
                 .contains_key("filename")
     });
-    let word_count = body.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&body);
 
     let mut extraction =
         make_text_result(body.clone(), body, file_url, subject, "email", word_count);
@@ -188,7 +195,7 @@ fn parse_feed_text(
         parts.push(extract_xml_text(content).unwrap_or_else(|_| content.to_string()));
     }
     let text = parts.join("\n\n");
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
 
     let mut extraction = make_text_result(
         text.clone(),

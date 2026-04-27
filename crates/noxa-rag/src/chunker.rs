@@ -6,7 +6,7 @@ use crate::config::ChunkerConfig;
 use crate::types::Chunk;
 
 /// Count whitespace-separated words in a string.
-fn word_count(s: &str) -> usize {
+pub(crate) fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
@@ -42,14 +42,6 @@ fn extract_domain(url: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Approximate token count — use the tokenizer when possible, fall back to word count.
-fn token_estimate(text: &str, tokenizer: &Tokenizer) -> usize {
-    tokenizer
-        .encode(text, false)
-        .map(|enc| enc.len())
-        .unwrap_or_else(|_| text.split_whitespace().count())
-}
-
 /// Chunk an `ExtractionResult` into a `Vec<Chunk>`.
 ///
 /// - Uses `content.markdown` if non-empty, otherwise `content.plain_text`.
@@ -57,6 +49,12 @@ fn token_estimate(text: &str, tokenizer: &Tokenizer) -> usize {
 /// - Uses `ChunkConfig::with_overlap()` for sliding-window overlap (built into text-splitter ≥0.25).
 /// - Filters chunks below `config.min_words`.
 /// - Caps output at `config.max_chunks_per_page`.
+///
+/// # Token estimate
+/// The `Chunk::token_estimate` field is populated with a word-count approximation.
+/// The tokenizer is still used exclusively by the splitter for accurate boundary placement
+/// via `ChunkConfig::with_sizer`; re-encoding every emitted chunk would halve throughput
+/// on the `spawn_blocking` hot path for no practical gain (the field is diagnostic only).
 pub fn chunk(
     result: &ExtractionResult,
     config: &ChunkerConfig,
@@ -112,7 +110,7 @@ pub fn chunk(
         .into_iter()
         .enumerate()
         .map(|(chunk_index, (char_offset, text))| {
-            let t_est = token_estimate(&text, tokenizer);
+            let t_est = word_count(&text);
             let section_header = nearest_heading(&headings, char_offset).map(|s| s.to_string());
             Chunk {
                 text,
@@ -132,6 +130,57 @@ pub fn chunk(
 mod tests {
     use super::*;
 
+    fn make_extraction_result(markdown: &str) -> ExtractionResult {
+        crate::pipeline::parse::make_text_result(
+            markdown.to_string(),
+            String::new(),
+            "https://example.com/test".to_string(),
+            None,
+            "test",
+            crate::chunker::word_count(markdown),
+        )
+    }
+
+    /// Build a minimal whitespace-pretokenized WordLevel tokenizer suitable for
+    /// unit tests. Every word becomes a distinct token (unk token used for anything
+    /// not in the small vocab), which is sufficient for splitter boundary logic.
+    fn make_test_tokenizer() -> Tokenizer {
+        // A minimal valid tokenizer JSON: WordLevel model with whitespace pre-tokenizer.
+        // Using from_str avoids the ahash::AHashMap type constraint on WordLevelBuilder::vocab
+        // and the TokenizerImpl→Tokenizer conversion from TokenizerBuilder.
+        let json = serde_json::json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {
+                "type": "Whitespace"
+            },
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": {
+                    "[UNK]": 0,
+                    "the": 1,
+                    "and": 2,
+                    "of": 3,
+                    "a": 4,
+                    "to": 5,
+                    "in": 6,
+                    "is": 7,
+                    "it": 8,
+                    "that": 9
+                },
+                "unk_token": "[UNK]"
+            }
+        });
+        json.to_string()
+            .parse::<Tokenizer>()
+            .expect("test tokenizer from JSON")
+    }
+
     #[test]
     fn domain_extraction() {
         assert_eq!(
@@ -147,5 +196,57 @@ mod tests {
         assert_eq!(word_count("hello world foo"), 3);
         assert_eq!(word_count("  "), 0);
         assert_eq!(word_count(""), 0);
+    }
+
+    /// Verify that no double-tokenization occurs: token_estimate is populated with
+    /// word_count (not from the tokenizer), and chunks are produced for non-trivial input.
+    #[test]
+    fn chunk_token_estimate_uses_word_count_not_tokenizer() {
+        let tokenizer = make_test_tokenizer();
+        let config = crate::config::ChunkerConfig {
+            target_tokens: 50,
+            overlap_tokens: 0,
+            min_words: 1,
+            max_chunks_per_page: 200,
+        };
+
+        // A body of text long enough to produce at least one chunk.
+        let body = (0..200)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = make_extraction_result(&body);
+        let chunks = chunk(&result, &config, &tokenizer);
+
+        assert!(
+            !chunks.is_empty(),
+            "expected at least one chunk for a 200-word body"
+        );
+
+        for c in &chunks {
+            // token_estimate must be populated (> 0 for any non-empty chunk).
+            assert!(
+                c.token_estimate > 0,
+                "token_estimate must be > 0, got {}",
+                c.token_estimate
+            );
+            // token_estimate == word_count of the chunk text (the word_count approximation).
+            let expected = word_count(&c.text);
+            assert_eq!(
+                c.token_estimate, expected,
+                "token_estimate should equal word_count for chunk at index {}",
+                c.chunk_index
+            );
+        }
+    }
+
+    /// Confirm empty content returns no chunks.
+    #[test]
+    fn chunk_empty_content_returns_empty() {
+        let tokenizer = make_test_tokenizer();
+        let config = crate::config::ChunkerConfig::default();
+        let result = make_extraction_result("");
+        let chunks = chunk(&result, &config, &tokenizer);
+        assert!(chunks.is_empty());
     }
 }

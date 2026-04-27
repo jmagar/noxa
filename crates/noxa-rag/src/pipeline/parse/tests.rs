@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::fs;
 
-use super::{FormatProvenance, IngestionProvenance, build_point_payload, parse_file};
+use super::{FileMetadata, FormatProvenance, IngestionProvenance, build_point_payload, parse_file};
 
 #[tokio::test]
 async fn parse_file_json_recovers_provenance_fields() {
@@ -126,10 +126,11 @@ async fn parse_file_json_keeps_crawler_provenance_in_point_payload() {
         .metadata
         .url
         .as_deref()
-        .expect("parser should set file url");
+        .expect("parser should set file url")
+        .to_string();
     let chunk = crate::types::Chunk {
         text: parsed.extraction.content.markdown.clone(),
-        source_url: url.to_string(),
+        source_url: url.clone(),
         domain: "example.com".to_string(),
         chunk_index: 0,
         total_chunks: 1,
@@ -138,14 +139,9 @@ async fn parse_file_json_keeps_crawler_provenance_in_point_payload() {
         section_header: None,
     };
 
-    let payload = build_point_payload(
-        &chunk,
-        &parsed.extraction,
-        None,
-        &parsed.provenance,
-        url,
-        None,
-    );
+    let file_meta =
+        FileMetadata::from_result_and_provenance(&parsed.extraction, None, &parsed.provenance);
+    let payload = build_point_payload(chunk, &file_meta, &url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -210,12 +206,15 @@ fn sample_extraction_with_metadata() -> noxa_core::ExtractionResult {
     }
 }
 
+fn sample_file_metadata(provenance: &IngestionProvenance) -> FileMetadata {
+    FileMetadata::from_result_and_provenance(&sample_extraction_with_metadata(), None, provenance)
+}
+
 /// Web variant: external_id/platform_url at the top level, plus seed_url
 /// and friends falling back to metadata when the variant fields are None.
 #[test]
 fn build_point_payload_serializes_web_variant() {
     let chunk = sample_chunk();
-    let extraction = sample_extraction_with_metadata();
     let provenance = IngestionProvenance {
         external_id: Some("linkding:42".to_string()),
         platform_url: Some("https://platform.example/items/42".to_string()),
@@ -225,15 +224,10 @@ fn build_point_payload_serializes_web_variant() {
             crawl_depth: None,
         },
     };
+    let url = chunk.source_url.clone();
+    let file_meta = sample_file_metadata(&provenance);
 
-    let payload = build_point_payload(
-        &chunk,
-        &extraction,
-        None,
-        &provenance,
-        &chunk.source_url,
-        None,
-    );
+    let payload = build_point_payload(chunk, &file_meta, &url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -266,7 +260,6 @@ fn build_point_payload_serializes_web_variant() {
 #[test]
 fn build_point_payload_serializes_email_variant() {
     let chunk = sample_chunk();
-    let extraction = sample_extraction_with_metadata();
     let provenance = IngestionProvenance {
         external_id: Some("msg@example.com".to_string()),
         platform_url: None,
@@ -277,15 +270,10 @@ fn build_point_payload_serializes_email_variant() {
             has_attachments: Some(true),
         },
     };
+    let url = chunk.source_url.clone();
+    let file_meta = sample_file_metadata(&provenance);
 
-    let payload = build_point_payload(
-        &chunk,
-        &extraction,
-        None,
-        &provenance,
-        &chunk.source_url,
-        None,
-    );
+    let payload = build_point_payload(chunk, &file_meta, &url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -312,7 +300,6 @@ fn build_point_payload_serializes_email_variant() {
 #[test]
 fn build_point_payload_serializes_feed_variant() {
     let chunk = sample_chunk();
-    let extraction = sample_extraction_with_metadata();
     let provenance = IngestionProvenance {
         external_id: Some("entry-1".to_string()),
         platform_url: None,
@@ -321,15 +308,10 @@ fn build_point_payload_serializes_feed_variant() {
             item_id: Some("entry-1".to_string()),
         },
     };
+    let url = chunk.source_url.clone();
+    let file_meta = sample_file_metadata(&provenance);
 
-    let payload = build_point_payload(
-        &chunk,
-        &extraction,
-        None,
-        &provenance,
-        &chunk.source_url,
-        None,
-    );
+    let payload = build_point_payload(chunk, &file_meta, &url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -346,7 +328,6 @@ fn build_point_payload_serializes_feed_variant() {
 #[test]
 fn build_point_payload_serializes_presentation_variant() {
     let chunk = sample_chunk();
-    let extraction = sample_extraction_with_metadata();
     let provenance = IngestionProvenance {
         external_id: None,
         platform_url: None,
@@ -355,15 +336,10 @@ fn build_point_payload_serializes_presentation_variant() {
             has_notes: Some(true),
         },
     };
+    let url = chunk.source_url.clone();
+    let file_meta = sample_file_metadata(&provenance);
 
-    let payload = build_point_payload(
-        &chunk,
-        &extraction,
-        None,
-        &provenance,
-        &chunk.source_url,
-        None,
-    );
+    let payload = build_point_payload(chunk, &file_meta, &url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -380,7 +356,6 @@ fn build_point_payload_serializes_presentation_variant() {
 #[test]
 fn build_point_payload_serializes_subtitle_variant() {
     let chunk = sample_chunk();
-    let extraction = sample_extraction_with_metadata();
     let provenance = IngestionProvenance {
         external_id: None,
         platform_url: None,
@@ -390,15 +365,10 @@ fn build_point_payload_serializes_subtitle_variant() {
             source_file: Some("demo.mp4".to_string()),
         },
     };
+    let url = chunk.source_url.clone();
+    let file_meta = sample_file_metadata(&provenance);
 
-    let payload = build_point_payload(
-        &chunk,
-        &extraction,
-        None,
-        &provenance,
-        &chunk.source_url,
-        None,
-    );
+    let payload = build_point_payload(chunk, &file_meta, &url, None);
     let json = serde_json::to_value(&payload).expect("serialize payload");
 
     assert_eq!(
@@ -413,4 +383,54 @@ fn build_point_payload_serializes_subtitle_variant() {
         json.get("subtitle_source_file").and_then(|v| v.as_str()),
         Some("demo.mp4")
     );
+}
+
+/// Entity expansion (billion-laughs) in XML should be rejected before parsing.
+#[tokio::test]
+async fn parse_xml_rejects_entity_expansion() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("evil.xml");
+    let payload = b"<?xml version=\"1.0\"?>\
+        <!DOCTYPE foo [<!ENTITY lol \"lol\">]>\
+        <root>&lol;</root>";
+    std::fs::write(&path, payload).expect("write");
+    let result = parse_file(&path, payload.to_vec()).await;
+    assert!(
+        result.is_err(),
+        "expected Err for DOCTYPE/ENTITY XML, got Ok"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("DOCTYPE") || msg.contains("ENTITY") || msg.contains("entity expansion"),
+        "error message should mention DOCTYPE/ENTITY: {msg}"
+    );
+}
+
+/// Entity expansion guard in RSS/Atom feed parser.
+#[tokio::test]
+async fn parse_feed_rejects_entity_expansion() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("evil.rss");
+    let payload = b"<?xml version=\"1.0\"?>\
+        <!DOCTYPE foo [<!ENTITY lol \"lol\">]>\
+        <rss version=\"2.0\"><channel><title>&lol;</title></channel></rss>";
+    std::fs::write(&path, payload).expect("write");
+    let result = parse_file(&path, payload.to_vec()).await;
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("DOCTYPE") || msg.contains("ENTITY") || msg.contains("entity expansion"),
+        "expected entity-expansion rejection, got: {msg}"
+    );
+}
+
+/// Normal XML without DOCTYPE/ENTITY should still parse successfully.
+#[tokio::test]
+async fn parse_xml_allows_normal_content() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("normal.xml");
+    let payload =
+        b"<?xml version=\"1.0\"?><root><item>hello world</item><item>foo bar</item></root>";
+    std::fs::write(&path, payload).expect("write");
+    let result = parse_file(&path, payload.to_vec()).await;
+    assert!(result.is_ok(), "normal XML should parse without error");
 }

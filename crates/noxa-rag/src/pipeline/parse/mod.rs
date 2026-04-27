@@ -3,7 +3,7 @@ use std::path::Path;
 use noxa_core::types::ExtractionResult;
 
 use crate::error::RagError;
-use crate::types::PointPayload;
+use crate::types::{Chunk, PointPayload};
 
 mod binary;
 mod rich;
@@ -61,11 +61,143 @@ pub(crate) enum FormatProvenance {
     Generic,
 }
 
+impl FormatProvenance {
+    /// Apply format-specific fields onto `payload`.
+    ///
+    /// Web-variant web fields (seed_url, search_query, crawl_depth) are
+    /// pre-resolved in `FileMetadata::from_result_and_provenance` (variant
+    /// Some takes precedence over metadata fallback). This method therefore
+    /// only needs to handle non-web format variants.
+    pub(crate) fn apply(&self, payload: &mut PointPayload) {
+        match self {
+            FormatProvenance::Web { .. } => {
+                // Already resolved into FileMetadata — nothing to do here.
+            }
+            FormatProvenance::Email {
+                to,
+                message_id,
+                thread_id,
+                has_attachments,
+            } => {
+                payload.email_to = to.clone();
+                payload.email_message_id = message_id.clone();
+                payload.email_thread_id = thread_id.clone();
+                payload.email_has_attachments = *has_attachments;
+            }
+            FormatProvenance::Feed { feed_url, item_id } => {
+                payload.feed_url = feed_url.clone();
+                payload.feed_item_id = item_id.clone();
+            }
+            FormatProvenance::Subtitle {
+                start_s,
+                end_s,
+                source_file,
+            } => {
+                payload.subtitle_start_s = *start_s;
+                payload.subtitle_end_s = *end_s;
+                payload.subtitle_source_file = source_file.clone();
+            }
+            FormatProvenance::Presentation {
+                slide_count,
+                has_notes,
+            } => {
+                payload.pptx_slide_count = *slide_count;
+                payload.pptx_has_notes = *has_notes;
+            }
+            FormatProvenance::Generic => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct IngestionProvenance {
     pub external_id: Option<String>,
     pub platform_url: Option<String>,
     pub format: FormatProvenance,
+}
+
+/// Per-file metadata that is identical for every chunk produced from the same
+/// document. Built once before the chunk loop via
+/// `FileMetadata::from_result_and_provenance` so the file-level fields are
+/// cloned once rather than once per chunk.
+///
+/// `file_hash` is NOT included here because it is computed separately in
+/// `process.rs` and passed directly to `build_point_payload`.
+pub(crate) struct FileMetadata {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub published_date: Option<String>,
+    pub language: Option<String>,
+    pub source_type: Option<String>,
+    pub content_hash: Option<String>,
+    pub technologies: Vec<String>,
+    pub is_truncated: Option<bool>,
+    pub file_path: Option<String>,
+    pub last_modified: Option<String>,
+    pub git_branch: Option<String>,
+    pub external_id: Option<String>,
+    pub platform_url: Option<String>,
+    /// Web-provenance: variant `Some` wins over metadata fallback.
+    pub seed_url: Option<String>,
+    pub search_query: Option<String>,
+    pub crawl_depth: Option<u32>,
+    /// Format variant — used by `build_point_payload` to apply non-web fields
+    /// (Email, Feed, Subtitle, Presentation). Stored here so `build_point_payload`
+    /// doesn't need to receive `&IngestionProvenance` separately.
+    pub format: FormatProvenance,
+}
+
+impl FileMetadata {
+    /// Build `FileMetadata` once per document. The merge rule for web-provenance
+    /// fields is: `FormatProvenance::Web { Some(x) }` takes precedence over
+    /// `result.metadata.*`; `None` in the variant falls back to `metadata.*`.
+    /// Non-web variants leave those fields at the metadata value (typically None).
+    pub(crate) fn from_result_and_provenance(
+        result: &ExtractionResult,
+        git_branch: Option<String>,
+        provenance: &IngestionProvenance,
+    ) -> Self {
+        let (seed_url, search_query, crawl_depth) = match &provenance.format {
+            FormatProvenance::Web {
+                seed_url,
+                search_query,
+                crawl_depth,
+            } => (
+                seed_url
+                    .clone()
+                    .or_else(|| result.metadata.seed_url.clone()),
+                search_query
+                    .clone()
+                    .or_else(|| result.metadata.search_query.clone()),
+                crawl_depth.or(result.metadata.crawl_depth),
+            ),
+            _ => (
+                result.metadata.seed_url.clone(),
+                result.metadata.search_query.clone(),
+                result.metadata.crawl_depth,
+            ),
+        };
+
+        Self {
+            title: result.metadata.title.clone(),
+            author: result.metadata.author.clone(),
+            published_date: result.metadata.published_date.clone(),
+            language: result.metadata.language.clone(),
+            source_type: result.metadata.source_type.clone(),
+            content_hash: result.metadata.content_hash.clone(),
+            technologies: result.metadata.technologies.clone(),
+            is_truncated: result.metadata.is_truncated,
+            file_path: result.metadata.file_path.clone(),
+            last_modified: result.metadata.last_modified.clone(),
+            git_branch,
+            external_id: provenance.external_id.clone(),
+            platform_url: provenance.platform_url.clone(),
+            seed_url,
+            search_query,
+            crawl_depth,
+            format: provenance.format.clone(),
+        }
+    }
 }
 
 pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile, RagError> {
@@ -87,7 +219,9 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
         "txt" => Ok(parse_plain_text_file(bytes, file_url, title)),
         "yaml" | "yml" | "toml" => Ok(parse_plain_text_file(bytes, file_url, title)),
         "log" => Ok(parse_log_file(bytes, file_url, title)),
-        "html" | "htm" => parse_html_file(bytes, file_url).await,
+        "html" | "htm" => {
+            spawn_blocking_parse("HTML", move || parse_html_file(bytes, file_url)).await
+        }
         "ipynb" => {
             spawn_blocking_parse("ipynb", move || parse_ipynb_file(&bytes, file_url, title)).await
         }
@@ -111,7 +245,7 @@ pub(crate) async fn parse_file(path: &Path, bytes: Vec<u8>) -> Result<ParsedFile
             .await
         }
         "jsonl" => Ok(parse_jsonl_file(bytes, file_url, title)),
-        "xml" | "opml" => Ok(parse_xml_file(bytes, file_url, title)),
+        "xml" | "opml" => parse_xml_file(bytes, file_url, title),
         "rss" | "atom" => parse_feed_file(bytes, file_url, title),
         "eml" => parse_email_file(&bytes, file_url, title),
         "vtt" | "srt" => Ok(parse_subtitle_file(bytes, file_url, title)),
@@ -174,116 +308,56 @@ pub(crate) fn extract_ingestion_provenance(value: &serde_json::Value) -> Ingesti
 }
 
 pub(crate) fn build_point_payload(
-    chunk: &crate::types::Chunk,
-    result: &ExtractionResult,
-    git_branch: Option<String>,
-    provenance: &IngestionProvenance,
+    chunk: Chunk,
+    file_meta: &FileMetadata,
     url: &str,
     file_hash: Option<&str>,
 ) -> PointPayload {
-    // Default values for every format-specific field. Only the fields
-    // belonging to the active variant are overridden below; the rest stay
-    // at their type default (None / empty Vec), matching the old flat
-    // struct's behaviour where inactive fields were simply not set.
-    let mut seed_url: Option<String> = None;
-    let mut search_query: Option<String> = None;
-    let mut crawl_depth: Option<u32> = None;
-    let mut email_to: Vec<String> = Vec::new();
-    let mut email_message_id: Option<String> = None;
-    let mut email_thread_id: Option<String> = None;
-    let mut email_has_attachments: Option<bool> = None;
-    let mut feed_url: Option<String> = None;
-    let mut feed_item_id: Option<String> = None;
-    let mut pptx_slide_count: Option<u32> = None;
-    let mut pptx_has_notes: Option<bool> = None;
-    let mut subtitle_start_s: Option<f64> = None;
-    let mut subtitle_end_s: Option<f64> = None;
-    let mut subtitle_source_file: Option<String> = None;
-
-    match &provenance.format {
-        FormatProvenance::Web {
-            seed_url: s,
-            search_query: q,
-            crawl_depth: d,
-        } => {
-            seed_url = s.clone();
-            search_query = q.clone();
-            crawl_depth = *d;
-        }
-        FormatProvenance::Email {
-            to,
-            message_id,
-            thread_id,
-            has_attachments,
-        } => {
-            email_to = to.clone();
-            email_message_id = message_id.clone();
-            email_thread_id = thread_id.clone();
-            email_has_attachments = *has_attachments;
-        }
-        FormatProvenance::Feed {
-            feed_url: f,
-            item_id,
-        } => {
-            feed_url = f.clone();
-            feed_item_id = item_id.clone();
-        }
-        FormatProvenance::Subtitle {
-            start_s,
-            end_s,
-            source_file,
-        } => {
-            subtitle_start_s = *start_s;
-            subtitle_end_s = *end_s;
-            subtitle_source_file = source_file.clone();
-        }
-        FormatProvenance::Presentation {
-            slide_count,
-            has_notes,
-        } => {
-            pptx_slide_count = *slide_count;
-            pptx_has_notes = *has_notes;
-        }
-        FormatProvenance::Generic => {}
-    }
-
-    PointPayload {
-        text: chunk.text.clone(),
-        url: url.to_string(),
-        domain: chunk.domain.clone(),
+    let mut payload = PointPayload {
+        // Per-chunk fields — moved out of chunk (no clone for text/domain/section_header).
+        text: chunk.text,
+        domain: chunk.domain,
         chunk_index: chunk.chunk_index,
         total_chunks: chunk.total_chunks,
         token_estimate: chunk.token_estimate,
-        title: result.metadata.title.clone(),
-        author: result.metadata.author.clone(),
-        published_date: result.metadata.published_date.clone(),
-        language: result.metadata.language.clone(),
-        source_type: result.metadata.source_type.clone(),
-        content_hash: result.metadata.content_hash.clone(),
-        technologies: result.metadata.technologies.clone(),
-        is_truncated: result.metadata.is_truncated,
-        file_path: result.metadata.file_path.clone(),
-        last_modified: result.metadata.last_modified.clone(),
-        git_branch,
-        external_id: provenance.external_id.clone(),
-        platform_url: provenance.platform_url.clone(),
-        seed_url: seed_url.or_else(|| result.metadata.seed_url.clone()),
-        search_query: search_query.or_else(|| result.metadata.search_query.clone()),
-        crawl_depth: crawl_depth.or(result.metadata.crawl_depth),
-        email_to,
-        email_message_id,
-        email_thread_id,
-        email_has_attachments,
-        feed_url,
-        feed_item_id,
-        pptx_slide_count,
-        pptx_has_notes,
-        subtitle_start_s,
-        subtitle_end_s,
-        subtitle_source_file,
-        section_header: chunk.section_header.clone(),
+        section_header: chunk.section_header,
+        // Per-file fields — cloned once from FileMetadata (built once per document).
+        url: url.to_string(),
+        title: file_meta.title.clone(),
+        author: file_meta.author.clone(),
+        published_date: file_meta.published_date.clone(),
+        language: file_meta.language.clone(),
+        source_type: file_meta.source_type.clone(),
+        content_hash: file_meta.content_hash.clone(),
+        technologies: file_meta.technologies.clone(),
+        is_truncated: file_meta.is_truncated,
+        file_path: file_meta.file_path.clone(),
+        last_modified: file_meta.last_modified.clone(),
+        git_branch: file_meta.git_branch.clone(),
+        external_id: file_meta.external_id.clone(),
+        platform_url: file_meta.platform_url.clone(),
+        seed_url: file_meta.seed_url.clone(),
+        search_query: file_meta.search_query.clone(),
+        crawl_depth: file_meta.crawl_depth,
+        // Format-variant fields default to empty/None; apply() fills them in.
+        email_to: Vec::new(),
+        email_message_id: None,
+        email_thread_id: None,
+        email_has_attachments: None,
+        feed_url: None,
+        feed_item_id: None,
+        pptx_slide_count: None,
+        pptx_has_notes: None,
+        subtitle_start_s: None,
+        subtitle_end_s: None,
+        subtitle_source_file: None,
         file_hash: file_hash.map(str::to_owned),
-    }
+    };
+
+    // apply() now only handles non-web variants (Email, Feed, Subtitle, Presentation).
+    // Web-provenance fields were already resolved into FileMetadata once per document.
+    file_meta.format.apply(&mut payload);
+    payload
 }
 
 pub(crate) fn make_text_result(

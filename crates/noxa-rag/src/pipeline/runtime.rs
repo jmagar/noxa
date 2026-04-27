@@ -83,14 +83,11 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
     );
 
     let session_start = Instant::now();
-    pipeline
-        .watch_roots
-        .set(Arc::new(scan::canonical_watch_roots(&watch_dirs).await?))
-        .ok();
+    let watch_roots = Arc::new(scan::canonical_watch_roots(&watch_dirs).await?);
 
     let (tx, rx) = async_channel::bounded(pipeline.config.pipeline.job_queue_capacity);
 
-    let worker_handles = spawn_workers(pipeline, rx);
+    let worker_handles = spawn_workers(pipeline, rx, Arc::clone(&watch_roots));
 
     let bridge_handle = setup_watcher(
         &watch_dirs,
@@ -105,6 +102,7 @@ pub(crate) async fn run(pipeline: &Pipeline) -> Result<(), RagError> {
         pipeline.shutdown.clone(),
         watch_dirs,
         pipeline.config.pipeline.startup_scan_concurrency,
+        pipeline.config.pipeline.max_file_size_bytes,
     );
 
     let heartbeat_handle = spawn_heartbeat(

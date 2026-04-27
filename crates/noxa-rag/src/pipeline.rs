@@ -11,7 +11,7 @@ use crate::error::RagError;
 use crate::store::DynVectorStore;
 
 mod heartbeat;
-mod parse;
+pub(crate) mod parse;
 mod process;
 mod runtime;
 mod scan;
@@ -24,6 +24,7 @@ struct CounterSnapshot {
     failed: usize,
     parse_failures: usize,
     total_chunks: usize,
+    total_io_ms: u64,
     total_parse_ms: u64,
     total_chunk_ms: u64,
     total_embed_ms: u64,
@@ -38,6 +39,9 @@ struct SessionCounters {
     /// broader process errors so the heartbeat can report them independently.
     parse_failures: std::sync::atomic::AtomicUsize,
     total_chunks: std::sync::atomic::AtomicUsize,
+    /// Total time spent on file I/O (canonicalize, open, read) across all jobs.
+    total_io_ms: std::sync::atomic::AtomicU64,
+    /// Total time spent in the parser (CPU-bound format decoding) across all jobs.
     total_parse_ms: std::sync::atomic::AtomicU64,
     total_chunk_ms: std::sync::atomic::AtomicU64,
     total_embed_ms: std::sync::atomic::AtomicU64,
@@ -52,6 +56,7 @@ impl SessionCounters {
             failed: self.files_failed.load(Relaxed),
             parse_failures: self.parse_failures.load(Relaxed),
             total_chunks: self.total_chunks.load(Relaxed),
+            total_io_ms: self.total_io_ms.load(Relaxed),
             total_parse_ms: self.total_parse_ms.load(Relaxed),
             total_chunk_ms: self.total_chunk_ms.load(Relaxed),
             total_embed_ms: self.total_embed_ms.load(Relaxed),
@@ -65,6 +70,7 @@ impl SessionCounters {
             self.files_indexed.fetch_add(1, Relaxed);
         }
         self.total_chunks.fetch_add(stats.chunks, Relaxed);
+        self.total_io_ms.fetch_add(stats.io_ms, Relaxed);
         self.total_parse_ms.fetch_add(stats.parse_ms, Relaxed);
         self.total_chunk_ms.fetch_add(stats.chunk_ms, Relaxed);
         self.total_embed_ms.fetch_add(stats.embed_ms, Relaxed);
@@ -73,6 +79,11 @@ impl SessionCounters {
 
     fn record_failure(&self) {
         self.files_failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn record_parse_failure(&self) {
+        self.parse_failures
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -106,6 +117,9 @@ enum PipelineJob {
 #[derive(Default)]
 struct JobStats {
     chunks: usize,
+    /// Time spent on file I/O (canonicalize, open, read) — does not include parse CPU time.
+    io_ms: u64,
+    /// Time spent in the parser (CPU-bound format decoding) — does not include file I/O.
     parse_ms: u64,
     chunk_ms: u64,
     embed_ms: u64,
@@ -122,7 +136,7 @@ struct WorkerContext {
     embed: DynEmbedProvider,
     store: DynVectorStore,
     tokenizer: Arc<Tokenizer>,
-    config: RagConfig,
+    config: Arc<RagConfig>,
     url_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     git_branch_cache: Arc<DashMap<PathBuf, Option<String>>>,
     watch_roots: Arc<Vec<PathBuf>>,
@@ -132,7 +146,7 @@ struct WorkerContext {
 }
 
 impl WorkerContext {
-    fn from_pipeline(pipeline: &Pipeline) -> Self {
+    fn from_pipeline(pipeline: &Pipeline, watch_roots: Arc<Vec<PathBuf>>) -> Self {
         Self {
             embed: pipeline.embed.clone(),
             store: pipeline.store.clone(),
@@ -140,11 +154,7 @@ impl WorkerContext {
             config: pipeline.config.clone(),
             url_locks: pipeline.url_locks.clone(),
             git_branch_cache: pipeline.git_branch_cache.clone(),
-            watch_roots: pipeline
-                .watch_roots
-                .get()
-                .expect("watch_roots set before spawn_workers")
-                .clone(),
+            watch_roots,
             counters: pipeline.counters.clone(),
             failed_jobs_log_lock: pipeline.failed_jobs_log_lock.clone(),
             shutdown: pipeline.shutdown.clone(),
@@ -153,7 +163,7 @@ impl WorkerContext {
 }
 
 pub struct Pipeline {
-    config: RagConfig,
+    config: Arc<RagConfig>,
     embed: DynEmbedProvider,
     store: DynVectorStore,
     tokenizer: Arc<Tokenizer>,
@@ -169,9 +179,6 @@ pub struct Pipeline {
     /// Serialises failed-jobs log rotation: check-size → rotate → append must be atomic
     /// across concurrent workers to avoid double-rename races.
     failed_jobs_log_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Canonicalized watch roots, set once during `run()` before workers are spawned.
-    /// Workers access this directly instead of receiving it as a spawn parameter.
-    watch_roots: std::sync::OnceLock<Arc<Vec<PathBuf>>>,
 }
 
 impl Pipeline {
@@ -183,7 +190,7 @@ impl Pipeline {
         shutdown: CancellationToken,
     ) -> Self {
         Self {
-            config,
+            config: Arc::new(config),
             embed,
             store,
             tokenizer,
@@ -192,7 +199,6 @@ impl Pipeline {
             git_branch_cache: Arc::new(DashMap::new()),
             counters: Arc::new(SessionCounters::default()),
             failed_jobs_log_lock: Arc::new(tokio::sync::Mutex::new(())),
-            watch_roots: std::sync::OnceLock::new(),
         }
     }
 

@@ -236,17 +236,28 @@ impl TeiProvider {
             }
 
             if should_retry(status_u16, attempt) {
-                let body = resp.text().await.unwrap_or_default();
-                let preview: String = body.chars().take(512).collect();
-                tracing::warn!(
-                    batch = batch_idx + 1,
-                    attempt = attempt + 1,
-                    max_attempts = MAX_RETRIES + 1,
-                    status = status_u16,
-                    delay_ms,
-                    body = preview,
-                    "TEI retry"
-                );
+                if self.auth_token.is_some() {
+                    tracing::warn!(
+                        batch = batch_idx + 1,
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES + 1,
+                        status = status_u16,
+                        delay_ms,
+                        "TEI retry (body omitted: auth token configured)"
+                    );
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    let preview: String = body.chars().take(512).collect();
+                    tracing::warn!(
+                        batch = batch_idx + 1,
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES + 1,
+                        status = status_u16,
+                        delay_ms,
+                        body = preview,
+                        "TEI retry"
+                    );
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 delay_ms = (delay_ms * 2).min(2_000);
                 continue;
@@ -318,15 +329,20 @@ impl EmbedProvider for TeiProvider {
         // Keep EMBED_PIPELINE_DEPTH batches in-flight concurrently so HTTP
         // round-trip latency overlaps with GPU compute on the TEI server.
         // buffered() preserves batch ordering.
-        let batches: Vec<(usize, Vec<String>)> = texts
-            .chunks(BATCH_SIZE)
-            .enumerate()
-            .map(|(i, chunk)| (i, chunk.to_vec()))
+        //
+        // We stream (batch_idx, start, end) index tuples and slice `texts` inside
+        // the async block to avoid cloning the text data into owned Vec<String> batches.
+        let batch_ranges: Vec<(usize, usize, usize)> = (0..total_batches)
+            .map(|i| {
+                let start = i * BATCH_SIZE;
+                let end = (start + BATCH_SIZE).min(texts.len());
+                (i, start, end)
+            })
             .collect();
 
-        let results: Vec<Vec<Vec<f32>>> = futures::stream::iter(batches)
-            .map(|(batch_idx, batch)| async move {
-                self.embed_batch_adaptive(&batch, batch_idx, total_batches)
+        let results: Vec<Vec<Vec<f32>>> = futures::stream::iter(batch_ranges)
+            .map(|(batch_idx, start, end)| async move {
+                self.embed_batch_adaptive(&texts[start..end], batch_idx, total_batches)
                     .await
             })
             .buffered(EMBED_PIPELINE_DEPTH)

@@ -1,14 +1,24 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
-use noxa_core::{Content, ExtractionResult, Metadata};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::process::Command;
 use url::Url;
 
 use crate::RagError;
+
+mod bytestash;
+pub mod executor;
+mod io;
+mod linkding;
+mod memos;
+mod paperless;
+
+pub use bytestash::normalize_bytestash_record;
+pub use executor::ProcessMcporterExecutor;
+pub use io::{relative_output_path, write_bridge_document};
+pub use linkding::normalize_linkding_record;
+pub use memos::normalize_memo_record;
+pub use paperless::normalize_paperless_record;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpSource {
@@ -51,7 +61,7 @@ pub struct BridgeDocument {
     pub source: McpSource,
     pub external_id: String,
     pub platform_url: Option<String>,
-    pub extraction: ExtractionResult,
+    pub extraction: noxa_core::ExtractionResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,58 +79,6 @@ pub trait McporterExecutor: Send + Sync {
         action: &str,
         params: Value,
     ) -> Result<Value, RagError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ProcessMcporterExecutor {
-    executable: String,
-}
-
-impl ProcessMcporterExecutor {
-    pub fn new(executable: impl Into<String>) -> Self {
-        Self {
-            executable: executable.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl McporterExecutor for ProcessMcporterExecutor {
-    async fn call(
-        &self,
-        server: &str,
-        service: McpSource,
-        action: &str,
-        params: Value,
-    ) -> Result<Value, RagError> {
-        let selector = format!("{}.{}", server, service.as_str());
-        let args = serde_json::json!({
-            "action": action,
-            "params": params,
-        });
-        let output = Command::new(&self.executable)
-            .arg("call")
-            .arg(&selector)
-            .arg("--args")
-            .arg(args.to_string())
-            .arg("--output")
-            .arg("json")
-            .output()
-            .await
-            .map_err(|e| RagError::Generic(format!("failed to execute mcporter: {e}")))?;
-
-        if !output.status.success() {
-            return Err(RagError::Generic(format!(
-                "mcporter call {} {} failed: {}",
-                selector,
-                action,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-
-        serde_json::from_slice(&output.stdout)
-            .map_err(|e| RagError::Generic(format!("mcporter returned invalid JSON: {e}")))
-    }
 }
 
 pub struct McpBridge<E> {
@@ -145,163 +103,7 @@ where
         }
     }
 
-    async fn sync_linkding(&self) -> Result<SyncReport, RagError> {
-        let mut report = SyncReport::default();
-        let mut offset = 0_u32;
-        let mut seen_ids = HashSet::new();
-
-        loop {
-            let data = self
-                .call_data(
-                    McpSource::Linkding,
-                    "bookmark.list",
-                    serde_json::json!({
-                        "limit": self.config.page_size,
-                        "offset": offset,
-                    }),
-                )
-                .await?;
-            let records = array_field(&data, "results")?;
-            if records.is_empty() {
-                break;
-            }
-
-            let mut new_records = 0_usize;
-            for record in records {
-                let document =
-                    normalize_linkding_record(record, self.config.platform_base_url.as_deref())?;
-                if !seen_ids.insert(document.external_id.clone()) {
-                    continue;
-                }
-                new_records += 1;
-                report.fetched += 1;
-                match write_bridge_document(&self.config.watch_dir, &document).await? {
-                    WriteStatus::Written => report.written += 1,
-                    WriteStatus::Unchanged => report.skipped += 1,
-                }
-            }
-
-            if data.get("next").is_none() || data.get("next").is_some_and(Value::is_null) {
-                break;
-            }
-            if new_records == 0 {
-                break;
-            }
-            offset = offset.saturating_add(self.config.page_size.max(1));
-        }
-
-        Ok(report)
-    }
-
-    async fn sync_memos(&self) -> Result<SyncReport, RagError> {
-        let base_url = required_base_url(&self.config, McpSource::Memos)?;
-        let mut report = SyncReport::default();
-        let mut page_token: Option<String> = None;
-
-        loop {
-            let mut params = serde_json::json!({ "page_size": self.config.page_size });
-            if let Some(token) = &page_token {
-                params["page_token"] = Value::String(token.clone());
-            }
-            let data = self
-                .call_data(McpSource::Memos, "memos.list", params)
-                .await?;
-            let records = array_field(&data, "memos")?;
-            if records.is_empty() {
-                break;
-            }
-
-            for record in records {
-                let document = normalize_memo_record(record, base_url)?;
-                report.fetched += 1;
-                match write_bridge_document(&self.config.watch_dir, &document).await? {
-                    WriteStatus::Written => report.written += 1,
-                    WriteStatus::Unchanged => report.skipped += 1,
-                }
-            }
-
-            let next_page_token = data
-                .get("nextPageToken")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned);
-            if next_page_token.is_none() || next_page_token == page_token {
-                break;
-            }
-            page_token = next_page_token;
-        }
-
-        Ok(report)
-    }
-
-    async fn sync_bytestash(&self) -> Result<SyncReport, RagError> {
-        let base_url = required_base_url(&self.config, McpSource::Bytestash)?;
-        let data = self
-            .call_data(McpSource::Bytestash, "snippets.list", serde_json::json!({}))
-            .await?;
-        let records = if let Some(array) = data.as_array() {
-            array.iter().collect::<Vec<_>>()
-        } else {
-            array_field(&data, "snippets")?
-        };
-
-        let mut report = SyncReport::default();
-        for record in records {
-            let document = normalize_bytestash_record(record, base_url)?;
-            report.fetched += 1;
-            match write_bridge_document(&self.config.watch_dir, &document).await? {
-                WriteStatus::Written => report.written += 1,
-                WriteStatus::Unchanged => report.skipped += 1,
-            }
-        }
-
-        Ok(report)
-    }
-
-    async fn sync_paperless(&self) -> Result<SyncReport, RagError> {
-        let base_url = required_base_url(&self.config, McpSource::Paperless)?;
-        let tag_names = self.fetch_paperless_lookup("tags.list").await?;
-        let correspondent_names = self.fetch_paperless_lookup("correspondents.list").await?;
-        let mut report = SyncReport::default();
-        let mut page = 1_u32;
-
-        loop {
-            let data = self
-                .call_data(
-                    McpSource::Paperless,
-                    "documents.list",
-                    serde_json::json!({
-                        "page_size": self.config.page_size,
-                        "page": page,
-                    }),
-                )
-                .await?;
-            let records = array_field(&data, "results")?;
-            if records.is_empty() {
-                break;
-            }
-
-            for record in records {
-                let document =
-                    normalize_paperless_record(record, &tag_names, &correspondent_names, base_url)?;
-                report.fetched += 1;
-                match write_bridge_document(&self.config.watch_dir, &document).await? {
-                    WriteStatus::Written => report.written += 1,
-                    WriteStatus::Unchanged => report.skipped += 1,
-                }
-            }
-
-            if data.get("next").is_none() || data.get("next").is_some_and(Value::is_null) {
-                break;
-            }
-            page = page.saturating_add(1);
-        }
-
-        Ok(report)
-    }
-
-    async fn call_data(
+    pub(self) async fn call_data(
         &self,
         source: McpSource,
         action: &str,
@@ -313,279 +115,13 @@ where
             .await?;
         extract_mcporter_data(raw)
     }
-
-    async fn fetch_paperless_lookup(&self, action: &str) -> Result<HashMap<u64, String>, RagError> {
-        let data = self
-            .call_data(McpSource::Paperless, action, serde_json::json!({}))
-            .await?;
-        let items = if let Some(array) = data.as_array() {
-            array.iter().collect::<Vec<_>>()
-        } else {
-            array_field(&data, "results")?
-        };
-        let mut lookup = HashMap::new();
-        for item in items {
-            let Some(id) = item.get("id").and_then(as_u64) else {
-                continue;
-            };
-            let Some(name) = item.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            lookup.insert(id, name.to_string());
-        }
-        Ok(lookup)
-    }
 }
 
-pub fn relative_output_path(source: McpSource, external_id: &str) -> PathBuf {
-    PathBuf::from("mcp").join(source.as_str()).join(format!(
-        "{}-{:016x}.json",
-        sanitize_component(external_id),
-        stable_component_hash(external_id)
-    ))
-}
+// ---------------------------------------------------------------------------
+// Shared helper functions (used by platform submodules via `use super::...`)
+// ---------------------------------------------------------------------------
 
-pub async fn write_bridge_document(
-    root: &Path,
-    document: &BridgeDocument,
-) -> Result<WriteStatus, RagError> {
-    let path = root.join(relative_output_path(document.source, &document.external_id));
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let payload = StoredExtractionResult {
-        extraction: document.extraction.clone(),
-        external_id: Some(document.external_id.clone()),
-        platform_url: document.platform_url.clone(),
-    };
-    let serialized = serde_json::to_vec_pretty(&payload)?;
-    if tokio::fs::read(&path).await.ok().as_deref() == Some(serialized.as_slice()) {
-        return Ok(WriteStatus::Unchanged);
-    }
-
-    let tmp_path = temp_output_path(&path);
-    tokio::fs::write(&tmp_path, &serialized).await?;
-    tokio::fs::rename(&tmp_path, &path).await?;
-    Ok(WriteStatus::Written)
-}
-
-pub fn normalize_linkding_record(
-    record: &Value,
-    platform_base_url: Option<&str>,
-) -> Result<BridgeDocument, RagError> {
-    let id = required_value(record, "id").and_then(as_u64_value)?;
-    let url = required_string(record, "url")?;
-    let title = optional_string(record, "title");
-    let description = optional_string(record, "description");
-    let notes = optional_string(record, "notes");
-    let markdown = join_non_empty([
-        title.as_deref().map(|value| format!("# {value}")),
-        description.clone(),
-        notes.clone(),
-    ]);
-    let plain_text = join_non_empty([title.clone(), description, notes]);
-    let platform_url = match platform_base_url {
-        Some(base) => Some(linkding_platform_url(base, &url)?),
-        None => None,
-    };
-
-    Ok(BridgeDocument {
-        source: McpSource::Linkding,
-        external_id: format!("linkding:{id}"),
-        platform_url,
-        extraction: build_extraction(
-            url,
-            title,
-            optional_string(record, "date_added"),
-            None,
-            None,
-            string_array(record.get("tag_names")),
-            markdown,
-            plain_text,
-        ),
-    })
-}
-
-pub fn normalize_memo_record(
-    record: &Value,
-    platform_base_url: &str,
-) -> Result<BridgeDocument, RagError> {
-    let name = required_string(record, "name")?;
-    let memo_id = name.strip_prefix("memos/").unwrap_or(&name).to_string();
-    let content = required_string(record, "content")?;
-    let title = first_line_title(&content);
-    let url = join_base_url(platform_base_url, &format!("/api/v1/{name}"))?;
-    let published_date =
-        optional_string(record, "displayTime").or_else(|| optional_string(record, "createTime"));
-
-    Ok(BridgeDocument {
-        source: McpSource::Memos,
-        external_id: format!("memos:{memo_id}"),
-        platform_url: Some(url.clone()),
-        extraction: build_extraction(
-            url,
-            title,
-            published_date,
-            None,
-            None,
-            string_array(record.get("tags")),
-            content.clone(),
-            content,
-        ),
-    })
-}
-
-pub fn normalize_bytestash_record(
-    record: &Value,
-    platform_base_url: &str,
-) -> Result<BridgeDocument, RagError> {
-    let id = required_string(record, "id")?;
-    let title = optional_string(record, "title");
-    let description = optional_string(record, "description");
-    let language = optional_string(record, "language");
-    let fragments = record
-        .get("fragments")
-        .and_then(Value::as_array)
-        .ok_or_else(|| RagError::Parse("bytestash record missing fragments array".to_string()))?;
-
-    let mut markdown_parts = Vec::new();
-    if let Some(value) = title.as_deref() {
-        markdown_parts.push(format!("# {value}"));
-    }
-    if let Some(value) = description.as_deref() {
-        markdown_parts.push(value.to_string());
-    }
-    for fragment in fragments {
-        let file_name = fragment
-            .get("fileName")
-            .or_else(|| fragment.get("file_name"))
-            .and_then(Value::as_str)
-            .unwrap_or("snippet");
-        let code = fragment
-            .get("code")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        markdown_parts.push(format!(
-            "## {file_name}\n```{}\n{}\n```",
-            language.clone().unwrap_or_default(),
-            code
-        ));
-    }
-    let plain_text = join_non_empty([
-        title.clone(),
-        description.clone(),
-        Some(
-            fragments
-                .iter()
-                .filter_map(|fragment| fragment.get("code").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-        ),
-    ]);
-    let url = join_base_url(platform_base_url, &format!("/api/snippets/{id}"))?;
-
-    Ok(BridgeDocument {
-        source: McpSource::Bytestash,
-        external_id: format!("bytestash:{id}"),
-        platform_url: Some(url.clone()),
-        extraction: build_extraction(
-            url,
-            title,
-            None,
-            None,
-            language,
-            string_array(record.get("categories")),
-            markdown_parts.join("\n\n"),
-            plain_text,
-        ),
-    })
-}
-
-pub fn normalize_paperless_record(
-    record: &Value,
-    tag_names: &std::collections::HashMap<u64, String>,
-    correspondent_names: &std::collections::HashMap<u64, String>,
-    platform_base_url: &str,
-) -> Result<BridgeDocument, RagError> {
-    let id = required_value(record, "id").and_then(as_u64_value)?;
-    let tags = record
-        .get("tags")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(as_u64)
-                .filter_map(|value| tag_names.get(&value).cloned())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let author = record
-        .get("correspondent")
-        .and_then(as_u64)
-        .and_then(|value| correspondent_names.get(&value).cloned());
-    let title = optional_string(record, "title");
-    let content = optional_string(record, "content").unwrap_or_default();
-    let url = join_base_url(platform_base_url, &format!("/api/documents/{id}/"))?;
-
-    Ok(BridgeDocument {
-        source: McpSource::Paperless,
-        external_id: format!("paperless:{id}"),
-        platform_url: Some(url.clone()),
-        extraction: build_extraction(
-            url,
-            title,
-            optional_string(record, "created").or_else(|| optional_string(record, "created_date")),
-            author,
-            None,
-            tags,
-            content.clone(),
-            content,
-        ),
-    })
-}
-
-fn sanitize_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
-            _ => '_',
-        })
-        .collect()
-}
-
-fn stable_component_hash(value: &str) -> u64 {
-    use std::hash::{DefaultHasher, Hasher};
-    let mut hasher = DefaultHasher::new();
-    hasher.write(value.as_bytes());
-    hasher.finish()
-}
-
-fn temp_output_path(path: &Path) -> PathBuf {
-    let suffix = format!(
-        "tmp-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    );
-    path.with_extension(format!("json.{suffix}"))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct StoredExtractionResult {
-    #[serde(flatten)]
-    extraction: ExtractionResult,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    external_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    platform_url: Option<String>,
-}
-
-fn count_words(value: &str) -> usize {
-    value.split_whitespace().count()
-}
-
-fn extract_mcporter_data(raw: Value) -> Result<Value, RagError> {
+pub(super) fn extract_mcporter_data(raw: Value) -> Result<Value, RagError> {
     let ok = raw.get("ok").and_then(Value::as_bool).unwrap_or(true);
     if ok {
         raw.get("data")
@@ -601,7 +137,7 @@ fn extract_mcporter_data(raw: Value) -> Result<Value, RagError> {
     }
 }
 
-fn array_field<'a>(value: &'a Value, key: &str) -> Result<Vec<&'a Value>, RagError> {
+pub(super) fn array_field<'a>(value: &'a Value, key: &str) -> Result<Vec<&'a Value>, RagError> {
     value
         .get(key)
         .and_then(Value::as_array)
@@ -609,13 +145,16 @@ fn array_field<'a>(value: &'a Value, key: &str) -> Result<Vec<&'a Value>, RagErr
         .ok_or_else(|| RagError::Parse(format!("expected array field {key}")))
 }
 
-fn required_base_url(config: &BridgeConfig, source: McpSource) -> Result<&str, RagError> {
+pub(super) fn required_base_url(
+    config: &BridgeConfig,
+    source: McpSource,
+) -> Result<&str, RagError> {
     config.platform_base_url.as_deref().ok_or_else(|| {
         RagError::Config(format!("{} requires --platform-base-url", source.as_str()))
     })
 }
 
-fn join_base_url(base: &str, path: &str) -> Result<String, RagError> {
+pub(super) fn join_base_url(base: &str, path: &str) -> Result<String, RagError> {
     let base = base.trim_end_matches('/');
     let url = format!("{base}{path}");
     Url::parse(&url)
@@ -623,30 +162,13 @@ fn join_base_url(base: &str, path: &str) -> Result<String, RagError> {
         .map_err(|e| RagError::Parse(format!("invalid base URL {base:?}: {e}")))
 }
 
-fn linkding_platform_url(base: &str, bookmark_url: &str) -> Result<String, RagError> {
-    let mut url = Url::parse(base)
-        .map_err(|e| RagError::Parse(format!("invalid linkding base URL {base:?}: {e}")))?;
-    let current_path = url.path().trim_end_matches('/');
-    let next_path = if current_path.is_empty() {
-        "/bookmarks".to_string()
-    } else {
-        format!("{current_path}/bookmarks")
-    };
-    url.set_path(&next_path);
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("q", bookmark_url)
-        .finish();
-    url.set_query(Some(&query));
-    Ok(url.to_string())
-}
-
-fn required_value<'a>(value: &'a Value, key: &str) -> Result<&'a Value, RagError> {
+pub(super) fn required_value<'a>(value: &'a Value, key: &str) -> Result<&'a Value, RagError> {
     value
         .get(key)
         .ok_or_else(|| RagError::Parse(format!("missing required field {key}")))
 }
 
-fn required_string(value: &Value, key: &str) -> Result<String, RagError> {
+pub(super) fn required_string(value: &Value, key: &str) -> Result<String, RagError> {
     value
         .get(key)
         .and_then(Value::as_str)
@@ -654,24 +176,24 @@ fn required_string(value: &Value, key: &str) -> Result<String, RagError> {
         .ok_or_else(|| RagError::Parse(format!("missing required string field {key}")))
 }
 
-fn optional_string(value: &Value, key: &str) -> Option<String> {
+pub(super) fn optional_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
 }
 
-fn as_u64(value: &Value) -> Option<u64> {
+pub(super) fn as_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
 }
 
-fn as_u64_value(value: &Value) -> Result<u64, RagError> {
+pub(super) fn as_u64_value(value: &Value) -> Result<u64, RagError> {
     as_u64(value).ok_or_else(|| RagError::Parse("expected integer id".to_string()))
 }
 
-fn string_array(value: Option<&Value>) -> Vec<String> {
+pub(super) fn string_array(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
         .map(|items| {
@@ -689,7 +211,7 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn join_non_empty<I>(parts: I) -> String
+pub(super) fn join_non_empty<I>(parts: I) -> String
 where
     I: IntoIterator<Item = Option<String>>,
 {
@@ -702,60 +224,12 @@ where
         .join("\n\n")
 }
 
-fn first_line_title(content: &str) -> Option<String> {
+pub(super) fn first_line_title(content: &str) -> Option<String> {
     content
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| line.chars().take(80).collect::<String>())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_extraction(
-    url: String,
-    title: Option<String>,
-    published_date: Option<String>,
-    author: Option<String>,
-    language: Option<String>,
-    technologies: Vec<String>,
-    markdown: String,
-    plain_text: String,
-) -> ExtractionResult {
-    ExtractionResult {
-        metadata: Metadata {
-            title,
-            description: None,
-            author,
-            published_date,
-            language,
-            url: Some(url),
-            site_name: None,
-            image: None,
-            favicon: None,
-            word_count: count_words(&plain_text),
-            content_hash: None,
-            source_type: Some("mcp".to_string()),
-            file_path: None,
-            last_modified: None,
-            is_truncated: None,
-            technologies,
-            seed_url: None,
-            crawl_depth: None,
-            search_query: None,
-            fetched_at: None,
-        },
-        content: Content {
-            markdown,
-            plain_text,
-            links: Vec::new(),
-            images: Vec::new(),
-            code_blocks: Vec::new(),
-            raw_html: None,
-        },
-        domain_data: None,
-        vertical_data: None,
-        structured_data: Vec::new(),
-    }
 }
 
 #[cfg(test)]
@@ -997,7 +471,7 @@ mod tests {
             platform_url: Some(
                 "https://ding.tootie.tv/bookmarks?q=https%3A%2F%2Fpipenet.dev%2F".to_string(),
             ),
-            extraction: build_extraction(
+            extraction: io::build_extraction(
                 "https://pipenet.dev/".to_string(),
                 Some("pipenet".to_string()),
                 Some("2026-02-02T15:23:27.821564-05:00".to_string()),

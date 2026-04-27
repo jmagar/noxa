@@ -47,6 +47,19 @@ pub(crate) fn has_indexable_extension(path: &Path) -> bool {
 /// temp files that are gone by the time we process them.
 ///
 /// Deferred (no confirmed use case, would add new crate deps): .epub, .mbox
+///
+/// # Symlink safety (TOCTOU note)
+///
+/// `path.is_file()` follows symlinks: it returns `true` for a symlink whose target is a
+/// regular file. Callers that care about confinement must guard against this with an
+/// explicit `path.is_symlink()` check **before** calling `is_indexable`. See
+/// [`collect_indexable_paths_recursive`] for the canonical call-site pattern (lines 79–82).
+///
+/// This function itself does **not** skip symlinks — that would require two `stat` calls
+/// per entry and the function predates the confinement requirement. The authoritative
+/// defence-in-depth is the `canonicalize + starts_with(watch_root)` confinement check
+/// inside `process_job`, which runs unconditionally regardless of how the path was
+/// discovered.
 pub(crate) fn is_indexable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -90,6 +103,10 @@ fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
 
 /// Compute the (content_hash, url) key used by the startup delta scan.
 ///
+/// `max_json_bytes` caps JSON deserialization to prevent unbounded heap allocation before
+/// pipeline workers start. Pass `pipeline.max_file_size_bytes` from the caller so the
+/// limit stays in sync with the per-job guard in `process_job`.
+///
 /// For `.json` ExtractionResult files: peeks at `metadata.url` and `metadata.content_hash`
 /// from inside the JSON (fast, avoids full deserialisation of large markdown content).
 /// Falls back to file:// URL + `mtime:<secs>:<size>` if the JSON lacks a URL.
@@ -98,12 +115,12 @@ fn collect_indexable_paths_recursive(path: &Path, found: &mut Vec<PathBuf>) {
 /// O(stat) dedup key. Collisions cause re-indexing (not data loss), which is acceptable
 /// versus re-reading and hashing every file on startup.
 ///
-/// Returns `None` when the path is a symlink (confinement-safety: avoid following symlinks
-/// out of the watch roots before `process_job` validates confinement), or when the file
-/// metadata cannot be read, or when a file:// URL cannot be constructed.
+/// Returns `None` when the path is a symlink, metadata cannot be read, a file:// URL
+/// cannot be constructed, or a `.json` file exceeds `max_json_bytes` (file is still
+/// queued unconditionally and rejected by `process_job` under its own guard).
 ///
 /// Must be called inside `spawn_blocking` — this function reads from disk synchronously.
-pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
+pub(crate) fn startup_scan_key(path: &Path, max_json_bytes: u64) -> Option<(String, String)> {
     // Security: skip symlinks to avoid following links out of watch roots before
     // confinement validation runs in process_job. Mirrors the symlink skip in
     // collect_indexable_paths_recursive.
@@ -114,6 +131,18 @@ pub(crate) fn startup_scan_key(path: &Path) -> Option<(String, String)> {
     }
 
     if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        // Guard against unbounded heap allocation: serde_json::from_reader will read the
+        // full JSON value into memory. Reuse sym_meta (already fetched above) to avoid an
+        // extra stat syscall — for non-symlinks, symlink_metadata.len() == metadata.len().
+        if sym_meta.len() > max_json_bytes {
+            tracing::debug!(
+                path = %path.display(),
+                size = sym_meta.len(),
+                limit = max_json_bytes,
+                "startup_scan_key: JSON file exceeds size limit, queuing unconditionally"
+            );
+            return None;
+        }
         #[derive(serde::Deserialize)]
         struct Q {
             metadata: QM,
@@ -453,13 +482,13 @@ mod tests {
 
         // Symlink must return None — do not read its target bytes.
         assert_eq!(
-            startup_scan_key(&link),
+            startup_scan_key(&link, 50 * 1024 * 1024),
             None,
             "symlinks must be skipped to prevent reading files outside watch roots"
         );
 
         // Regular file still produces a key.
-        assert!(startup_scan_key(&target).is_some());
+        assert!(startup_scan_key(&target, 50 * 1024 * 1024).is_some());
     }
 
     #[test]
@@ -468,7 +497,7 @@ mod tests {
         let file = tmp.path().join("doc.md");
         fs::write(&file, "hello world").expect("write file");
 
-        let (hash, url) = startup_scan_key(&file).expect("key for md file");
+        let (hash, url) = startup_scan_key(&file, 50 * 1024 * 1024).expect("key for md file");
         assert!(
             hash.starts_with("mtime:"),
             "non-JSON key should be mtime-based, got: {hash}"
@@ -483,12 +512,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("doc.txt");
         fs::write(&file, "one").expect("write v1");
-        let (k1, _) = startup_scan_key(&file).expect("v1 key");
+        let (k1, _) = startup_scan_key(&file, 50 * 1024 * 1024).expect("v1 key");
 
         // Different size ensures the size component changes, so even if mtime
         // resolution is 1s and the test runs faster than that, the key still differs.
         fs::write(&file, "two two two").expect("write v2");
-        let (k2, _) = startup_scan_key(&file).expect("v2 key");
+        let (k2, _) = startup_scan_key(&file, 50 * 1024 * 1024).expect("v2 key");
 
         assert_ne!(k1, k2, "key must change when file size changes");
     }
@@ -500,7 +529,7 @@ mod tests {
         let body = r#"{"metadata":{"url":"https://example.com/a","content_hash":"abc123"}}"#;
         fs::write(&file, body).expect("write json");
 
-        let (hash, url) = startup_scan_key(&file).expect("json key");
+        let (hash, url) = startup_scan_key(&file, 50 * 1024 * 1024).expect("json key");
         assert_eq!(hash, "abc123");
         assert_eq!(url, "https://example.com/a");
     }
@@ -512,8 +541,56 @@ mod tests {
         // No url inside metadata -> falls through to file:// + mtime:size.
         fs::write(&file, r#"{"metadata":{"content_hash":"x"}}"#).expect("write json");
 
-        let (hash, url) = startup_scan_key(&file).expect("json fallback key");
+        let (hash, url) = startup_scan_key(&file, 50 * 1024 * 1024).expect("json fallback key");
         assert!(hash.starts_with("mtime:"), "fallback hash: {hash}");
         assert!(url.starts_with("file://"), "fallback url: {url}");
+    }
+
+    #[test]
+    fn startup_scan_key_large_json_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("big.json");
+
+        // Use a sparse file (set_len without writing data) to create a >1 KiB
+        // file instantly. We use a small limit (1024) to avoid touching the real
+        // 50 MiB default — the guard logic is identical regardless of the limit value.
+        const LIMIT: u64 = 1024;
+        {
+            let f = std::fs::File::create(&file).expect("create big.json");
+            f.set_len(LIMIT + 1).expect("set_len for sparse file");
+        }
+
+        assert_eq!(
+            startup_scan_key(&file, LIMIT),
+            None,
+            "JSON file exceeding the limit must return None"
+        );
+    }
+
+    #[test]
+    fn startup_scan_key_json_at_size_limit_is_processed() {
+        // A file exactly AT the limit (len == limit, so `len > limit` is false)
+        // must still be attempted. We set the file to exactly LIMIT bytes.
+        const LIMIT: u64 = 1024;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("doc.json");
+        let body = r#"{"metadata":{"url":"https://example.com/b","content_hash":"def456"}}"#;
+        fs::write(&file, body).expect("write json");
+
+        // Extend the file to exactly LIMIT bytes with null padding (sparse).
+        {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .expect("open");
+            f.set_len(LIMIT).expect("set_len");
+        }
+
+        // The guard is `len > limit`, so len == limit must NOT return None.
+        // JSON parsing will fail (trailing nulls), so we expect Some with a mtime key.
+        assert!(
+            startup_scan_key(&file, LIMIT).is_some(),
+            "file at exactly the limit must not be rejected by the size guard"
+        );
     }
 }

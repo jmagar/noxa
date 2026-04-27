@@ -32,7 +32,7 @@ pub(crate) fn parse_ipynb_file(
     }
 
     let text = parts.join("\n\n");
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     Ok(ParsedFile {
         extraction: make_text_result(text.clone(), text, url, Some(title), "notebook", word_count),
         provenance: IngestionProvenance::default(),
@@ -63,7 +63,7 @@ pub(crate) fn parse_json_file(
 
 pub(crate) fn parse_markdown_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    let word_count = content.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&content);
     ParsedFile {
         extraction: make_text_result(
             content,
@@ -79,7 +79,7 @@ pub(crate) fn parse_markdown_file(bytes: Vec<u8>, file_url: String, title: Strin
 
 pub(crate) fn parse_plain_text_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    let word_count = content.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&content);
     ParsedFile {
         extraction: make_text_result(
             content.clone(),
@@ -96,7 +96,7 @@ pub(crate) fn parse_plain_text_file(bytes: Vec<u8>, file_url: String, title: Str
 pub(crate) fn parse_log_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
     let raw = String::from_utf8_lossy(&bytes).into_owned();
     let stripped = strip_ansi_escapes::strip_str(&raw);
-    let word_count = stripped.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&stripped);
     ParsedFile {
         extraction: make_text_result(
             stripped.clone(),
@@ -110,24 +110,12 @@ pub(crate) fn parse_log_file(bytes: Vec<u8>, file_url: String, title: String) ->
     }
 }
 
-pub(crate) async fn parse_html_file(
-    bytes: Vec<u8>,
-    file_url: String,
-) -> Result<ParsedFile, RagError> {
+pub(crate) fn parse_html_file(bytes: Vec<u8>, file_url: String) -> Result<ParsedFile, RagError> {
     let html = String::from_utf8_lossy(&bytes).into_owned();
-    let url_for_extract = file_url.clone();
-    let extraction = tokio::task::spawn_blocking(
-        move || -> Result<noxa_core::types::ExtractionResult, RagError> {
-            let mut r = noxa_core::extract(&html, Some(&url_for_extract))
-                .map_err(|e| RagError::Parse(format!("HTML extract: {e}")))?;
-            r.metadata.url = Some(url_for_extract);
-            r.metadata.source_type = Some("file".to_string());
-            Ok(r)
-        },
-    )
-    .await
-    .map_err(|e| RagError::Parse(format!("HTML spawn_blocking: {e}")))??;
-
+    let mut extraction = noxa_core::extract(&html, Some(&file_url))
+        .map_err(|e| RagError::Parse(format!("HTML extract: {e}")))?;
+    extraction.metadata.url = Some(file_url);
+    extraction.metadata.source_type = Some("file".to_string());
     Ok(ParsedFile {
         extraction,
         provenance: IngestionProvenance::default(),
@@ -146,7 +134,7 @@ pub(crate) fn parse_jsonl_file(bytes: Vec<u8>, file_url: String, title: String) 
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     ParsedFile {
         extraction: make_text_result(
             text.clone(),
@@ -160,14 +148,40 @@ pub(crate) fn parse_jsonl_file(bytes: Vec<u8>, file_url: String, title: String) 
     }
 }
 
-pub(crate) fn parse_xml_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
+/// Scan the first 8 KiB of bytes for DOCTYPE/ENTITY declarations that could
+/// trigger exponential entity expansion (the "billion laughs" attack). Returns
+/// `true` if such declarations are found.
+///
+/// quick-xml 0.37.x does NOT apply DTD expansion limits, so this pre-scan is
+/// the primary — and not merely defensive — guard against out-of-memory
+/// attacks. Later versions of quick-xml may add limits, but we keep the scan
+/// regardless (defense-in-depth).
+pub(super) fn contains_xml_entity_expansion_risk(bytes: &[u8]) -> bool {
+    let header = &bytes[..bytes.len().min(8192)];
+    // Scan raw bytes so non-UTF-8 sequences cannot silently suppress the guard.
+    // `from_utf8().unwrap_or("")` would return "" on any non-UTF-8 byte in the
+    // window, letting a <!DOCTYPE immediately following binary noise slip through.
+    header.windows(9).any(|w| w == b"<!DOCTYPE") || header.windows(8).any(|w| w == b"<!ENTITY")
+}
+
+pub(crate) fn parse_xml_file(
+    bytes: Vec<u8>,
+    file_url: String,
+    title: String,
+) -> Result<ParsedFile, RagError> {
+    if contains_xml_entity_expansion_risk(&bytes) {
+        return Err(RagError::Parse(
+            "XML entity expansion risk detected: file contains DOCTYPE/ENTITY declarations"
+                .to_string(),
+        ));
+    }
     let content = String::from_utf8_lossy(&bytes).into_owned();
     let text = extract_xml_text(&content).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "xml text extraction failed; falling back to raw text");
         content.clone()
     });
-    let word_count = text.split_whitespace().count();
-    ParsedFile {
+    let word_count = crate::chunker::word_count(&text);
+    Ok(ParsedFile {
         extraction: make_text_result(
             text.clone(),
             text,
@@ -177,7 +191,7 @@ pub(crate) fn parse_xml_file(bytes: Vec<u8>, file_url: String, title: String) ->
             word_count,
         ),
         provenance: IngestionProvenance::default(),
-    }
+    })
 }
 
 /// Extract plain text from XML/OPML/RSS/Atom by collecting all text and CDATA nodes.

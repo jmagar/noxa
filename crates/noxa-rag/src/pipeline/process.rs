@@ -1,7 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
+use dashmap::DashMap;
 use tokio::io::AsyncReadExt;
 
 use crate::error::RagError;
@@ -11,6 +11,29 @@ use crate::types::Point;
 use super::parse;
 use super::scan;
 use super::{DeleteJob, IndexJob, JobStats, WorkerContext};
+
+/// Walk up from `path`'s parent checking each ancestor directory against `cache`.
+///
+/// Returns `Some(branch)` on a cache hit (where the inner `Option<String>` is the stored
+/// branch value — `None` means "not in a git repo"), or `None` when no ancestor is cached.
+///
+/// O(depth) DashMap lookups; typical repo depth ≤ 5, so this avoids a `spawn_blocking`
+/// dispatch for every file after the first in each git repository.
+fn find_cached_branch(
+    path: &Path,
+    cache: &DashMap<PathBuf, Option<String>>,
+) -> Option<Option<String>> {
+    let mut dir = path.parent()?;
+    loop {
+        if let Some(entry) = cache.get(dir) {
+            return Some(entry.clone());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return None,
+        }
+    }
+}
 
 /// Validate that `url` is a permitted indexing target.
 ///
@@ -22,29 +45,29 @@ use super::{DeleteJob, IndexJob, JobStats, WorkerContext};
 /// - All other schemes: rejected.
 pub(crate) async fn validate_url_scheme(url: &str) -> Result<(), RagError> {
     if url.is_empty() {
-        return Err(RagError::Generic(
+        return Err(RagError::UrlValidation(
             "extraction result has no URL".to_string(),
         ));
     }
-    let parsed =
-        url::Url::parse(url).map_err(|e| RagError::Generic(format!("invalid URL {url:?}: {e}")))?;
+    let parsed = url::Url::parse(url)
+        .map_err(|e| RagError::UrlValidation(format!("invalid URL {url:?}: {e}")))?;
 
     match parsed.scheme() {
         "http" | "https" => {
             noxa_store::url_validation::validate_public_http_url(url)
                 .await
-                .map_err(|e| RagError::Generic(format!("URL {url:?} blocked: {e}")))?;
+                .map_err(|e| RagError::UrlValidation(format!("URL {url:?} blocked: {e}")))?;
         }
         "file" => match parsed.host_str() {
             None | Some("") | Some("localhost") => {}
             Some(host) => {
-                return Err(RagError::Generic(format!(
+                return Err(RagError::UrlValidation(format!(
                     "file:// URL with remote host {host:?} is not allowed (only local paths)"
                 )));
             }
         },
         other => {
-            return Err(RagError::Generic(format!(
+            return Err(RagError::UrlValidation(format!(
                 "URL scheme {other:?} is not allowed (only http/https/file)"
             )));
         }
@@ -64,7 +87,7 @@ pub(crate) async fn validate_url_scheme(url: &str) -> Result<(), RagError> {
 async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, ctx: &WorkerContext) {
     // Increment the parse-failure counter regardless of whether a log path is
     // configured — this ensures the heartbeat metric is always accurate.
-    ctx.counters.parse_failures.fetch_add(1, Ordering::Relaxed);
+    ctx.counters.record_parse_failure();
 
     let Some(ref log_path) = ctx.config.pipeline.failed_jobs_log else {
         return;
@@ -119,7 +142,7 @@ async fn append_failed_job(path: &Path, error: &impl std::fmt::Display, ctx: &Wo
 pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<JobStats, RagError> {
     let job_start = std::time::Instant::now();
 
-    let t0 = std::time::Instant::now();
+    let io_t0 = std::time::Instant::now();
     // Canonicalize can fail for benign reasons — most commonly ENOENT when the
     // file was deleted between the watcher event and job execution. That's a
     // race, not a backend failure, so we must NOT return `Err` (which would
@@ -147,6 +170,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             path = %job.path.display(),
             "path outside watch_dir — skipping (potential TOCTOU attack)"
         );
+        ctx.counters.record_failure();
         return Ok(JobStats::default());
     }
     let file = tokio::fs::File::open(&canonical).await?;
@@ -169,11 +193,12 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
         tracing::warn!(path = ?job.path, max_file_bytes, "file exceeded size limit after read (grow-after-stat), skipping");
         return Ok(JobStats::default());
     }
-    let parse_ms = t0.elapsed().as_millis() as u64;
+    let io_ms = io_t0.elapsed().as_millis() as u64;
 
     // Compute xxHash3 of raw bytes before file_bytes is moved into parse_file.
     let file_hash = format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&file_bytes));
 
+    let parse_t0 = std::time::Instant::now();
     let parsed = match parse::parse_file(&job.path, file_bytes).await {
         Ok(r) => r,
         Err(e) => {
@@ -182,6 +207,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             return Ok(JobStats::default());
         }
     };
+    let parse_ms = parse_t0.elapsed().as_millis() as u64;
     let mut result = parsed.extraction;
 
     if result.metadata.file_path.is_none() {
@@ -193,18 +219,36 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
         result.metadata.last_modified =
             Some(chrono::DateTime::<chrono::Utc>::from(mtime).to_rfc3339());
     }
-    let git_branch = {
-        let path = job.path.clone();
+    let git_branch = if let Some(cached) = find_cached_branch(&canonical, &ctx.git_branch_cache) {
+        // Cache hit — no spawn_blocking needed. `canonical` ancestors were walked
+        // synchronously in async context (pure in-memory DashMap lookups, no I/O).
+        cached
+    } else {
+        // Cache miss — dispatch to a blocking thread to read .git/HEAD from disk.
+        // Store the result keyed by the canonical git root so future files in the
+        // same repo hit the pre-check without spawning.
+        let canonical_clone = canonical.clone();
         let cache = ctx.git_branch_cache.clone();
         tokio::task::spawn_blocking(move || {
-            // Walk up to find the git root first so we can use it as a stable cache key.
-            if let Some((git_root, branch)) = scan::detect_git_root_and_branch(&path) {
+            if let Some((git_root, branch)) = scan::detect_git_root_and_branch(&canonical_clone) {
+                // Canonicalize the git root so subsequent lookups via `canonical`
+                // ancestors always match, regardless of symlinks or path normalization.
+                let key = std::fs::canonicalize(&git_root).unwrap_or(git_root);
                 cache
-                    .entry(git_root)
+                    .entry(key)
                     .or_insert_with(|| Some(branch.clone()))
                     .clone()
             } else {
-                None
+                // Cache the miss so we don't re-stat .git for every file outside a repo.
+                let key =
+                    std::fs::canonicalize(canonical_clone.parent().unwrap_or(&canonical_clone))
+                        .unwrap_or_else(|_| {
+                            canonical_clone
+                                .parent()
+                                .unwrap_or(&canonical_clone)
+                                .to_path_buf()
+                        });
+                cache.entry(key).or_insert(None).clone()
             }
         })
         .await
@@ -228,9 +272,6 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
     let result = Arc::new(result);
 
     let t1 = std::time::Instant::now();
-    // KNOWLEDGE: chunker tokenization is CPU-bound (HuggingFace BPE). Wrap in
-    // spawn_blocking to avoid blocking async Tokio worker threads — same pattern
-    // as parse/mod.rs for PDF/DOCX. See bead noxa-3fi.2.
     let chunks = {
         let result_for_chunk = Arc::clone(&result);
         let config_chunker = ctx.config.chunker.clone();
@@ -239,7 +280,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             crate::chunker::chunk(&result_for_chunk, &config_chunker, &tokenizer)
         })
         .await
-        .map_err(|e| RagError::Generic(format!("chunker panicked: {e}")))?
+        .map_err(|e| RagError::WorkerPanic(format!("chunker panicked: {e}")))?
     };
     if chunks.is_empty() {
         tracing::info!(url = %url, "no indexable content after chunking");
@@ -274,9 +315,13 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
     }
 
     let n_chunks = chunks.len();
+    // Build per-file metadata once; chunk loop clones from it instead of from
+    // result + provenance on every iteration (bead noxa-346).
+    let file_meta =
+        parse::FileMetadata::from_result_and_provenance(&result, git_branch, &parsed.provenance);
     let points: Vec<Point> = chunks
-        .iter()
-        .zip(vectors)
+        .into_iter()
+        .zip(vectors.into_iter())
         .enumerate()
         .map(|(i, (chunk, vector))| {
             let id = uuid::Uuid::new_v5(
@@ -286,14 +331,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
             Point {
                 id,
                 vector,
-                payload: parse::build_point_payload(
-                    chunk,
-                    &result,
-                    git_branch.clone(),
-                    &parsed.provenance,
-                    &url,
-                    Some(&file_hash),
-                ),
+                payload: parse::build_point_payload(chunk, &file_meta, &url, Some(&file_hash)),
             }
         })
         .collect();
@@ -338,6 +376,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
                 chunks = upserted,
                 embed_tokens = total_tokens,
                 embed_tokens_per_sec,
+                io_ms,
                 parse_ms,
                 chunk_ms,
                 embed_ms,
@@ -364,6 +403,7 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
 
     Ok(JobStats {
         chunks: n_chunks,
+        io_ms,
         parse_ms,
         chunk_ms,
         embed_ms,
