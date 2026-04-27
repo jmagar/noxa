@@ -275,9 +275,6 @@ pub(crate) async fn process_job(job: IndexJob, ctx: &WorkerContext) -> Result<Jo
     let result = Arc::new(result);
 
     let t1 = std::time::Instant::now();
-    // KNOWLEDGE: chunker tokenization is CPU-bound (HuggingFace BPE). Wrap in
-    // spawn_blocking to avoid blocking async Tokio worker threads — same pattern
-    // as parse/mod.rs for PDF/DOCX. See bead noxa-3fi.2.
     let chunks = {
         let result_for_chunk = Arc::clone(&result);
         let config_chunker = ctx.config.chunker.clone();

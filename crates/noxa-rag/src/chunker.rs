@@ -6,7 +6,7 @@ use crate::config::ChunkerConfig;
 use crate::types::Chunk;
 
 /// Count whitespace-separated words in a string.
-fn word_count(s: &str) -> usize {
+pub(crate) fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
@@ -110,9 +110,6 @@ pub fn chunk(
         .into_iter()
         .enumerate()
         .map(|(chunk_index, (char_offset, text))| {
-            // Use word count as a cheap approximation for the diagnostic token_estimate
-            // field. The tokenizer is already used by the splitter for boundary accuracy;
-            // re-encoding every chunk here would double tokenization work on the hot path.
             let t_est = word_count(&text);
             let section_header = nearest_heading(&headings, char_offset).map(|s| s.to_string());
             Chunk {
@@ -132,45 +129,17 @@ pub fn chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noxa_core::types::{Content, Metadata};
     use std::str::FromStr as _;
 
     fn make_extraction_result(markdown: &str) -> ExtractionResult {
-        ExtractionResult {
-            metadata: Metadata {
-                title: None,
-                description: None,
-                author: None,
-                published_date: None,
-                language: None,
-                url: Some("https://example.com/test".to_string()),
-                site_name: None,
-                image: None,
-                favicon: None,
-                word_count: markdown.split_whitespace().count(),
-                content_hash: None,
-                source_type: None,
-                file_path: None,
-                last_modified: None,
-                is_truncated: None,
-                technologies: Vec::new(),
-                seed_url: None,
-                crawl_depth: None,
-                search_query: None,
-                fetched_at: None,
-            },
-            content: Content {
-                markdown: markdown.to_string(),
-                plain_text: String::new(),
-                links: Vec::new(),
-                images: Vec::new(),
-                code_blocks: Vec::new(),
-                raw_html: None,
-            },
-            domain_data: None,
-            vertical_data: None,
-            structured_data: Vec::new(),
-        }
+        crate::pipeline::parse::make_text_result(
+            markdown.to_string(),
+            String::new(),
+            "https://example.com/test".to_string(),
+            None,
+            "test",
+            crate::chunker::word_count(markdown),
+        )
     }
 
     /// Build a minimal whitespace-pretokenized WordLevel tokenizer suitable for

@@ -12,7 +12,7 @@ pub(crate) fn parse_pdf_file(
     let result = noxa_pdf::extract_pdf(bytes, noxa_pdf::PdfMode::Auto)
         .map_err(|e| RagError::Parse(format!("PDF extract: {e}")))?;
     let text = noxa_pdf::to_markdown(&result);
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     Ok(ParsedFile {
         extraction: make_text_result(text.clone(), text, url, Some(title), "file", word_count),
         provenance: IngestionProvenance::default(),
@@ -189,7 +189,7 @@ pub(crate) fn parse_office_zip_file(
     }
 
     let text = text_parts.join("\n\n");
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     let extraction = make_text_result(text.clone(), text, url, Some(title), "file", word_count);
     let provenance = if ext == "pptx" {
         IngestionProvenance {

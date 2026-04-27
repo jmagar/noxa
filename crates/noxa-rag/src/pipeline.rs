@@ -11,7 +11,7 @@ use crate::error::RagError;
 use crate::store::DynVectorStore;
 
 mod heartbeat;
-mod parse;
+pub(crate) mod parse;
 mod process;
 mod runtime;
 mod scan;

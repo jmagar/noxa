@@ -40,7 +40,7 @@ pub(crate) fn parse_subtitle_file(bytes: Vec<u8>, file_url: String, title: Strin
     let content = String::from_utf8_lossy(&bytes).into_owned();
     let text = strip_subtitle_timestamps(&content);
     let provenance = subtitle_provenance(&content);
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     ParsedFile {
         extraction: make_text_result(
             text.clone(),
@@ -101,7 +101,7 @@ fn parse_email_text(
                 .params
                 .contains_key("filename")
     });
-    let word_count = body.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&body);
 
     let mut extraction =
         make_text_result(body.clone(), body, file_url, subject, "email", word_count);
@@ -195,7 +195,7 @@ fn parse_feed_text(
         parts.push(extract_xml_text(content).unwrap_or_else(|_| content.to_string()));
     }
     let text = parts.join("\n\n");
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
 
     let mut extraction = make_text_result(
         text.clone(),

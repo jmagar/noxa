@@ -32,7 +32,7 @@ pub(crate) fn parse_ipynb_file(
     }
 
     let text = parts.join("\n\n");
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     Ok(ParsedFile {
         extraction: make_text_result(text.clone(), text, url, Some(title), "notebook", word_count),
         provenance: IngestionProvenance::default(),
@@ -63,7 +63,7 @@ pub(crate) fn parse_json_file(
 
 pub(crate) fn parse_markdown_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    let word_count = content.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&content);
     ParsedFile {
         extraction: make_text_result(
             content,
@@ -79,7 +79,7 @@ pub(crate) fn parse_markdown_file(bytes: Vec<u8>, file_url: String, title: Strin
 
 pub(crate) fn parse_plain_text_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    let word_count = content.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&content);
     ParsedFile {
         extraction: make_text_result(
             content.clone(),
@@ -96,7 +96,7 @@ pub(crate) fn parse_plain_text_file(bytes: Vec<u8>, file_url: String, title: Str
 pub(crate) fn parse_log_file(bytes: Vec<u8>, file_url: String, title: String) -> ParsedFile {
     let raw = String::from_utf8_lossy(&bytes).into_owned();
     let stripped = strip_ansi_escapes::strip_str(&raw);
-    let word_count = stripped.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&stripped);
     ParsedFile {
         extraction: make_text_result(
             stripped.clone(),
@@ -137,7 +137,7 @@ pub(crate) fn parse_jsonl_file(bytes: Vec<u8>, file_url: String, title: String) 
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     ParsedFile {
         extraction: make_text_result(
             text.clone(),
@@ -182,7 +182,7 @@ pub(crate) fn parse_xml_file(
         tracing::warn!(error = %e, "xml text extraction failed; falling back to raw text");
         content.clone()
     });
-    let word_count = text.split_whitespace().count();
+    let word_count = crate::chunker::word_count(&text);
     Ok(ParsedFile {
         extraction: make_text_result(
             text.clone(),

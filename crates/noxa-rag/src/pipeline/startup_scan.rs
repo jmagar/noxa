@@ -54,16 +54,7 @@ pub(super) fn spawn_startup_scan(
         let skipped = Arc::new(AtomicUsize::new(0));
         let backend_errors = Arc::new(AtomicUsize::new(0));
 
-        // Batch paths into groups of STARTUP_SCAN_BATCH before dispatching to the blocking
-        // thread pool. This reduces per-task scheduler overhead from O(N) spawn_blocking calls
-        // (one per file) to O(N / STARTUP_SCAN_BATCH) calls, saving ~2–5µs per file on large
-        // startup scans while keeping cancellation latency bounded to one batch worth of work.
-        let batches: Vec<Vec<PathBuf>> = paths
-            .chunks(STARTUP_SCAN_BATCH)
-            .map(|c| c.to_vec())
-            .collect();
-
-        stream::iter(batches)
+        stream::iter(paths.chunks(STARTUP_SCAN_BATCH).map(|c| c.to_vec()))
             .for_each_concurrent(scan_concurrency, |batch| {
                 let tx = tx.clone();
                 let store = store.clone();
